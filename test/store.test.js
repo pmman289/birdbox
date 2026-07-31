@@ -1,0 +1,188 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { InventoryStore } from "../src/store.js";
+
+test("migrates node-level BGP settings and advertised prefixes to schema v17", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  await fs.mkdir(dataDir);
+  await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify({
+    version: 2,
+    nodes: [{
+      id: "local",
+      name: "Local",
+      transport: "local",
+      routerId: "192.0.2.1",
+      address: "192.0.2.10",
+      asn: 65001,
+      listenPort: 11790,
+    }],
+    peers: [{ id: "peer_one", nodeId: "local", name: "Peer", address: "192.0.2.2", asn: 65002, port: 179 }],
+    sessions: [{
+      id: "session_one",
+      nodeId: "local",
+      peerId: "peer_one",
+      protocolName: "peer_bgp",
+      advertisePrefix: "10.10.0.0/16",
+      multihop: true,
+      enabled: true,
+    }],
+  }));
+
+  const store = new InventoryStore({
+    dataDir,
+    nodesPath: path.join(root, "unused-nodes.json"),
+    legacySessionPath: path.join(dataDir, "session.json"),
+  });
+  const state = await store.read();
+  const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"), "utf8"));
+
+  assert.equal(state.version, 17);
+  assert.equal(state.nodes[0].address, undefined);
+  assert.equal(state.nodes[0].asn, undefined);
+  assert.equal(state.sessions[0].localAddress, "192.0.2.10");
+  assert.equal(state.sessions[0].localAsn, 65001);
+  assert.equal(state.sessions[0].localPort, 11790);
+  assert.equal(state.sessions[0].bgp.connectionMode, "multihop");
+  assert.equal(state.sessions[0].bgp.multihopTtl, 10);
+  assert.deepEqual(state.sessions[0].channels.ipv4.static, {
+    defineId: state.defines[0].id, action: "blackhole", raw: "",
+  });
+  assert.equal(state.sessions[0].channels.ipv4.exportDefineId, state.defines[0].id);
+  assert.equal(state.sessions[0].channels.ipv4.enabled, true);
+  assert.equal(state.sessions[0].channels.ipv6.enabled, true);
+  assert.deepEqual(state.defines[0].entries, ["10.10.0.0/16"]);
+  assert.equal(state.defines[0].name, "PL_PEER_BGP");
+  assert.equal(state.defines[0].label, "peer_bgp CIDRs");
+  assert.equal(state.defines[0].type, "cidr4");
+  assert.deepEqual(state.functions, []);
+  assert.deepEqual(state.filters, []);
+  assert.equal(state.prefixLists, undefined);
+  assert.deepEqual(state.sessions[0].channels.ipv4.importPolicy, { mode: "form", steps: [], filterId: null, formAction: "all" });
+  assert.deepEqual(state.sessions[0].channels.ipv4.exportPolicy, { mode: "form", steps: [], filterId: null, formAction: "cidr" });
+  assert.deepEqual(persisted, state);
+});
+
+test("migrates v8 Function order and combined policies to ordered v17 channel steps", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-policy-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  await fs.mkdir(dataDir);
+  await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify({
+    version: 8,
+    nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1", listenPort: 11790 }],
+    peers: [{ id: "peer_one", nodeId: "local", name: "Peer", address: "192.0.2.2", asn: 65002, port: 179 }],
+    prefixLists: [],
+    functions: [
+      { id: "function_late", nodeId: null, name: "late", source: "function late() { return true; }", order: 200, enabled: true },
+      { id: "function_guard", nodeId: null, name: "guard", source: "function guard() { return true; }", order: 100, enabled: true },
+    ],
+    filters: [],
+    sessions: [{
+      id: "session_one", nodeId: "local", peerId: "peer_one", prefixListId: null,
+      protocolName: "peer_bgp", localAddress: "192.0.2.1", localAsn: 65001, routeAction: null,
+      importPolicy: { mode: "combined", functionIds: ["function_guard"], filterId: null },
+      exportPolicy: { mode: "form", functionIds: [], filterId: null },
+      multihop: false, enabled: true,
+    }],
+  }));
+
+  const store = new InventoryStore({
+    dataDir,
+    nodesPath: path.join(root, "unused-nodes.json"),
+    legacySessionPath: path.join(dataDir, "session.json"),
+  });
+  const state = await store.read();
+  assert.equal(state.version, 17);
+  assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "none");
+  assert.deepEqual(state.functions.map((resource) => resource.name), ["guard", "late"]);
+  assert.equal(state.functions[0].order, undefined);
+  assert.deepEqual(state.sessions[0].channels.ipv4.importPolicy.steps, [
+    { type: "function", functionId: "function_guard", action: "execute" },
+    { type: "form" },
+  ]);
+});
+
+test("merges v10 CIDR lists before expression Defines and preserves v17 session references", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-v11-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  await fs.mkdir(dataDir);
+  await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify({
+    version: 10,
+    nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1", listenPort: 11790 }],
+    peers: [{ id: "peer_one", nodeId: "local", name: "Peer", address: "192.0.2.2", asn: 65002, port: 179 }],
+    prefixLists: [{
+      id: "prefix_global", nodeId: null, name: "Global CIDRs", symbol: "PL_GLOBAL",
+      entries: ["10.250.1.0/24"],
+    }],
+    defines: [{
+      id: "define_pref", nodeId: null, name: "DEFAULT_PREF", value: "150", enabled: true,
+    }],
+    functions: [],
+    filters: [],
+    sessions: [{
+      id: "session_one", nodeId: "local", peerId: "peer_one", prefixListId: "prefix_global",
+      protocolName: "peer_bgp", localAddress: "192.0.2.1", localAsn: 65001, routeAction: "blackhole",
+      importPolicy: { mode: "form", steps: [], filterId: null },
+      exportPolicy: { mode: "form", steps: [], filterId: null },
+      multihop: false, enabled: true,
+    }],
+  }));
+
+  const store = new InventoryStore({
+    dataDir,
+    nodesPath: path.join(root, "unused-nodes.json"),
+    legacySessionPath: path.join(dataDir, "session.json"),
+  });
+  const state = await store.read();
+
+  assert.equal(state.version, 17);
+  assert.deepEqual(state.defines.map((resource) => [resource.id, resource.type]), [
+    ["prefix_global", "cidr4"],
+    ["define_pref", "expression"],
+  ]);
+  assert.equal(state.defines[0].nodeId, null);
+  assert.equal(state.defines[0].label, "Global CIDRs");
+  assert.equal(state.sessions[0].channels.ipv4.exportDefineId, "prefix_global");
+  assert.equal(state.sessions[0].localPort, 11790);
+  assert.equal(state.sessions[0].bgp.connectionMode, "direct");
+  assert.equal(state.sessions[0].channels.ipv4.importPolicy.formAction, "all");
+  assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
+  assert.equal(state.sessions[0].prefixListId, undefined);
+  assert.equal(state.prefixLists, undefined);
+});
+
+test("migrates v14 export policy and Static settings to the matching v17 IPv4 channel", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-v13-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  await fs.mkdir(dataDir);
+  const base = {
+    version: 14,
+    nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1", listenPort: 11790 }],
+    peers: [{ id: "peer_one", nodeId: "local", name: "Peer", address: "192.0.2.2", asn: 65002, port: 179 }],
+    defines: [{ id: "prefix_one", nodeId: null, label: "Exports", name: "PL_EXPORTS", type: "cidr", entries: ["10.0.0.0/24"], enabled: true }],
+    functions: [], filters: [],
+    sessions: [{
+      id: "session_one", nodeId: "local", peerId: "peer_one", exportDefineId: "prefix_one",
+      protocolName: "peer_bgp", localAddress: "192.0.2.1", localAsn: 65001, localPort: 11790,
+      routeAction: "blackhole", importPolicy: { mode: "form", steps: [], filterId: null, formAction: "all" },
+      exportPolicy: { mode: "form", steps: [], filterId: null }, bgp: { connectionMode: "direct", multihopTtl: 10 },
+      ipv4: {}, enabled: true,
+    }],
+  };
+  await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
+  const store = new InventoryStore({ dataDir, nodesPath: "", legacySessionPath: "" });
+  const state = await store.read();
+  assert.equal(state.version, 17);
+  assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
+  assert.equal(state.sessions[0].channels.ipv6.exportPolicy.formAction, "none");
+  assert.deepEqual(state.sessions[0].channels.ipv4.static, { defineId: "prefix_one", action: "blackhole", raw: "" });
+  assert.equal(state.defines[0].type, "cidr4");
+});

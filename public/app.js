@@ -1,0 +1,2214 @@
+import { pinyin } from "/vendor/pinyin-pro.mjs";
+
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+const elements = {
+  refresh: $("#refreshButton"),
+  globalState: $("#globalState"),
+  sessionForm: $("#sessionForm"),
+  preview: $("#previewButton"),
+  apply: $("#applyButton"),
+  removeSession: $("#removeSessionButton"),
+  stop: $("#stopButton"),
+  applyDialog: $("#applyDialog"),
+  nodeDialog: $("#nodeDialog"),
+  peerDialog: $("#peerDialog"),
+  policyResourceDialog: $("#policyResourceDialog"),
+  policyActionDialog: $("#policyActionDialog"),
+  rpkiDialog: $("#rpkiDialog"),
+};
+
+let state = null;
+let busy = false;
+let autoPreviewTimer = null;
+let lastPreviewSignature = null;
+let policyActionContext = null;
+
+const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
+
+function familyLabel(family) { return family === "ipv4" ? "IPv4" : "IPv6"; }
+function directionKey(direction) { return direction === "import" ? "Import" : "Export"; }
+function policyPrefix(family, direction) { return `${family}${directionKey(direction)}`; }
+
+function channelEditorMarkup(family, active) {
+  const label = familyLabel(family);
+  const policyMarkup = (direction) => {
+    const key = policyPrefix(family, direction);
+    const directionLabel = direction === "import" ? "导入" : "导出";
+    return `<section class="policy-block" aria-labelledby="${key}PolicyTitle">
+      <div class="policy-heading">
+        <div><span>${direction}</span><h3 id="${key}PolicyTitle">${directionLabel}策略</h3></div>
+        ${direction === "export" ? `<small id="${key}FormState">可视化配置生效</small>` : ""}
+      </div>
+      <div class="segmented-control" role="radiogroup" aria-label="${label} ${directionLabel}策略模式">
+        <label><input type="radio" name="${key}PolicyMode" value="combined"><span>可视化</span></label>
+        <label><input type="radio" name="${key}PolicyMode" value="custom"><span>自定义</span></label>
+      </div>
+      <div id="${key}CombinedFields" class="policy-mode-fields" hidden>
+        <div class="field-label-row"><span>策略步骤</span><span class="policy-step-actions"><button class="compact-command compact-action-button" type="button" title="添加 Local Preference、prepend、Community 等可视化动作" data-add-policy-action>+ 属性动作</button><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Function" aria-label="前往资源管理 Tab 管理 Function" data-resource-target="functions">?</button></span></div>
+        <div id="${key}FunctionPicker" class="function-picker"></div>
+        <div id="${key}FormFields" class="policy-form-fields single-field">
+          <div class="field"><label for="${key}FormAction">可视化策略动作</label>
+            <select id="${key}FormAction">${direction === "import"
+              ? '<option value="all">导入所有</option><option value="none">不导入</option>'
+              : '<option value="none">不导出</option><option value="all">导出所有</option><option value="cidr">导出指定 CIDR Define</option>'}
+            </select>
+          </div>
+        </div>
+        ${direction === "export" ? `<div id="${key}CidrFields" class="policy-form-fields">
+          <div class="field"><label for="${family}ExportDefineSelect">${label} CIDR Define</label>
+            <div class="select-actions prefix-select-actions"><select id="${family}ExportDefineSelect"></select><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Define" aria-label="前往资源管理 Tab 管理 Define" data-resource-target="defines">?</button></div>
+          </div>
+        </div>` : ""}
+      </div>
+      <div id="${key}CustomFields" class="policy-mode-fields" hidden>
+        <div class="field-label-row"><label for="${key}FilterSelect">完整 Filter</label><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Filter" aria-label="前往资源管理 Tab 管理 Filter" data-resource-target="filters">?</button></div>
+        <select id="${key}FilterSelect"></select>
+      </div>
+    </section>`;
+  };
+  return `<section id="${family}ChannelPanel" class="afi-channel-panel ${active ? "active" : ""}" data-family="${family}" role="tabpanel" ${active ? "" : "hidden"}>
+    <div class="channel-enable-row">
+      <div><span>${label}</span><h3>${label} Channel</h3></div>
+      <label class="compact-toggle" for="${family}Enabled"><span>启用</span><input id="${family}Enabled" type="checkbox"><i aria-hidden="true"></i></label>
+    </div>
+    <div id="${family}ChannelContent" class="channel-content">
+      ${policyMarkup("import")}
+      ${policyMarkup("export")}
+      <section class="session-options" aria-labelledby="${family}StaticTitle">
+        <div class="option-heading"><span>${label}</span><h3 id="${family}StaticTitle">Static 路由</h3></div>
+        <div class="policy-form-fields">
+          <div class="field"><label for="${family}StaticDefineSelect">CIDR Define</label>
+            <div class="select-actions prefix-select-actions"><select id="${family}StaticDefineSelect"></select><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Define" aria-label="前往资源管理 Tab 管理 Define" data-resource-target="defines">?</button></div>
+          </div>
+          <div class="field"><label for="${family}StaticRouteAction">标准动作</label>
+            <select id="${family}StaticRouteAction"><option value="">不自动创建路由</option><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option></select>
+          </div>
+          <div class="field full-width"><label for="${family}StaticRaw">自定义 Static 指令</label><textarea id="${family}StaticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
+        </div>
+      </section>
+      <section class="session-options" aria-labelledby="${family}LimitsTitle">
+        <div class="option-heading"><span>${label}</span><h3 id="${family}LimitsTitle">Channel 限制</h3></div>
+        <div class="limit-grid">
+          <div class="field"><label for="${family}ImportLimit">Import Limit</label><input id="${family}ImportLimit" type="number" min="1" placeholder="关闭"></div>
+          <div class="field"><label for="${family}ImportLimitAction">动作</label><select id="${family}ImportLimitAction"><option value="disable">disable</option><option value="restart">restart</option><option value="block">block</option><option value="warn">warn</option></select></div>
+          <div class="field"><label for="${family}ExportLimit">Export Limit</label><input id="${family}ExportLimit" type="number" min="1" placeholder="关闭"></div>
+          <div class="field"><label for="${family}ExportLimitAction">动作</label><select id="${family}ExportLimitAction"><option value="disable">disable</option><option value="restart">restart</option><option value="block">block</option><option value="warn">warn</option></select></div>
+        </div>
+      </section>
+      <details class="channel-advanced-settings">
+        <summary><span>${label} 高级配置</span><small>Address family</small></summary>
+        <div class="advanced-content"><div class="option-grid">
+          <div class="field"><label for="${family}ChannelTable">Table</label><input id="${family}ChannelTable" pattern="[A-Za-z_][A-Za-z0-9_]*"></div>
+          <div class="field"><label for="${family}ChannelPreference">Preference</label><input id="${family}ChannelPreference" type="number" min="0" max="4294967295"></div>
+          <div class="field"><label for="${family}RpkiReload">RPKI Reload</label><select id="${family}RpkiReload"><option value="default">默认</option><option value="on">启用</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}ReceiveLimit">Receive Limit</label><input id="${family}ReceiveLimit" type="number" min="1" placeholder="关闭"></div>
+          <div class="field"><label for="${family}ReceiveLimitAction">Receive 动作</label><select id="${family}ReceiveLimitAction"><option value="disable">disable</option><option value="restart">restart</option><option value="block">block</option><option value="warn">warn</option></select></div>
+          <div class="field"><label for="${family}NextHopKeep">Next Hop Keep</label><select id="${family}NextHopKeep"><option value="default">默认</option><option value="on">全部</option><option value="ibgp">iBGP</option><option value="ebgp">eBGP</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}NextHopSelf">Next Hop Self</label><select id="${family}NextHopSelf"><option value="default">默认</option><option value="on">全部</option><option value="ibgp">iBGP</option><option value="ebgp">eBGP</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}NextHopAddress">Next Hop Address</label><input id="${family}NextHopAddress"></div>
+          <div class="field"><label for="${family}NextHopPrefer">Next Hop Prefer</label><select id="${family}NextHopPrefer"><option value="default">自动</option><option value="global">Global</option><option value="local">Link-local</option></select></div>
+          ${family === "ipv6" ? `<div class="field"><label for="${family}LinkLocalNextHopFormat">Link-local Next Hop</label><select id="${family}LinkLocalNextHopFormat"><option value="default">默认 Native</option><option value="native">Native</option><option value="single">Single</option><option value="double">Double</option></select></div>` : ""}
+          <div class="field"><label for="${family}GatewayMode">Gateway</label><select id="${family}GatewayMode"><option value="default">自动</option><option value="direct">direct</option><option value="recursive">recursive</option></select></div>
+          <div class="field"><label for="${family}IgpTable">IGP Table</label><input id="${family}IgpTable" pattern="[A-Za-z_][A-Za-z0-9_]*"></div>
+          <div class="field"><label for="${family}AddPaths">Add Paths</label><select id="${family}AddPaths"><option value="off">关闭</option><option value="on">RX + TX</option><option value="rx">RX</option><option value="tx">TX</option></select></div>
+          <div class="field"><label for="${family}Aigp">AIGP</label><select id="${family}Aigp"><option value="default">默认</option><option value="on">启用</option><option value="originate">Originate</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}ChannelCost">Cost</label><input id="${family}ChannelCost" type="number" min="1" max="4294967295"></div>
+          <div class="field"><label for="${family}ChannelGracefulRestart">Channel GR</label><select id="${family}ChannelGracefulRestart"><option value="default">默认</option><option value="on">启用</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}ChannelLongLivedGracefulRestart">Channel LLGR</label><select id="${family}ChannelLongLivedGracefulRestart"><option value="default">默认</option><option value="on">启用</option><option value="off">关闭</option></select></div>
+          <div class="field"><label for="${family}ChannelLongLivedStaleTime">Channel Stale Time</label><input id="${family}ChannelLongLivedStaleTime" type="number" min="0" max="16777215"></div>
+          <div class="field"><label for="${family}ChannelMinLongLivedStaleTime">Min Channel Stale</label><input id="${family}ChannelMinLongLivedStaleTime" type="number" min="0" max="16777215"></div>
+          <div class="field"><label for="${family}ChannelMaxLongLivedStaleTime">Max Channel Stale</label><input id="${family}ChannelMaxLongLivedStaleTime" type="number" min="0" max="16777215"></div>
+          <label class="compact-toggle" for="${family}ImportKeepFiltered"><span>Keep Filtered</span><input id="${family}ImportKeepFiltered" type="checkbox"><i aria-hidden="true"></i></label>
+          <label class="compact-toggle" for="${family}MandatoryChannel"><span>Mandatory</span><input id="${family}MandatoryChannel" type="checkbox"><i aria-hidden="true"></i></label>
+          <label class="compact-toggle" for="${family}ImportTable"><span>Import Table</span><input id="${family}ImportTable" type="checkbox"><i aria-hidden="true"></i></label>
+          <label class="compact-toggle" for="${family}ExportTable"><span>Export Table</span><input id="${family}ExportTable" type="checkbox"><i aria-hidden="true"></i></label>
+          <label class="compact-toggle" for="${family}SecondaryRoutes"><span>Secondary</span><input id="${family}SecondaryRoutes" type="checkbox"><i aria-hidden="true"></i></label>
+          <label class="compact-toggle" for="${family}ExtendedNextHop"><span>Extended Next Hop</span><input id="${family}ExtendedNextHop" type="checkbox"><i aria-hidden="true"></i></label>
+          ${family === "ipv4" ? `<label class="compact-toggle" for="${family}RequireExtendedNextHop"><span>Require Extended Next Hop</span><input id="${family}RequireExtendedNextHop" type="checkbox"><i aria-hidden="true"></i></label>` : ""}
+          <label class="compact-toggle" for="${family}RequireAddPaths"><span>Require Add Paths</span><input id="${family}RequireAddPaths" type="checkbox"><i aria-hidden="true"></i></label>
+          <div class="field full-width"><label for="${family}RawChannelOptions">${label} Channel Block</label><textarea id="${family}RawChannelOptions" class="compact-code-editor" spellcheck="false" placeholder="debug { routes };"></textarea></div>
+        </div></div>
+      </details>
+    </div>
+  </section>`;
+}
+
+function renderChannelEditorShells() {
+  $("#channelEditors").innerHTML = `<nav class="afi-tabs" role="tablist" aria-label="BGP Address Family">
+    ${CHANNEL_FAMILIES.map((family, index) => `<button class="afi-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0}" data-channel-tab="${family}">${familyLabel(family)} <span id="${family}TabState">开启</span></button>`).join("")}
+  </nav>${CHANNEL_FAMILIES.map((family, index) => channelEditorMarkup(family, index === 0)).join("")}`;
+}
+
+renderChannelEditorShells();
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function value(id) { return $(`#${id}`).value.trim(); }
+function optionalNumber(id) { return value(id) === "" ? null : Number(value(id)); }
+function checked(id) { return $(`#${id}`).checked; }
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "content-type": "application/json", ...(options.headers ?? {}) },
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || `请求失败 (${response.status})`);
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+function toast(message, type = "") {
+  const item = document.createElement("div");
+  item.className = `toast ${type}`;
+  item.textContent = message;
+  $("#toastRegion").append(item);
+  setTimeout(() => item.remove(), 4300);
+}
+
+function deploymentSummary(deployment) {
+  if (!deployment?.applied) return "配置已保存，尚未同步运行节点";
+  const nodeCount = deployment.nodes?.length ?? deployment.nodeIds?.length ?? 0;
+  const sessionCount = deployment.sessions?.length ?? 0;
+  return `已同步 ${nodeCount} 个节点${sessionCount ? `、${sessionCount} 条现有会话` : ""}`;
+}
+
+function setBusy(next, label = "处理中", activeButton = elements.apply) {
+  busy = next;
+  const sessionUnavailable = !currentPeer();
+  elements.preview.disabled = next || sessionUnavailable;
+  elements.apply.disabled = next || sessionUnavailable;
+  elements.removeSession.disabled = next;
+  const session = currentPeer()?.session;
+  elements.stop.disabled = next || !currentNode() || !session || session.enabled === false || currentPeer()?.protocol?.configured === false;
+  const buttons = [elements.preview, elements.apply, elements.removeSession, elements.stop];
+  buttons.forEach((button) => {
+    if (next && button === activeButton) {
+      if (!button.dataset.label) button.dataset.label = button.textContent;
+      button.textContent = label;
+      button.classList.add("is-loading");
+      button.setAttribute("aria-busy", "true");
+    } else if (!next) {
+      if (button.dataset.label && button.classList.contains("is-loading")) button.textContent = button.dataset.label;
+      delete button.dataset.label;
+      button.classList.remove("is-loading");
+      button.removeAttribute("aria-busy");
+    }
+  });
+}
+
+function birdNameSlug(label) {
+  const words = pinyin(String(label ?? "").trim(), { toneType: "none", type: "array", nonZh: "consecutive" });
+  return words.join("_")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function usedBirdNames(excluded = []) {
+  const excludedSet = new Set(excluded.filter(Boolean));
+  const inventory = state?.inventory;
+  if (!inventory) return new Set();
+  return new Set([
+    ...(inventory.defines ?? []).map((resource) => resource.name),
+    ...(inventory.functions ?? []).map((resource) => resource.name),
+    ...(inventory.filters ?? []).map((resource) => resource.name),
+    ...(inventory.rpki ?? []).flatMap((resource) => [
+      resource.name,
+      ...(resource.sourceType === "file"
+        ? [resource.roa4Table ? `${resource.name}_v4` : null, resource.roa6Table ? `${resource.name}_v6` : null]
+        : []),
+      resource.roa4Table,
+      resource.roa6Table,
+    ]),
+    ...(inventory.sessions ?? []).map((session) => session.protocolName),
+  ].filter((name) => name && !excludedSet.has(name)));
+}
+
+function uniqueBirdName(prefix, label, excluded = [], maxLength = 64) {
+  const used = usedBirdNames(excluded);
+  const slug = birdNameSlug(label) || "resource";
+  let index = 1;
+  while (true) {
+    const suffix = index === 1 ? "" : `_${index}`;
+    const room = Math.max(1, maxLength - prefix.length - 1 - suffix.length);
+    const candidate = `${prefix}_${slug.slice(0, room)}${suffix}`;
+    if (!used.has(candidate)) return candidate;
+    index += 1;
+  }
+}
+
+function defaultProtocolName(peer) {
+  return uniqueBirdName("bgp", peer.name);
+}
+
+function currentNode() { return state?.node ?? null; }
+function currentPeer() { return state?.selectedPeer ?? null; }
+function inventoryNode(nodeId) {
+  return state?.inventory?.nodes.find((item) => item.id === nodeId) ?? null;
+}
+
+function nodeOptions(selectedNodeId) {
+  return state.inventory.nodes
+    .map((node) => `<option value="${escapeHtml(node.id)}" ${node.id === selectedNodeId ? "selected" : ""}>${escapeHtml(node.name)}</option>`)
+    .join("");
+}
+
+function resourceScopeOptions(selectedNodeId) {
+  return `<option value="" ${selectedNodeId === null ? "selected" : ""}>所有节点</option>${nodeOptions(selectedNodeId)}`;
+}
+
+function selectedPolicyMode(family, direction) {
+  const key = policyPrefix(family, direction);
+  return $(`input[name="${key}PolicyMode"]:checked`)?.value ?? "combined";
+}
+
+function selectedPolicySteps(family, direction) {
+  const key = policyPrefix(family, direction);
+  return $$(`#${key}FunctionPicker .function-step`).map((row) => {
+    if (row.dataset.stepType === "form") return [{ type: "form" }];
+    return { type: "function", functionId: row.dataset.functionId, action: row.querySelector("select").value };
+  }).flat();
+}
+
+function policyPayload(family, direction) {
+  const key = policyPrefix(family, direction);
+  const mode = selectedPolicyMode(family, direction);
+  return {
+    mode,
+    steps: mode === "combined" ? selectedPolicySteps(family, direction) : [],
+    filterId: mode === "custom" ? (value(`${key}FilterSelect`) || null) : null,
+    formAction: value(`${key}FormAction`) || (direction === "import" ? "all" : "none"),
+  };
+}
+
+function channelPayload(family) {
+  return {
+    enabled: checked(`${family}Enabled`),
+    importPolicy: policyPayload(family, "import"),
+    exportPolicy: policyPayload(family, "export"),
+    exportDefineId: value(`${family}ExportDefineSelect`) || null,
+    static: {
+      defineId: value(`${family}StaticDefineSelect`) || null,
+      action: value(`${family}StaticRouteAction`) || null,
+      raw: $(`#${family}StaticRaw`).value,
+    },
+    table: value(`${family}ChannelTable`) || null,
+    preference: optionalNumber(`${family}ChannelPreference`),
+    importKeepFiltered: checked(`${family}ImportKeepFiltered`),
+    rpkiReload: value(`${family}RpkiReload`),
+    importLimit: { value: optionalNumber(`${family}ImportLimit`), action: value(`${family}ImportLimitAction`) },
+    receiveLimit: { value: optionalNumber(`${family}ReceiveLimit`), action: value(`${family}ReceiveLimitAction`) },
+    exportLimit: { value: optionalNumber(`${family}ExportLimit`), action: value(`${family}ExportLimitAction`) },
+    mandatory: checked(`${family}MandatoryChannel`),
+    nextHopKeep: value(`${family}NextHopKeep`),
+    nextHopSelf: value(`${family}NextHopSelf`),
+    nextHopAddress: value(`${family}NextHopAddress`) || null,
+    nextHopPrefer: value(`${family}NextHopPrefer`),
+    linkLocalNextHopFormat: $(`#${family}LinkLocalNextHopFormat`)?.value ?? "default",
+    gateway: value(`${family}GatewayMode`),
+    igpTable: value(`${family}IgpTable`) || null,
+    importTable: checked(`${family}ImportTable`),
+    exportTable: checked(`${family}ExportTable`),
+    secondary: checked(`${family}SecondaryRoutes`),
+    extendedNextHop: checked(`${family}ExtendedNextHop`),
+    requireExtendedNextHop: $(`#${family}RequireExtendedNextHop`)?.checked ?? false,
+    addPaths: value(`${family}AddPaths`),
+    requireAddPaths: checked(`${family}RequireAddPaths`),
+    aigp: value(`${family}Aigp`),
+    cost: optionalNumber(`${family}ChannelCost`),
+    gracefulRestart: value(`${family}ChannelGracefulRestart`),
+    longLivedGracefulRestart: value(`${family}ChannelLongLivedGracefulRestart`),
+    longLivedStaleTime: optionalNumber(`${family}ChannelLongLivedStaleTime`),
+    minLongLivedStaleTime: optionalNumber(`${family}ChannelMinLongLivedStaleTime`),
+    maxLongLivedStaleTime: optionalNumber(`${family}ChannelMaxLongLivedStaleTime`),
+    raw: $(`#${family}RawChannelOptions`).value,
+  };
+}
+
+function activateResourceTab(resourceTarget) {
+  $$(".resource-tab").forEach((tab) => {
+    const active = tab.dataset.resourceTab === resourceTarget;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  $$(".resource-panel").forEach((panel) => { panel.hidden = panel.id !== `resource-${resourceTarget}`; });
+  document.querySelector(`[data-resource-tab="${resourceTarget}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+}
+
+function activateWorkspace(workspaceId, resourceTarget = null) {
+  $$(".workspace-tab").forEach((tab) => {
+    const active = tab.dataset.workspace === workspaceId;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  $$(".workspace-panel").forEach((panel) => { panel.hidden = panel.id !== workspaceId; });
+  if (resourceTarget) {
+    activateResourceTab(resourceTarget);
+    requestAnimationFrame(() => {
+      const section = $(`#resource-${resourceTarget}`);
+      section?.scrollIntoView({ behavior: "smooth", block: "start" });
+      section?.classList.add("resource-highlight");
+      setTimeout(() => section?.classList.remove("resource-highlight"), 1200);
+    });
+  }
+}
+
+function sessionPayload() {
+  return {
+    nodeId: currentNode().id,
+    peerId: currentPeer().id,
+    protocolName: value("protocolName"),
+    enabled: checked("sessionEnabled"),
+    localAddress: value("sessionLocalAddress"),
+    localAsn: Number(value("sessionLocalAsn")),
+    localPort: Number(value("sessionLocalPort")),
+    bgp: {
+      connectionMode: value("connectionMode"),
+      multihopTtl: optionalNumber("multihopTtl"),
+      passive: checked("passive"),
+      bfd: value("bfdMode"),
+      bfdOptions: $("#bfdOptions").value,
+      ttlSecurity: checked("ttlSecurity"),
+      description: value("bgpDescription") || null,
+      routerId: value("sessionRouterId") || null,
+      vrf: value("sessionVrf") || null,
+      interface: value("bgpInterface") || null,
+      onlink: checked("onlink"),
+      authentication: value("bgpAuthentication"),
+      password: value("bgpAuthentication") === "md5" ? (value("bgpPassword") || null) : null,
+      aoKeys: value("bgpAuthentication") === "ao" ? $("#bgpAoKeys").value : "",
+      setkey: value("bgpSetkey"),
+      strictBind: checked("strictBind"),
+      freeBind: checked("freeBind"),
+      checkLink: value("checkLink"),
+      rsClient: checked("rsClient"),
+      confederation: optionalNumber("confederation"),
+      confederationMember: checked("confederationMember"),
+      allowLocalPref: checked("allowLocalPref"),
+      allowMed: checked("allowMed"),
+      allowLocalAs: value("allowLocalAs") || null,
+      allowAsSets: value("allowAsSets"),
+      enforceFirstAs: checked("enforceFirstAs"),
+      routeRefresh: value("routeRefresh"),
+      requireRouteRefresh: checked("requireRouteRefresh"),
+      enhancedRouteRefresh: value("enhancedRouteRefresh"),
+      requireEnhancedRouteRefresh: checked("requireEnhancedRouteRefresh"),
+      gracefulRestart: value("gracefulRestart"),
+      gracefulRestartTime: optionalNumber("gracefulRestartTime"),
+      minGracefulRestartTime: optionalNumber("minGracefulRestartTime"),
+      maxGracefulRestartTime: optionalNumber("maxGracefulRestartTime"),
+      requireGracefulRestart: checked("requireGracefulRestart"),
+      longLivedGracefulRestart: value("longLivedGracefulRestart"),
+      longLivedStaleTime: optionalNumber("longLivedStaleTime"),
+      minLongLivedStaleTime: optionalNumber("minLongLivedStaleTime"),
+      maxLongLivedStaleTime: optionalNumber("maxLongLivedStaleTime"),
+      requireLongLivedGracefulRestart: checked("requireLongLivedGracefulRestart"),
+      interpretCommunities: value("interpretCommunities"),
+      enableAs4: value("enableAs4"),
+      requireAs4: checked("requireAs4"),
+      extendedMessages: checked("extendedMessages"),
+      requireExtendedMessages: checked("requireExtendedMessages"),
+      capabilities: value("capabilities"),
+      advertiseHostname: checked("advertiseHostname"),
+      requireHostname: checked("requireHostname"),
+      disableAfterError: checked("disableAfterError"),
+      disableAfterCease: value("disableAfterCease"),
+      holdTime: optionalNumber("holdTime"),
+      minHoldTime: optionalNumber("minHoldTime"),
+      startupHoldTime: optionalNumber("startupHoldTime"),
+      keepaliveTime: optionalNumber("keepaliveTime"),
+      minKeepaliveTime: optionalNumber("minKeepaliveTime"),
+      sendHoldTime: optionalNumber("sendHoldTime"),
+      connectDelayTime: optionalNumber("connectDelayTime"),
+      connectRetryTime: optionalNumber("connectRetryTime"),
+      errorWaitMin: optionalNumber("errorWaitMin"),
+      errorWaitMax: optionalNumber("errorWaitMax"),
+      errorForgetTime: optionalNumber("errorForgetTime"),
+      pathMetric: value("pathMetric"),
+      medMetric: checked("medMetric"),
+      deterministicMed: checked("deterministicMed"),
+      igpMetric: value("igpMetric"),
+      preferOlder: checked("preferOlder"),
+      defaultMed: optionalNumber("defaultMed"),
+      defaultLocalPref: optionalNumber("defaultLocalPref"),
+      localRole: value("localRole"),
+      requireRoles: checked("requireRoles"),
+      raw: $("#rawProtocolOptions").value,
+    },
+    channels: Object.fromEntries(CHANNEL_FAMILIES.map((family) => [family, channelPayload(family)])),
+  };
+}
+
+function renderSelectors() {
+  const nodes = state.inventory.nodes;
+  $("#nodeSelect").innerHTML = nodes
+    .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.name)}</option>`)
+    .join("");
+  $("#nodeSelect").value = state.selection.nodeId;
+
+  if (state.peers.length) {
+    $("#peerSelect").innerHTML = state.peers
+      .map((peer) => `<option value="${escapeHtml(peer.id)}">${escapeHtml(peer.name)} · AS${peer.asn}</option>`)
+      .join("");
+    $("#peerSelect").value = state.selection.peerId;
+    $("#peerSelect").disabled = false;
+  } else {
+    $("#peerSelect").innerHTML = '<option value="">尚无远端 Peer</option>';
+    $("#peerSelect").disabled = true;
+  }
+  $("#selectionSummary").textContent = currentPeer()
+    ? `${currentNode().name} → ${currentPeer().name}`
+    : `${currentNode().name} → 未选择`;
+}
+
+function protocolPresentation(peer) {
+  if (!peer.session) return { label: "未配置", className: "unconfigured" };
+  if (peer.session.enabled === false) return { label: "已停用", className: "disabled" };
+  if (peer.protocol?.disabled) return { label: "手动停止", className: "disabled" };
+  if (!state.runtime.reachable) return { label: "节点不可达", className: "down" };
+  if (peer.protocol?.established) return { label: "Established", className: "established" };
+  if (peer.protocol?.state) return { label: peer.protocol.state, className: "down" };
+  if (peer.protocol?.configured === false) return { label: "未加载", className: "unknown" };
+  return { label: "等待运行", className: "unknown" };
+}
+
+function globalHealthPresentation() {
+  const fallbackActiveSessions = state.peers.filter((peer) => peer.session?.enabled !== false).length;
+  const fallbackNormalSessions = state.peers.filter((peer) => peer.session?.enabled !== false && peer.protocol?.established).length;
+  const fallbackOnlineNodes = state.runtime?.reachable && state.runtime?.bird2 ? 1 : 0;
+  const health = state.health ?? {
+    onlineNodes: fallbackOnlineNodes,
+    activeSessions: fallbackActiveSessions,
+    normalSessions: fallbackNormalSessions,
+    status: fallbackOnlineNodes === 0 ? "error" : fallbackActiveSessions > fallbackNormalSessions ? "warning" : "ready",
+  };
+  return {
+    status: health.status,
+    text: `${health.onlineNodes}个节点在线，${health.normalSessions}个会话正常`,
+  };
+}
+
+function renderTopology() {
+  const node = currentNode();
+  const online = state.runtime.reachable && state.runtime.bird2;
+  $("#nodeName").textContent = node.name;
+  $("#nodeAddress").textContent = `默认会话端口 ${node.listenPort}`;
+  $("#nodeRouterId").textContent = node.routerId;
+  $("#birdVersion").textContent = state.runtime.version?.replace("BIRD version ", "") || "-";
+  $("#nodeTransport").textContent = "SSH";
+  $("#nodeReachable").className = `status-pill ${online ? "online" : "offline"}`;
+  $("#nodeReachable").textContent = online ? "可管理" : "不可达";
+  $("#managedNodeCard").classList.toggle("online", online);
+  $(".topology-network").classList.toggle("has-peers", state.peers.length > 0);
+
+  if (!state.peers.length) {
+    $("#peerTopology").innerHTML = '<div class="topology-empty">尚无远端 Peer</div>';
+  } else {
+    $("#peerTopology").innerHTML = state.peers.map((peer) => {
+      const presentation = protocolPresentation(peer);
+      const selected = peer.id === state.selection.peerId;
+      return `<div class="peer-connection ${peer.protocol?.established ? "established" : ""}" role="treeitem">
+        <span class="peer-wire"></span>
+        <button class="peer-card ${selected ? "selected" : ""}" type="button" data-peer-id="${escapeHtml(peer.id)}">
+          <div class="peer-card-head"><span class="node-icon">P</span><span class="status-pill ${presentation.className}">${escapeHtml(presentation.label)}</span></div>
+          <h3>${escapeHtml(peer.name)} · AS${peer.asn}</h3>
+          <p>${escapeHtml(peer.address)}:${peer.port}</p>
+        </button>
+      </div>`;
+    }).join("");
+    $$(".peer-card").forEach((card) => card.addEventListener("click", () => loadDashboard(node.id, card.dataset.peerId)));
+  }
+}
+
+function populateSessionOptions(session) {
+  const bgp = session?.bgp ?? {};
+  const values = {
+    connectionMode: bgp.connectionMode ?? "direct",
+    multihopTtl: bgp.multihopTtl ?? 10,
+    bfdMode: bgp.bfd ?? "off",
+    holdTime: bgp.holdTime,
+    keepaliveTime: bgp.keepaliveTime,
+    bgpDescription: bgp.description,
+    sessionRouterId: bgp.routerId,
+    sessionVrf: bgp.vrf,
+    bgpInterface: bgp.interface,
+    bgpAuthentication: bgp.authentication ?? (bgp.password ? "md5" : "none"),
+    bgpPassword: bgp.password,
+    bgpSetkey: bgp.setkey ?? "default",
+    checkLink: bgp.checkLink ?? "default",
+    localRole: bgp.localRole ?? "",
+    allowLocalAs: bgp.allowLocalAs,
+    allowAsSets: bgp.allowAsSets ?? "default",
+    confederation: bgp.confederation,
+    routeRefresh: bgp.routeRefresh ?? "default",
+    enhancedRouteRefresh: bgp.enhancedRouteRefresh ?? "default",
+    gracefulRestart: bgp.gracefulRestart ?? "default",
+    gracefulRestartTime: bgp.gracefulRestartTime,
+    minGracefulRestartTime: bgp.minGracefulRestartTime,
+    maxGracefulRestartTime: bgp.maxGracefulRestartTime,
+    longLivedGracefulRestart: bgp.longLivedGracefulRestart ?? "default",
+    longLivedStaleTime: bgp.longLivedStaleTime,
+    minLongLivedStaleTime: bgp.minLongLivedStaleTime,
+    maxLongLivedStaleTime: bgp.maxLongLivedStaleTime,
+    interpretCommunities: bgp.interpretCommunities ?? "default",
+    enableAs4: bgp.enableAs4 ?? "default",
+    capabilities: bgp.capabilities ?? "default",
+    disableAfterCease: bgp.disableAfterCease ?? "default",
+    minHoldTime: bgp.minHoldTime,
+    startupHoldTime: bgp.startupHoldTime,
+    minKeepaliveTime: bgp.minKeepaliveTime,
+    sendHoldTime: bgp.sendHoldTime,
+    connectDelayTime: bgp.connectDelayTime,
+    connectRetryTime: bgp.connectRetryTime,
+    errorForgetTime: bgp.errorForgetTime,
+    errorWaitMin: bgp.errorWaitMin,
+    errorWaitMax: bgp.errorWaitMax,
+    pathMetric: bgp.pathMetric ?? "default",
+    igpMetric: bgp.igpMetric ?? "default",
+    defaultMed: bgp.defaultMed,
+    defaultLocalPref: bgp.defaultLocalPref,
+  };
+  for (const [id, fieldValue] of Object.entries(values)) $(`#${id}`).value = fieldValue ?? "";
+
+  const checks = {
+    passive: bgp.passive,
+    ttlSecurity: bgp.ttlSecurity,
+    strictBind: bgp.strictBind,
+    freeBind: bgp.freeBind,
+    onlink: bgp.onlink,
+    rsClient: bgp.rsClient,
+    confederationMember: bgp.confederationMember,
+    allowLocalPref: bgp.allowLocalPref,
+    allowMed: bgp.allowMed,
+    enforceFirstAs: bgp.enforceFirstAs,
+    requireRoles: bgp.requireRoles,
+    requireRouteRefresh: bgp.requireRouteRefresh,
+    requireEnhancedRouteRefresh: bgp.requireEnhancedRouteRefresh,
+    requireGracefulRestart: bgp.requireGracefulRestart,
+    requireLongLivedGracefulRestart: bgp.requireLongLivedGracefulRestart,
+    requireAs4: bgp.requireAs4,
+    requireExtendedMessages: bgp.requireExtendedMessages,
+    requireHostname: bgp.requireHostname,
+    extendedMessages: bgp.extendedMessages,
+    advertiseHostname: bgp.advertiseHostname,
+    disableAfterError: bgp.disableAfterError,
+    medMetric: bgp.medMetric,
+    deterministicMed: bgp.deterministicMed,
+    preferOlder: bgp.preferOlder,
+  };
+  for (const [id, fieldValue] of Object.entries(checks)) $(`#${id}`).checked = fieldValue === true;
+  $("#rawProtocolOptions").value = bgp.raw ?? "";
+  $("#bfdOptions").value = bgp.bfdOptions ?? "";
+  $("#bgpAoKeys").value = bgp.aoKeys ?? "";
+  syncBfdMode();
+  syncAuthenticationMode();
+  syncConnectionMode();
+  syncCapabilityRequirements();
+  syncTimerConstraints();
+}
+
+function populateChannelOptions(family, channel) {
+  const values = {
+    ChannelTable: channel.table,
+    ChannelPreference: channel.preference,
+    RpkiReload: channel.rpkiReload ?? "default",
+    ImportLimit: channel.importLimit?.value,
+    ImportLimitAction: channel.importLimit?.action ?? "disable",
+    ReceiveLimit: channel.receiveLimit?.value,
+    ReceiveLimitAction: channel.receiveLimit?.action ?? "disable",
+    ExportLimit: channel.exportLimit?.value,
+    ExportLimitAction: channel.exportLimit?.action ?? "disable",
+    NextHopKeep: channel.nextHopKeep ?? "default",
+    NextHopSelf: channel.nextHopSelf ?? "default",
+    NextHopAddress: channel.nextHopAddress,
+    NextHopPrefer: channel.nextHopPrefer ?? "default",
+    LinkLocalNextHopFormat: channel.linkLocalNextHopFormat ?? "default",
+    GatewayMode: channel.gateway ?? "default",
+    IgpTable: channel.igpTable,
+    AddPaths: channel.addPaths ?? "off",
+    Aigp: channel.aigp ?? "default",
+    ChannelCost: channel.cost,
+    ChannelGracefulRestart: channel.gracefulRestart ?? "default",
+    ChannelLongLivedGracefulRestart: channel.longLivedGracefulRestart ?? "default",
+    ChannelLongLivedStaleTime: channel.longLivedStaleTime,
+    ChannelMinLongLivedStaleTime: channel.minLongLivedStaleTime,
+    ChannelMaxLongLivedStaleTime: channel.maxLongLivedStaleTime,
+  };
+  for (const [suffix, fieldValue] of Object.entries(values)) {
+    const field = $(`#${family}${suffix}`);
+    if (field) field.value = fieldValue ?? "";
+  }
+  const checks = {
+    ImportKeepFiltered: channel.importKeepFiltered,
+    MandatoryChannel: channel.mandatory,
+    ImportTable: channel.importTable,
+    ExportTable: channel.exportTable,
+    SecondaryRoutes: channel.secondary,
+    ExtendedNextHop: channel.extendedNextHop,
+    RequireExtendedNextHop: channel.requireExtendedNextHop,
+    RequireAddPaths: channel.requireAddPaths,
+  };
+  for (const [suffix, fieldValue] of Object.entries(checks)) {
+    const field = $(`#${family}${suffix}`);
+    if (field) field.checked = fieldValue === true;
+  }
+  $(`#${family}RawChannelOptions`).value = channel.raw ?? "";
+}
+
+function renderSessionForm() {
+  const peer = currentPeer();
+  const hasPeer = Boolean(peer);
+  $("#sessionEmpty").hidden = hasPeer;
+  elements.sessionForm.hidden = !hasPeer;
+  const session = peer?.session;
+  const manuallyDisabled = peer?.protocol?.disabled === true;
+  elements.stop.textContent = manuallyDisabled ? "启动当前会话" : "停止当前会话";
+  elements.stop.className = `protocol-control ${manuallyDisabled ? "start" : "stop"}`;
+  elements.stop.setAttribute("aria-label", `${manuallyDisabled ? "启动" : "停止"} ${session?.protocolName ?? "当前 BGP 会话"}`);
+  elements.stop.title = manuallyDisabled ? "启动当前选中的 BGP 会话" : "只停止当前选中的 BGP 会话";
+  elements.stop.disabled = busy || !currentNode() || !session || session.enabled === false || peer?.protocol?.configured === false;
+  if (!peer) return;
+
+  $("#pairRemote").textContent = `${peer.address} · AS${peer.asn}`;
+  $("#protocolName").value = peer.session?.protocolName ?? defaultProtocolName(peer);
+  $("#sessionEnabled").checked = peer.session?.enabled !== false;
+  $("#sessionLocalAddress").value = peer.session?.localAddress ?? currentNode().routerId;
+  $("#sessionLocalAsn").value = peer.session?.localAsn ?? "";
+  $("#sessionLocalPort").value = peer.session?.localPort ?? currentNode().listenPort;
+  populateSessionOptions(peer.session);
+  for (const family of CHANNEL_FAMILIES) {
+    const channel = peer.session?.channels?.[family] ?? {
+      enabled: true,
+      importPolicy: { mode: "form", steps: [], filterId: null, formAction: "all" },
+      exportPolicy: { mode: "form", steps: [], filterId: null, formAction: "none" },
+      exportDefineId: null,
+      static: { defineId: null, action: null, raw: "" },
+    };
+    const cidrDefines = state.cidrDefines?.[family] ?? [];
+    const defineOptions = cidrDefines
+      .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} · ${escapeHtml(item.name)}${item.nodeId === null ? " · 所有节点" : ""}</option>`)
+      .join("");
+    const defineSelect = $(`#${family}ExportDefineSelect`);
+    defineSelect.innerHTML = '<option value="">不导出 CIDR</option>' + defineOptions;
+    defineSelect.value = channel.exportDefineId && cidrDefines.some((item) => item.id === channel.exportDefineId)
+      ? channel.exportDefineId
+      : "";
+    const staticDefineSelect = $(`#${family}StaticDefineSelect`);
+    staticDefineSelect.innerHTML = '<option value="">不选择 CIDR Define</option>' + defineOptions;
+    staticDefineSelect.value = channel.static?.defineId && cidrDefines.some((item) => item.id === channel.static.defineId)
+      ? channel.static.defineId
+      : "";
+    $(`#${family}StaticRouteAction`).value = channel.static?.action ?? "";
+    $(`#${family}StaticRaw`).value = channel.static?.raw ?? "";
+    $(`#${family}Enabled`).checked = channel.enabled !== false;
+    populateChannelOptions(family, channel);
+    for (const direction of ["import", "export"]) {
+      const key = policyPrefix(family, direction);
+      const policy = channel[`${direction}Policy`] ?? { mode: "form", steps: [], filterId: null };
+      $(`#${key}FormAction`).value = policy.formAction ?? (direction === "import" ? "all" : (channel.exportDefineId ? "cidr" : "none"));
+      const radio = $(`input[name="${key}PolicyMode"][value="${policy.mode === "form" ? "combined" : policy.mode}"]`);
+      if (radio) radio.checked = true;
+      renderPolicyResourceChoices(family, direction, policy);
+    }
+    syncChannelAvailability(family);
+    syncChannelRequirementControls(family);
+  }
+  elements.removeSession.hidden = !peer.session;
+  updatePairSummary();
+  lastPreviewSignature = JSON.stringify(sessionPayload());
+  setBusy(busy);
+}
+
+function renderPolicyResourceChoices(family, direction, policy) {
+  const key = policyPrefix(family, direction);
+  const callableFunctions = (state.functions ?? []).filter((resource) => resource.callable);
+  const functionMap = new Map(callableFunctions.map((resource) => [resource.id, resource]));
+  const savedSteps = policy.steps ?? (policy.functionIds ?? []).map((functionId) => ({ type: "function", functionId, action: "execute" }));
+  const orderedSteps = savedSteps.some((step) => step.type === "form") ? [...savedSteps] : [...savedSteps, { type: "form" }];
+  const selectedIds = new Set(orderedSteps.filter((step) => step.type === "function").map((step) => step.functionId));
+  const rows = orderedSteps.flatMap((step) => {
+    if (step.type === "form") return [{ type: "form", action: policy.formAction ?? (direction === "import" ? "all" : "none") }];
+    const resource = functionMap.get(step.functionId);
+    return resource ? [{ type: "function", resource, action: step.action ?? "execute" }] : [];
+  });
+  const availableFunctions = callableFunctions.filter((resource) => !selectedIds.has(resource.id));
+  const picker = $(`#${key}FunctionPicker`);
+  picker.innerHTML = rows.map((row) => row.type === "form"
+    ? `<div class="function-step form-step" data-step-type="form">
+        <span class="step-order">-</span>
+        <span class="step-lock" aria-hidden="true">F</span>
+        <span class="step-name"><strong>系统策略</strong><small>${direction === "import"
+          ? (row.action === "all" ? "导入所有" : "不导入")
+          : row.action === "all" ? "导出所有" : row.action === "cidr" ? "指定 CIDR" : "不导出"}</small></span>
+        <span class="step-action-static">系统策略</span>
+        <span class="step-moves"><button type="button" title="上移系统策略" aria-label="上移系统策略" data-step-move="up">↑</button><button type="button" title="下移系统策略" aria-label="下移系统策略" data-step-move="down">↓</button></span>
+      </div>`
+    : `<div class="function-step" data-step-type="function" data-function-id="${escapeHtml(row.resource.id)}">
+        <span class="step-order">-</span>
+        <span class="step-lock function" aria-hidden="true">ƒ</span>
+        <span class="step-name"><strong>${escapeHtml(row.resource.label ?? row.resource.name)}</strong><small>${escapeHtml(row.resource.name)}() · ${row.resource.nodeId === null ? "所有节点" : "当前节点"}</small></span>
+        <select aria-label="${escapeHtml(row.resource.name)} 命中动作">
+          <option value="accept" ${row.action === "accept" ? "selected" : ""}>accept</option>
+          <option value="reject" ${row.action === "reject" ? "selected" : ""}>reject</option>
+          <option value="execute" ${row.action === "execute" ? "selected" : ""}>仅执行</option>
+        </select>
+        <span class="step-moves"><button type="button" title="上移 ${escapeHtml(row.resource.name)}" aria-label="上移 ${escapeHtml(row.resource.name)}" data-step-move="up">↑</button><button type="button" title="下移 ${escapeHtml(row.resource.name)}" aria-label="下移 ${escapeHtml(row.resource.name)}" data-step-move="down">↓</button><button type="button" title="移除 ${escapeHtml(row.resource.name)}" aria-label="移除 ${escapeHtml(row.resource.name)}" data-remove-function-step>×</button></span>
+      </div>`).join("");
+  picker.insertAdjacentHTML("beforeend", `<div class="function-step-add">
+    <select aria-label="可用 Function" data-add-function-select>
+      <option value="">选择可用 Function</option>
+      ${availableFunctions.map((resource) => `<option value="${escapeHtml(resource.id)}">${escapeHtml(resource.label ?? resource.name)} · ${escapeHtml(resource.name)}()</option>`).join("")}
+    </select>
+    <button type="button" title="添加 Function" aria-label="添加 Function" data-add-function-step>+</button>
+  </div>`);
+  picker.querySelectorAll('[data-step-move]').forEach((button) => button.addEventListener("click", () => {
+    moveFunctionStep(family, direction, button.closest(".function-step"), button.dataset.stepMove);
+  }));
+  picker.querySelector('[data-add-function-step]').addEventListener("click", () => addFunctionStep(family, direction));
+  const addActionButton = picker.closest(".policy-mode-fields")?.querySelector('[data-add-policy-action]');
+  if (addActionButton) addActionButton.onclick = () => openPolicyActionDialog(family, direction);
+  picker.querySelectorAll('[data-remove-function-step]').forEach((button) => button.addEventListener("click", () => {
+    removeFunctionStep(family, direction, button.closest(".function-step").dataset.functionId);
+  }));
+  syncFunctionStepOrder(family, direction);
+
+  const filterSelect = $(`#${key}FilterSelect`);
+  filterSelect.innerHTML = '<option value="">选择 Filter</option>' + (state.filters ?? [])
+    .map((resource) => `<option value="${escapeHtml(resource.id)}">${escapeHtml(resource.label ?? resource.name)} · ${escapeHtml(resource.name)}${resource.nodeId === null ? " · 所有节点" : ""}</option>`)
+    .join("");
+  filterSelect.value = policy.filterId ?? "";
+}
+
+function syncFunctionStepOrder(family, direction) {
+  const key = policyPrefix(family, direction);
+  const active = checked(`${family}Enabled`) && selectedPolicyMode(family, direction) === "combined";
+  const rows = $$(`#${key}FunctionPicker .function-step`);
+  const selectedRows = rows;
+  rows.forEach((row) => {
+    row.classList.add("selected");
+    const action = row.querySelector("select");
+    if (action) action.disabled = !active;
+    row.querySelector(".step-order").textContent = String(selectedRows.indexOf(row) + 1);
+    const moveButtons = [...row.querySelectorAll('[data-step-move]')];
+    if (moveButtons.length) {
+      const index = selectedRows.indexOf(row);
+      moveButtons[0].disabled = !active || index === 0;
+      moveButtons[1].disabled = !active || index === selectedRows.length - 1;
+    }
+    row.querySelector('[data-remove-function-step]')?.toggleAttribute("disabled", !active);
+  });
+  const addSelect = $(`#${key}FunctionPicker [data-add-function-select]`);
+  const addButton = $(`#${key}FunctionPicker [data-add-function-step]`);
+  const actionButton = $(`#${key}CombinedFields [data-add-policy-action]`);
+  if (actionButton) actionButton.disabled = !active;
+  if (addSelect && addButton) {
+    addSelect.disabled = !active || addSelect.options.length <= 1;
+    addButton.disabled = addSelect.disabled || !addSelect.value;
+    addSelect.onchange = () => { addButton.disabled = !active || !addSelect.value; };
+  }
+}
+
+function moveFunctionStep(family, direction, row, movement) {
+  const key = policyPrefix(family, direction);
+  const selectedRows = $$(`#${key}FunctionPicker .function-step`);
+  const index = selectedRows.indexOf(row);
+  const target = selectedRows[index + (movement === "up" ? -1 : 1)];
+  if (!target) return;
+  if (movement === "up") target.before(row);
+  else target.after(row);
+  syncFunctionStepOrder(family, direction);
+  scheduleAutoPreview();
+}
+
+function addFunctionStep(family, direction) {
+  const key = policyPrefix(family, direction);
+  const functionId = $(`#${key}FunctionPicker [data-add-function-select]`).value;
+  if (!functionId) return;
+  const steps = selectedPolicySteps(family, direction);
+  const formIndex = steps.findIndex((step) => step.type === "form");
+  steps.splice(formIndex < 0 ? steps.length : formIndex, 0, { type: "function", functionId, action: "execute" });
+  renderPolicyResourceChoices(family, direction, {
+    steps,
+    filterId: value(`${key}FilterSelect`) || null,
+    formAction: value(`${key}FormAction`) || (direction === "import" ? "all" : "none"),
+  });
+  syncPolicyControls(family, direction);
+  scheduleAutoPreview();
+}
+
+function removeFunctionStep(family, direction, functionId) {
+  const key = policyPrefix(family, direction);
+  const steps = selectedPolicySteps(family, direction).filter((step) => step.type !== "function" || step.functionId !== functionId);
+  renderPolicyResourceChoices(family, direction, {
+    steps,
+    filterId: value(`${key}FilterSelect`) || null,
+    formAction: value(`${key}FormAction`) || (direction === "import" ? "all" : "none"),
+  });
+  syncPolicyControls(family, direction);
+  scheduleAutoPreview();
+}
+
+function defaultPolicyActionName(label) {
+  return uniqueBirdName("function", label);
+}
+
+function defaultPolicyActionLabel(direction, action) {
+  if (action === "local_pref") return "导入 Local Preference";
+  if (action === "prepend") return "导出 AS prepend";
+  return `${direction === "import" ? "导入" : "导出"} Community`;
+}
+
+function syncPolicyActionName() {
+  const name = $("#policyActionName");
+  if (name.dataset.edited) return;
+  name.value = defaultPolicyActionName(value("policyActionLabel"));
+}
+
+function syncPolicyActionDialog() {
+  const direction = policyActionContext?.direction ?? "import";
+  const isImport = direction === "import";
+  $("#policyActionDialogTitle").textContent = `添加${isImport ? "导入" : "导出"}动作 Function`;
+  const actionSelect = $("#policyActionType");
+  const currentAction = actionSelect.value;
+  const options = isImport
+    ? [["local_pref", "设置 Local Preference"], ["community", "修改 Community"]]
+    : [["prepend", "AS prepend"], ["community", "修改 Community"]];
+  actionSelect.innerHTML = options.map(([valueOption, label]) => `<option value="${valueOption}">${label}</option>`).join("");
+  actionSelect.value = options.some(([valueOption]) => valueOption === currentAction) ? currentAction : options[0][0];
+  const action = actionSelect.value;
+  const actionLabel = $("#policyActionLabel");
+  if (!actionLabel.dataset.edited) actionLabel.value = defaultPolicyActionLabel(direction, action);
+  syncPolicyActionName();
+  $("#policyActionLocalPrefFields").hidden = action !== "local_pref";
+  $("#policyActionLocalPrefValue").required = action === "local_pref";
+  $("#policyActionPrependFields").hidden = action !== "prepend";
+  $("#policyActionPrependCount").required = action === "prepend";
+  $("#policyActionPrependAsn").required = action === "prepend" && value("policyActionPrependAsnMode") === "custom";
+  $("#policyActionPrependAsn").disabled = action !== "prepend" || value("policyActionPrependAsnMode") !== "custom";
+  $("#policyActionCommunityFields").hidden = action !== "community";
+  $("#policyActionCommunityValues").required = action === "community" && value("policyActionCommunityOperation") !== "empty";
+  $("#policyActionCommunityKind").disabled = action !== "community" || value("policyActionCommunityOperation") === "empty";
+  $("#policyActionCommunityValues").disabled = action !== "community" || value("policyActionCommunityOperation") === "empty";
+  $("#policyActionCommunityOperation").disabled = action !== "community";
+  const family = policyActionContext?.family;
+  const defineSelect = $("#policyActionDefineSelect");
+  if (family && state?.inventory?.defines) {
+    const type = family === "ipv4" ? "cidr4" : "cidr6";
+    const nodeId = currentNode()?.id;
+    const defines = state.inventory.defines.filter((item) => item.type === type && item.enabled && (item.nodeId === null || item.nodeId === nodeId));
+    const current = defineSelect.value;
+    defineSelect.innerHTML = '<option value="">不选择</option>' + defines.map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}${item.nodeId === null ? " · 所有节点" : ""}</option>`).join("");
+    if (defines.some((item) => item.name === current)) defineSelect.value = current;
+  }
+}
+
+function parsePolicyActionCommunities(source, kind) {
+  const values = String(source ?? "").split(/[\n,]+/).map((item) => item.trim()).filter(Boolean);
+  if (!values.length) throw new Error("至少填写一个 Community");
+  const max = kind === "large" ? 4294967295 : 65535;
+  const expectedParts = kind === "large" ? 3 : 2;
+  return values.map((valueInput) => {
+    const parts = valueInput.split(":").map((part) => Number(part));
+    if (parts.length !== expectedParts || parts.some((part) => !Number.isInteger(part) || part < 0 || part > max)) {
+      throw new Error(`${kind === "large" ? "Large" : "Standard"} Community 格式不合法: ${valueInput}`);
+    }
+    return `(${parts.join(", ")})`;
+  });
+}
+
+function buildPolicyActionSource() {
+  const direction = policyActionContext?.direction;
+  const isImport = direction === "import";
+  const name = value("policyActionName");
+  const condition = value("policyActionCondition").replace(/\s+/g, " ");
+  if (!name || !condition) throw new Error("Function 名称和筛选表达式不能为空");
+  const statements = [];
+  const action = value("policyActionType");
+  if (isImport && action === "local_pref") {
+    const localPref = optionalNumber("policyActionLocalPrefValue");
+    if (localPref === null || localPref < 0 || localPref > 4294967295) throw new Error("Local Preference 必须为 0 到 4294967295 的整数");
+    statements.push(`bgp_local_pref = ${localPref};`);
+  }
+  if (!isImport && action === "prepend") {
+    const count = optionalNumber("policyActionPrependCount");
+    const asn = value("policyActionPrependAsnMode") === "local" ? optionalNumber("sessionLocalAsn") : optionalNumber("policyActionPrependAsn");
+    if (asn === null || asn < 1 || asn > 4294967295) throw new Error("prepend ASN 不合法");
+    if (count === null || count < 1 || count > 20 || !Number.isInteger(count)) throw new Error("prepend 次数必须为 1 到 20 的整数");
+    for (let index = 0; index < count; index += 1) statements.push(`bgp_path.prepend(${asn});`);
+  }
+  if (action === "community") {
+    const kind = value("policyActionCommunityKind");
+    const operation = value("policyActionCommunityOperation");
+    const attribute = kind === "large" ? "bgp_large_community" : "bgp_community";
+    if (operation === "empty") {
+      statements.push(`${attribute}.empty;`);
+    } else {
+      for (const community of parsePolicyActionCommunities($("#policyActionCommunityValues").value, kind)) {
+        statements.push(`${attribute}.${operation}(${community});`);
+      }
+    }
+  }
+  if (!statements.length) throw new Error("至少选择一个路由属性操作");
+  return `function ${name}()\n{\n  if ${condition} then {\n${statements.map((statement) => `    ${statement}`).join("\n")}\n  }\n}`;
+}
+
+function openPolicyActionDialog(family, direction) {
+  policyActionContext = { family, direction };
+  $("#policyActionName").value = "";
+  $("#policyActionLabel").value = "";
+  delete $("#policyActionName").dataset.edited;
+  delete $("#policyActionLabel").dataset.edited;
+  $("#policyActionCondition").value = "";
+  $("#policyActionDefineSelect").value = "";
+  $("#policyActionLocalPrefValue").value = "";
+  $("#policyActionType").value = direction === "import" ? "local_pref" : "prepend";
+  $("#policyActionPrependAsnMode").value = "local";
+  $("#policyActionPrependAsn").value = "";
+  $("#policyActionPrependCount").value = "1";
+  $("#policyActionCommunityOperation").value = "add";
+  $("#policyActionCommunityKind").value = "standard";
+  $("#policyActionCommunityValues").value = "";
+  syncPolicyActionDialog();
+  elements.policyActionDialog.showModal();
+}
+
+async function savePolicyAction(event) {
+  event.preventDefault();
+  syncPolicyActionDialog();
+  if (!event.currentTarget.reportValidity()) return;
+  const node = currentNode();
+  if (!node || !policyActionContext) return;
+  const saveButton = $("#savePolicyActionButton");
+  const originalLabel = saveButton.textContent;
+  try {
+    const source = buildPolicyActionSource();
+    saveButton.disabled = true;
+    saveButton.textContent = "正在预检";
+    const result = await api("/api/functions", {
+      method: "POST",
+      body: JSON.stringify({ nodeId: node.id, label: value("policyActionLabel"), name: value("policyActionName"), source, enabled: true }),
+    });
+    const { family, direction } = policyActionContext;
+    const peerId = currentPeer()?.id;
+    elements.policyActionDialog.close();
+    await loadDashboard(node.id, peerId);
+    const key = policyPrefix(family, direction);
+    const addSelect = $(`#${key}FunctionPicker [data-add-function-select]`);
+    if (addSelect) {
+      addSelect.value = result.resource.id;
+      addFunctionStep(family, direction);
+    }
+    toast(`已生成 Function ${result.resource.name} 并加入${direction === "import" ? "导入" : "导出"}策略`, "success");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = originalLabel;
+  }
+}
+
+function syncPolicyControls(family, direction) {
+  const key = policyPrefix(family, direction);
+  const channelEnabled = checked(`${family}Enabled`);
+  const mode = selectedPolicyMode(family, direction);
+  const combinedFields = $(`#${key}CombinedFields`);
+  const customFields = $(`#${key}CustomFields`);
+  combinedFields.hidden = mode !== "combined";
+  customFields.hidden = mode !== "custom";
+  syncFunctionStepOrder(family, direction);
+  const filterSelect = $(`#${key}FilterSelect`);
+  filterSelect.disabled = !channelEnabled || mode !== "custom";
+  filterSelect.required = channelEnabled && mode === "custom";
+  if (direction === "import") {
+    const paused = !channelEnabled || mode === "custom";
+    $(`#${key}FormAction`).disabled = paused;
+    $(`#${key}FormFields`).classList.toggle("paused", paused);
+  }
+  if (direction === "export") {
+    const paused = !channelEnabled || mode === "custom";
+    $(`#${key}FormAction`).disabled = paused;
+    $(`#${key}FormFields`).classList.toggle("paused", paused);
+    $(`#${key}FormState`).textContent = paused ? "可视化配置已暂停" : "可视化配置生效";
+    syncExportFormAvailability(family);
+  }
+}
+
+function syncConnectionMode() {
+  const multihop = value("connectionMode") === "multihop";
+  $("#multihopTtl").disabled = !multihop;
+  $("#multihopTtl").required = multihop;
+  $("#bgpInterface").disabled = multihop;
+  $("#onlink").disabled = multihop;
+  $("#checkLink").querySelector('option[value="on"]').disabled = multihop;
+  if (multihop) {
+    $("#bgpInterface").value = "";
+    $("#onlink").checked = false;
+    if (value("checkLink") === "on") $("#checkLink").value = "default";
+  }
+  for (const family of CHANNEL_FAMILIES) syncChannelRequirementControls(family);
+}
+
+function syncBfdMode() {
+  const custom = value("bfdMode") === "custom";
+  $("#bfdOptionsField").hidden = !custom;
+  $("#bfdOptions").required = custom;
+}
+
+function syncAuthenticationMode() {
+  const mode = value("bgpAuthentication");
+  const md5 = mode === "md5";
+  const ao = mode === "ao";
+  $("#bgpPasswordField").hidden = !md5;
+  $("#bgpPassword").disabled = !md5;
+  $("#bgpPassword").required = md5;
+  $("#bgpAoKeysField").hidden = !ao;
+  $("#bgpAoKeys").disabled = !ao;
+  $("#bgpAoKeys").required = ao;
+  $("#bgpSetkey").disabled = !md5;
+}
+
+function setRequirementAvailability(id, available) {
+  const field = $(`#${id}`);
+  field.disabled = !available;
+  if (!available) field.checked = false;
+}
+
+function syncCapabilityRequirements() {
+  const capabilities = value("capabilities") !== "off";
+  const routeRefresh = value("routeRefresh") !== "off";
+  const enhancedRefresh = routeRefresh && value("enhancedRouteRefresh") !== "off";
+  const gracefulRestart = value("gracefulRestart") !== "off";
+  const longLivedGracefulRestart = gracefulRestart && value("longLivedGracefulRestart") !== "off";
+  setRequirementAvailability("requireRouteRefresh", capabilities && routeRefresh);
+  setRequirementAvailability("requireEnhancedRouteRefresh", capabilities && enhancedRefresh);
+  setRequirementAvailability("requireGracefulRestart", capabilities && gracefulRestart);
+  setRequirementAvailability("requireLongLivedGracefulRestart", capabilities && longLivedGracefulRestart);
+  setRequirementAvailability("requireAs4", capabilities && value("enableAs4") !== "off");
+  setRequirementAvailability("requireExtendedMessages", capabilities && checked("extendedMessages"));
+  setRequirementAvailability("requireHostname", capabilities && checked("advertiseHostname"));
+  setRequirementAvailability("requireRoles", capabilities && Boolean(value("localRole")));
+  for (const family of CHANNEL_FAMILIES) syncChannelRequirementControls(family);
+}
+
+function syncChannelRequirementControls(family) {
+  const enabled = checked(`${family}Enabled`);
+  const capabilities = value("capabilities") !== "off";
+  const multihop = value("connectionMode") === "multihop";
+  const gateway = $(`#${family}GatewayMode`);
+  const directOption = gateway.querySelector('option[value="direct"]');
+  directOption.disabled = multihop;
+  if (multihop && gateway.value === "direct") gateway.value = "default";
+  const extendedRequirement = $(`#${family}RequireExtendedNextHop`);
+  if (extendedRequirement) {
+    extendedRequirement.disabled = !enabled || !capabilities || !checked(`${family}ExtendedNextHop`);
+    if (extendedRequirement.disabled) extendedRequirement.checked = false;
+  }
+  const addPathRequirement = $(`#${family}RequireAddPaths`);
+  addPathRequirement.disabled = !enabled || !capabilities || value(`${family}AddPaths`) === "off";
+  if (addPathRequirement.disabled) addPathRequirement.checked = false;
+  if (checked("disableAfterError") && optionalNumber(`${family}ImportLimit`) !== null && value(`${family}ImportLimitAction`) === "restart") {
+    $(`#${family}ImportLimitAction`).value = "disable";
+  }
+  $(`#${family}ImportLimitAction`).querySelector('option[value="restart"]').disabled = checked("disableAfterError");
+}
+
+function syncTimerConstraints() {
+  const hold = optionalNumber("holdTime");
+  const effectiveHold = hold ?? 240;
+  const keepalive = optionalNumber("keepaliveTime");
+  const effectiveKeepalive = keepalive ?? Math.floor(effectiveHold / 3);
+  $("#holdTime").setCustomValidity(hold !== null && hold !== 0 && hold < 3 ? "Hold Time 必须为 0 或至少 3 秒" : "");
+  $("#keepaliveTime").setCustomValidity(keepalive !== null && keepalive > effectiveHold ? "Keepalive 不能大于 Hold Time" : "");
+  const minHold = optionalNumber("minHoldTime");
+  $("#minHoldTime").setCustomValidity(minHold !== null && minHold > effectiveHold ? "Min Hold 不能大于 Hold Time" : "");
+  const minKeepalive = optionalNumber("minKeepaliveTime");
+  $("#minKeepaliveTime").setCustomValidity(minKeepalive !== null && minKeepalive > effectiveKeepalive ? "Min Keepalive 不能大于 Keepalive" : "");
+}
+
+function syncFormStepPresentation(family, direction) {
+  const key = policyPrefix(family, direction);
+  const action = value(`${key}FormAction`);
+  const label = direction === "import"
+    ? (action === "none" ? "不导入" : "导入所有")
+    : action === "all" ? "导出所有" : action === "cidr" ? "指定 CIDR" : "不导出";
+  $(`#${key}FunctionPicker .form-step small`)?.replaceChildren(label);
+}
+
+function syncExportFormAvailability(family) {
+  const key = policyPrefix(family, "export");
+  const channelEnabled = checked(`${family}Enabled`);
+  const cidrMode = value(`${key}FormAction`) === "cidr";
+  const customMode = selectedPolicyMode(family, "export") === "custom";
+  $(`#${key}CidrFields`).hidden = !cidrMode;
+  $(`#${family}ExportDefineSelect`).disabled = !channelEnabled || customMode || !cidrMode;
+  $(`#${family}ExportDefineSelect`).required = channelEnabled && cidrMode && !customMode;
+}
+
+function syncStaticAvailability(family) {
+  const channelEnabled = checked(`${family}Enabled`);
+  const hasDefine = Boolean(value(`${family}StaticDefineSelect`));
+  const action = $(`#${family}StaticRouteAction`);
+  action.disabled = !channelEnabled;
+  $(`#${family}StaticDefineSelect`).disabled = !channelEnabled;
+  $(`#${family}StaticRaw`).disabled = !channelEnabled;
+  action.setCustomValidity(channelEnabled && action.value && !hasDefine ? "Static 标准动作必须选择 CIDR Define" : "");
+}
+
+function syncChannelAvailability(family) {
+  const enabled = checked(`${family}Enabled`);
+  const content = $(`#${family}ChannelContent`);
+  content.classList.toggle("disabled", !enabled);
+  content.querySelectorAll("input, select, textarea").forEach((field) => { field.disabled = !enabled; });
+  $(`#${family}TabState`).textContent = enabled ? "开启" : "关闭";
+  $(`[data-channel-tab="${family}"]`).classList.toggle("disabled", !enabled);
+  for (const direction of ["import", "export"]) syncPolicyControls(family, direction);
+  syncChannelRequirementControls(family);
+  syncStaticAvailability(family);
+}
+
+function activateChannelTab(family) {
+  $$(".afi-tab").forEach((tab) => {
+    const active = tab.dataset.channelTab === family;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  $$(".afi-channel-panel").forEach((panel) => {
+    const active = panel.dataset.family === family;
+    panel.classList.toggle("active", active);
+    panel.hidden = !active;
+  });
+}
+
+function updatePairSummary() {
+  const localAddress = value("sessionLocalAddress") || "Local IP";
+  const localAsn = value("sessionLocalAsn");
+  $("#pairLocal").textContent = `${localAddress} · ${localAsn ? `AS${localAsn}` : "ASN 未设置"}`;
+}
+
+function renderProtocols() {
+  if (!state.peers.length) {
+    $("#protocolRows").innerHTML = '<tr><td colspan="5" class="empty-cell">尚无远端 Peer</td></tr>';
+    return;
+  }
+  $("#protocolRows").innerHTML = state.peers.map((peer) => {
+    const presentation = protocolPresentation(peer);
+    const routeCount = peer.protocol ? `${peer.protocol.imported ?? 0} / ${peer.protocol.exported ?? 0}` : "-";
+    const stateClass = peer.protocol?.established ? "up" : (peer.session ? "down" : "");
+    return `<tr data-peer-id="${escapeHtml(peer.id)}">
+      <td>${escapeHtml(peer.name)}</td>
+      <td>${escapeHtml(peer.address)}</td>
+      <td>${escapeHtml(peer.session?.protocolName ?? "-")}</td>
+      <td><span class="table-state ${stateClass}">${escapeHtml(presentation.label)}</span></td>
+      <td>${routeCount}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderEvents() {
+  $("#eventCount").textContent = state.events.length;
+  if (!state.events.length) {
+    $("#eventLog").innerHTML = '<div class="empty-cell">尚无变更日志</div>';
+    return;
+  }
+  $("#eventLog").innerHTML = [...state.events].reverse().map((entry) => {
+    const time = new Date(entry.timestamp).toLocaleTimeString("zh-CN", { hour12: false });
+    return `<div class="log-row ${escapeHtml(entry.level)}">
+      <time>${time}</time><span>${escapeHtml(entry.nodeId ?? "控制器")}</span><strong>${escapeHtml(entry.message)}</strong>
+    </div>`;
+  }).join("");
+}
+
+function renderResourceManagement() {
+  const nodes = state.inventory.nodes;
+  const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
+
+  $("#managementNodeRows").innerHTML = nodes.map((node) => `
+    <tr>
+      <td><strong>${escapeHtml(node.name)}</strong><small>${escapeHtml(node.id)}</small></td>
+      <td>SSH · ${escapeHtml(node.sshUser ? `${node.sshUser}@${node.sshHost}:${node.sshPort}` : node.sshHost)}</td>
+      <td><code>${escapeHtml(node.routerId)}</code></td>
+      <td>${node.listenPort}</td>
+      <td><button class="row-edit-button" type="button" title="编辑节点" aria-label="编辑节点 ${escapeHtml(node.name)}" data-edit-node="${escapeHtml(node.id)}">✎</button></td>
+    </tr>`).join("");
+
+  $("#managementPeerRows").innerHTML = state.inventory.peers.length
+    ? state.inventory.peers.map((peer) => `
+      <tr>
+        <td><strong>${escapeHtml(peer.name)}</strong><small>${escapeHtml(peer.id)}</small></td>
+        <td>${escapeHtml(nodeNames.get(peer.nodeId) ?? peer.nodeId)}</td>
+        <td><code>${escapeHtml(peer.address)}:${peer.port}</code></td>
+        <td>AS${peer.asn}</td>
+        <td><button class="row-edit-button" type="button" title="编辑 Peer" aria-label="编辑 Peer ${escapeHtml(peer.name)}" data-edit-peer="${escapeHtml(peer.id)}">✎</button></td>
+      </tr>`).join("")
+    : '<tr><td colspan="5" class="empty-cell">尚无 eBGP 远端</td></tr>';
+
+  const referenceCount = (collection, resourceId) => state.inventory.sessions.reduce((count, session) => {
+    const policies = Object.values(session.channels).flatMap((channel) => [channel.importPolicy, channel.exportPolicy]);
+    return count + policies.filter((policy) => collection === "functions"
+      ? policy.steps.some((step) => step.type === "function" && step.functionId === resourceId)
+      : policy.filterId === resourceId).length;
+  }, 0);
+  const statusFor = (resource, collection) => resource.enabled
+    ? (collection === "functions" && !resource.callable ? "仅源码引用" : "已启用")
+    : "已停用";
+  const sourceReferences = (source, symbol) => new RegExp(`(^|[^A-Za-z0-9_])${symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^A-Za-z0-9_]|$)`).test(String(source ?? ""));
+  const defineReferenceCount = (resource) => [...state.inventory.defines, ...state.inventory.functions, ...state.inventory.filters]
+    .filter((item) => item.id !== resource.id && sourceReferences(item.value ?? item.source, resource.name)).length +
+    state.inventory.sessions.reduce((count, session) => count + Object.values(session.channels).filter((channel) =>
+      channel.exportDefineId === resource.id || channel.static?.defineId === resource.id || sourceReferences(channel.static?.raw, resource.name),
+    ).length, 0);
+
+  $("#managementDefineRows").innerHTML = state.inventory.defines.length
+    ? state.inventory.defines.map((resource, index) => `<tr>
+      <td><strong>${escapeHtml(resource.label)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
+      <td>${resource.type === "cidr4" ? "IPv4 CIDR" : resource.type === "cidr6" ? "IPv6 CIDR" : "表达式"}</td>
+      <td>${resource.nodeId === null ? "所有节点" : escapeHtml(nodeNames.get(resource.nodeId) ?? resource.nodeId)}</td>
+      <td>${index + 1}</td>
+      <td><code class="entry-summary" title="${escapeHtml(resource.type.startsWith("cidr") ? resource.entries.join(", ") : resource.value)}">${escapeHtml(resource.type.startsWith("cidr") ? resource.entries.join(", ") : resource.value)}</code></td>
+      <td><span class="resource-state ${resource.enabled ? "enabled" : "disabled"}">${statusFor(resource, "defines")}</span></td>
+      <td>${defineReferenceCount(resource)}</td>
+      <td><span class="resource-row-actions">
+        <button class="row-edit-button" type="button" title="上移 Define" aria-label="上移 Define ${escapeHtml(resource.name)}" data-move-resource="${escapeHtml(resource.id)}" data-move-collection="defines" data-move-direction="up" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button class="row-edit-button" type="button" title="下移 Define" aria-label="下移 Define ${escapeHtml(resource.name)}" data-move-resource="${escapeHtml(resource.id)}" data-move-collection="defines" data-move-direction="down" ${index === state.inventory.defines.length - 1 ? "disabled" : ""}>↓</button>
+        <button class="row-edit-button" type="button" title="编辑 Define" aria-label="编辑 Define ${escapeHtml(resource.name)}" data-edit-policy-kind="defines" data-edit-policy-id="${escapeHtml(resource.id)}">✎</button>
+      </span></td>
+    </tr>`).join("")
+    : '<tr><td colspan="8" class="empty-cell">尚无 Define</td></tr>';
+
+  $("#managementFunctionRows").innerHTML = state.inventory.functions.length
+    ? state.inventory.functions.map((resource, index) => `<tr>
+      <td><strong>${escapeHtml(resource.label ?? resource.name)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
+      <td>${resource.nodeId === null ? "所有节点" : escapeHtml(nodeNames.get(resource.nodeId) ?? resource.nodeId)}</td>
+      <td>${index + 1}</td>
+      <td><span class="resource-state ${resource.enabled ? "enabled" : "disabled"}">${statusFor(resource, "functions")}</span></td>
+      <td>${referenceCount("functions", resource.id)}</td>
+      <td><span class="resource-row-actions">
+        <button class="row-edit-button" type="button" title="上移 Function" aria-label="上移 Function ${escapeHtml(resource.name)}" data-move-resource="${escapeHtml(resource.id)}" data-move-collection="functions" data-move-direction="up" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button class="row-edit-button" type="button" title="下移 Function" aria-label="下移 Function ${escapeHtml(resource.name)}" data-move-resource="${escapeHtml(resource.id)}" data-move-collection="functions" data-move-direction="down" ${index === state.inventory.functions.length - 1 ? "disabled" : ""}>↓</button>
+        <button class="row-edit-button" type="button" title="编辑 Function" aria-label="编辑 Function ${escapeHtml(resource.name)}" data-edit-policy-kind="functions" data-edit-policy-id="${escapeHtml(resource.id)}">✎</button>
+      </span></td>
+    </tr>`).join("")
+    : '<tr><td colspan="6" class="empty-cell">尚无 Function</td></tr>';
+
+  $("#managementFilterRows").innerHTML = state.inventory.filters.length
+    ? state.inventory.filters.map((resource) => `<tr>
+      <td><strong>${escapeHtml(resource.label ?? resource.name)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
+      <td>${resource.nodeId === null ? "所有节点" : escapeHtml(nodeNames.get(resource.nodeId) ?? resource.nodeId)}</td>
+      <td><span class="resource-state ${resource.enabled ? "enabled" : "disabled"}">${statusFor(resource, "filters")}</span></td>
+      <td>${referenceCount("filters", resource.id)}</td>
+      <td><button class="row-edit-button" type="button" title="编辑 Filter" aria-label="编辑 Filter ${escapeHtml(resource.name)}" data-edit-policy-kind="filters" data-edit-policy-id="${escapeHtml(resource.id)}">✎</button></td>
+    </tr>`).join("")
+    : '<tr><td colspan="5" class="empty-cell">尚无 Filter</td></tr>';
+
+  const rpkiNodeNames = new Map(state.inventory.nodes.map((node) => [node.id, node.name]));
+  $("#managementRPKIRows").innerHTML = (state.inventory.rpki ?? []).length
+    ? state.inventory.rpki.map((resource) => `<tr>
+      <td><strong>${escapeHtml(resource.label)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
+      <td>${resource.sourceType === "file" ? "本地文件" : `RPKI-RTR · ${escapeHtml(resource.remote)}`}</td>
+      <td>${resource.nodeId === null ? "所有节点" : escapeHtml(rpkiNodeNames.get(resource.nodeId) ?? resource.nodeId)}</td>
+      <td><code>${escapeHtml([resource.roa4Table, resource.roa6Table].filter(Boolean).join(" / "))}</code></td>
+      <td><span class="resource-state ${resource.enabled ? "enabled" : "disabled"}">${resource.enabled ? "已启用" : "已停用"}</span></td>
+      <td><button class="row-edit-button" type="button" title="编辑 RPKI" aria-label="编辑 RPKI ${escapeHtml(resource.name)}" data-edit-rpki="${escapeHtml(resource.id)}">✎</button></td>
+    </tr>`).join("")
+    : '<tr><td colspan="6" class="empty-cell">尚无 RPKI 来源</td></tr>';
+
+  $$('[data-edit-node]').forEach((button) => button.addEventListener("click", () => {
+    openNodeDialog(inventoryNode(button.dataset.editNode));
+  }));
+  $$('[data-edit-peer]').forEach((button) => button.addEventListener("click", () => {
+    openPeerDialog(state.inventory.peers.find((item) => item.id === button.dataset.editPeer));
+  }));
+  $$('[data-edit-policy-id]').forEach((button) => button.addEventListener("click", () => {
+    const collection = button.dataset.editPolicyKind;
+    openPolicyResourceDialog(collection, state.inventory[collection].find((item) => item.id === button.dataset.editPolicyId));
+  }));
+  $$('[data-edit-rpki]').forEach((button) => button.addEventListener("click", () => {
+    openRPKIDialog(state.inventory.rpki.find((item) => item.id === button.dataset.editRpki));
+  }));
+  $$('[data-move-resource]').forEach((button) => button.addEventListener("click", () => {
+    movePolicyResource(button.dataset.moveCollection, button.dataset.moveResource, button.dataset.moveDirection);
+  }));
+}
+
+function renderDashboard() {
+  renderSelectors();
+  renderTopology();
+  renderSessionForm();
+  renderProtocols();
+  renderEvents();
+  renderResourceManagement();
+  $("#localConfig").textContent = state.config;
+  const health = globalHealthPresentation();
+  elements.globalState.className = `global-state ${health.status}`;
+  elements.globalState.innerHTML = `<i></i>${health.text}`;
+  elements.globalState.title = health.text;
+  elements.globalState.setAttribute("aria-label", health.text);
+  $("#updatedAt").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+}
+
+async function loadDashboard(nodeId = null, peerId = null) {
+  elements.refresh.classList.add("loading");
+  try {
+    const params = new URLSearchParams();
+    if (nodeId) params.set("nodeId", nodeId);
+    if (peerId) params.set("peerId", peerId);
+    state = await api(`/api/dashboard?${params}`);
+    renderDashboard();
+  } catch (error) {
+    elements.globalState.className = "global-state error";
+    elements.globalState.innerHTML = "<i></i>控制器异常";
+    elements.globalState.title = "控制器异常";
+    elements.globalState.setAttribute("aria-label", "控制器异常");
+    toast(error.message, "error");
+  } finally {
+    elements.refresh.classList.remove("loading");
+  }
+}
+
+async function previewSession({ silent = false, signature = null } = {}) {
+  const valid = sessionFormValid(!silent);
+  if (!valid) return false;
+  setBusy(true, "正在预检", elements.preview);
+  try {
+    const result = await api("/api/sessions/preview", { method: "POST", body: JSON.stringify(sessionPayload()) });
+    $("#localConfig").textContent = result.config;
+    state.events = result.events;
+    renderEvents();
+    lastPreviewSignature = signature ?? JSON.stringify(sessionPayload());
+    if (!silent) toast("节点候选配置检查通过", "success");
+    return true;
+  } catch (error) {
+    if (error.data?.config) $("#localConfig").textContent = error.data.config;
+    if (error.data?.events) { state.events = error.data.events; renderEvents(); }
+    toast(error.message, "error");
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function sessionFormValid(report = false) {
+  if (!CHANNEL_FAMILIES.some((family) => checked(`${family}Enabled`))) {
+    if (report) {
+      activateChannelTab("ipv4");
+      toast("IPv4 与 IPv6 Channel 至少启用一个", "error");
+    }
+    return false;
+  }
+  const nativeValid = report ? elements.sessionForm.reportValidity() : elements.sessionForm.checkValidity();
+  return nativeValid;
+}
+
+function scheduleAutoPreview() {
+  clearTimeout(autoPreviewTimer);
+  autoPreviewTimer = setTimeout(async () => {
+    autoPreviewTimer = null;
+    if (busy) {
+      scheduleAutoPreview();
+      return;
+    }
+    if (!currentPeer() || !elements.sessionForm.checkValidity()) return;
+    const signature = JSON.stringify(sessionPayload());
+    if (signature === lastPreviewSignature) return;
+    await previewSession({ silent: true, signature });
+  }, 180);
+}
+
+async function applySession() {
+  setBusy(true, "正在应用会话变更");
+  elements.applyDialog.close();
+  const nodeId = currentNode().id;
+  const peerId = currentPeer().id;
+  try {
+    const result = await api("/api/sessions/apply", { method: "POST", body: JSON.stringify(sessionPayload()) });
+    toast(result.enabled === false
+      ? "会话已停用"
+      : result.established ? "BGP 会话已建立" : "配置已应用，正在等待远端 Peer", result.enabled === false || result.established ? "success" : "");
+    await loadDashboard(nodeId, peerId);
+  } catch (error) {
+    toast(error.message, "error");
+    await loadDashboard(nodeId, peerId);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function toggleSshField() {
+  const isSsh = value("nodeEditorTransport") === "ssh";
+  $("#sshHostField").hidden = !isSsh;
+  $("#nodeEditorSshHost").required = isSsh;
+  $("#nodeEditorSshUser").required = isSsh && value("nodeEditorDeploymentMode") === "include";
+}
+
+function nodeEditorPayload() {
+  return {
+    name: value("nodeEditorName"),
+    transport: "ssh",
+    sshHost: value("nodeEditorSshHost"),
+    sshPort: Number(value("nodeEditorSshPort")),
+    sshUser: value("nodeEditorSshUser") || null,
+    sshIdentity: value("nodeEditorSshIdentity"),
+    deploymentMode: value("nodeEditorDeploymentMode"),
+    mainConfigPath: value("nodeEditorMainConfigPath"),
+    generatedConfigPath: value("nodeEditorGeneratedConfigPath"),
+    socketPath: value("nodeEditorSocketPath"),
+    routerId: value("nodeEditorRouterId"),
+    listenPort: Number(value("nodeEditorPort")),
+  };
+}
+
+function setNodeOnboardingStatus(message, stateName = "") {
+  const status = $("#nodeOnboardingStatus");
+  status.textContent = message;
+  status.className = stateName;
+}
+
+function resetNodeOnboardingVerification() {
+  if (value("nodeId")) return;
+  delete $("#nodeForm").dataset.verified;
+  $("#saveNodeButton").disabled = true;
+  setNodeOnboardingStatus("等待连接测试");
+}
+
+function openNodeDialog(node = null) {
+  $("#nodeDialogTitle").textContent = node ? "编辑受管节点" : "添加受管节点";
+  $("#nodeId").value = node?.id ?? "";
+  $("#nodeEditorName").value = node?.name ?? "";
+  $("#nodeEditorTransport").value = "ssh";
+  $("#nodeEditorDeploymentMode").value = node?.deploymentMode ?? "include";
+  $("#nodeEditorSshIdentity").value = node?.sshIdentity ?? "managed";
+  $("#nodeEditorSshHost").value = node?.sshHost ?? "";
+  $("#nodeEditorSshUser").value = node?.sshUser ?? "";
+  $("#nodeEditorSshPort").value = node?.sshPort ?? 22;
+  $("#nodeEditorRouterId").value = node?.routerId ?? "";
+  $("#nodeEditorPort").value = node?.listenPort ?? 179;
+  $("#nodeEditorMainConfigPath").value = node?.mainConfigPath ?? "/etc/bird/bird.conf";
+  $("#nodeEditorGeneratedConfigPath").value = node?.generatedConfigPath ?? "/var/lib/birdbox/generated.conf";
+  $("#nodeEditorSocketPath").value = node?.socketPath ?? "/run/bird/bird.ctl";
+  $("#nodeBirdPaths").open = !node || node.deploymentMode === "include";
+  $("#nodeOnboardingPanel").hidden = Boolean(node);
+  $("#nodeSetupGuide").hidden = true;
+  $("#nodeSetupScript").textContent = "";
+  $("#nodeIncludeLine").textContent = "";
+  if (node) {
+    $("#nodeForm").dataset.verified = "true";
+    $("#saveNodeButton").disabled = false;
+  } else {
+    resetNodeOnboardingVerification();
+  }
+  $("#deleteNodeButton").hidden = !node;
+  toggleSshField();
+  elements.nodeDialog.showModal();
+}
+
+async function saveNode(event) {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const id = value("nodeId");
+  if (!id && event.currentTarget.dataset.verified !== "true") {
+    toast("请先完成节点连接测试", "error");
+    return;
+  }
+  const body = nodeEditorPayload();
+  try {
+    const result = await api(id ? `/api/nodes/${id}` : "/api/nodes", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    elements.nodeDialog.close();
+    toast(id ? `节点已更新，${deploymentSummary(result.deployment)}` : "节点已添加", "success");
+    await loadDashboard(result.node.id);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function generateNodeSetupScript() {
+  if (!$("#nodeForm").reportValidity()) return;
+  const button = $("#generateNodeSetupButton");
+  button.disabled = true;
+  setNodeOnboardingStatus("正在生成");
+  try {
+    const result = await api("/api/nodes/setup-script", { method: "POST", body: JSON.stringify(nodeEditorPayload()) });
+    $("#nodeSetupScript").textContent = result.script;
+    $("#nodeIncludeLine").textContent = result.includeLine;
+    $("#nodeSetupGuide").hidden = false;
+    setNodeOnboardingStatus("脚本已生成");
+  } catch (error) {
+    setNodeOnboardingStatus("生成失败", "error");
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testNodeConnection() {
+  if (!$("#nodeForm").reportValidity()) return;
+  const button = $("#testNodeConnectionButton");
+  button.disabled = true;
+  setNodeOnboardingStatus("正在检查 SSH、Include 与 BIRD");
+  try {
+    const result = await api("/api/nodes/test", { method: "POST", body: JSON.stringify(nodeEditorPayload()) });
+    $("#nodeForm").dataset.verified = "true";
+    $("#saveNodeButton").disabled = false;
+    setNodeOnboardingStatus(`${result.runtime.version} · 检查通过`, "ready");
+    toast("节点接入检查通过", "success");
+  } catch (error) {
+    delete $("#nodeForm").dataset.verified;
+    $("#saveNodeButton").disabled = true;
+    setNodeOnboardingStatus("检查失败", "error");
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function openPeerDialog(peer = null) {
+  const selectedNodeId = peer?.nodeId ?? currentNode().id;
+  $("#peerDialogTitle").textContent = peer ? "编辑外部 Peer" : "添加外部 Peer";
+  $("#peerId").value = peer?.id ?? "";
+  $("#peerEditorNodeId").innerHTML = nodeOptions(selectedNodeId);
+  $("#peerEditorNodeId").disabled = Boolean(peer);
+  $("#peerEditorName").value = peer?.name ?? "";
+  $("#peerEditorAddress").value = peer?.address ?? "";
+  $("#peerEditorAsn").value = peer?.asn ?? "";
+  $("#peerEditorPort").value = peer?.port ?? 179;
+  $("#deletePeerButton").hidden = !peer;
+  elements.peerDialog.showModal();
+}
+
+async function savePeer(event) {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const id = value("peerId");
+  const nodeId = value("peerEditorNodeId");
+  const body = {
+    name: value("peerEditorName"),
+    address: value("peerEditorAddress"),
+    asn: Number(value("peerEditorAsn")),
+    port: Number(value("peerEditorPort")),
+  };
+  try {
+    const result = await api(id ? `/api/peers/${id}` : `/api/nodes/${nodeId}/peers`, { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    elements.peerDialog.close();
+    toast(id ? `Peer 已更新，${deploymentSummary(result.deployment)}` : "Peer 已添加", "success");
+    await loadDashboard(nodeId, result.peer.id);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+function syncRPKIFields() {
+  const isFile = value("rpkiSourceType") === "file";
+  const isSsh = !isFile && value("rpkiTransport") === "ssh";
+  $("#rpkiFileFields").hidden = !isFile;
+  $("#rpkiFile6Field").hidden = !isFile;
+  $("#rpkiServerFields").hidden = isFile;
+  $("#rpkiSshFields").hidden = !isSsh;
+  $("#rpkiRemote").required = !isFile;
+  $("#rpkiAuthentication").disabled = isFile || isSsh;
+  $("#rpkiPassword").disabled = isFile || isSsh || value("rpkiAuthentication") !== "md5";
+  $("#rpkiPasswordField").hidden = isFile || isSsh;
+  ["rpkiRemote", "rpkiPort", "rpkiLocalAddress", "rpkiTransport", "rpkiRefresh", "rpkiRetry", "rpkiExpire", "rpkiMinVersion", "rpkiMaxVersion", "rpkiIgnoreMaxLength", "rpkiKeepRefresh", "rpkiKeepRetry", "rpkiKeepExpire"].forEach((id) => {
+    const field = $(`#${id}`);
+    if (field) field.disabled = isFile;
+  });
+  $("#rpkiBirdPrivateKey").disabled = !isSsh;
+  $("#rpkiRemotePublicKey").disabled = !isSsh;
+  $("#rpkiUser").disabled = !isSsh;
+  if (!isSsh) {
+    $("#rpkiBirdPrivateKey").value = "";
+    $("#rpkiRemotePublicKey").value = "";
+    $("#rpkiUser").value = "";
+  }
+}
+
+function syncRPKINames() {
+  if (value("rpkiId") || !value("rpkiLabel")) return;
+  const label = value("rpkiLabel");
+  if (!$("#rpkiName").dataset.edited) $("#rpkiName").value = uniqueBirdName("rpki", label, [], 60);
+  if (!$("#rpkiRoa4Table").dataset.edited) $("#rpkiRoa4Table").value = uniqueBirdName("roa4", label);
+  if (!$("#rpkiRoa6Table").dataset.edited) $("#rpkiRoa6Table").value = uniqueBirdName("roa6", label);
+}
+
+function openRPKIDialog(resource = null) {
+  $("#rpkiDialogTitle").textContent = resource ? "编辑 RPKI 资源" : "添加 RPKI 资源";
+  $("#rpkiId").value = resource?.id ?? "";
+  $("#rpkiNodeId").innerHTML = resourceScopeOptions(resource?.nodeId ?? null);
+  $("#rpkiLabel").value = resource?.label ?? "";
+  $("#rpkiName").value = resource?.name ?? "";
+  $("#rpkiSourceType").value = resource?.sourceType ?? "file";
+  $("#rpkiRoa4Table").value = resource?.roa4Table ?? "";
+  $("#rpkiRoa6Table").value = resource?.roa6Table ?? "";
+  $("#rpkiFile4").value = resource?.file4 ?? "";
+  $("#rpkiFile6").value = resource?.file6 ?? "";
+  $("#rpkiRemote").value = resource?.remote ?? "";
+  $("#rpkiPort").value = resource?.port ?? 323;
+  $("#rpkiLocalAddress").value = resource?.localAddress ?? "";
+  $("#rpkiTransport").value = resource?.transport ?? "tcp";
+  $("#rpkiAuthentication").value = resource?.authentication ?? "none";
+  $("#rpkiPassword").value = "";
+  $("#rpkiPassword").placeholder = resource?.password ? "留空保持不变" : "TCP-MD5 密码";
+  $("#rpkiRefresh").value = resource?.refresh ?? "";
+  $("#rpkiRetry").value = resource?.retry ?? "";
+  $("#rpkiExpire").value = resource?.expire ?? "";
+  $("#rpkiMinVersion").value = resource?.minVersion ?? "";
+  $("#rpkiMaxVersion").value = resource?.maxVersion ?? "";
+  $("#rpkiIgnoreMaxLength").value = resource?.ignoreMaxLength ?? "default";
+  $("#rpkiKeepRefresh").checked = resource?.keepRefresh === true;
+  $("#rpkiKeepRetry").checked = resource?.keepRetry === true;
+  $("#rpkiKeepExpire").checked = resource?.keepExpire === true;
+  $("#rpkiBirdPrivateKey").value = resource?.birdPrivateKey ?? "";
+  $("#rpkiRemotePublicKey").value = resource?.remotePublicKey ?? "";
+  $("#rpkiUser").value = resource?.user ?? "";
+  $("#rpkiEnabled").checked = resource?.enabled !== false;
+  $("#deleteRPKIButton").hidden = !resource;
+  for (const id of ["rpkiName", "rpkiRoa4Table", "rpkiRoa6Table"]) {
+    if (resource) $(`#${id}`).dataset.edited = "true";
+    else delete $(`#${id}`).dataset.edited;
+  }
+  syncRPKIFields();
+  elements.rpkiDialog.showModal();
+}
+
+async function saveRPKI(event) {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const id = value("rpkiId");
+  const sourceType = value("rpkiSourceType");
+  const transport = value("rpkiTransport");
+  const body = {
+    nodeId: value("rpkiNodeId") || null,
+    label: value("rpkiLabel"),
+    name: value("rpkiName"),
+    sourceType,
+    roa4Table: value("rpkiRoa4Table") || null,
+    roa6Table: value("rpkiRoa6Table") || null,
+    enabled: $("#rpkiEnabled").checked,
+    ...(sourceType === "file"
+      ? { file4: value("rpkiFile4") || null, file6: value("rpkiFile6") || null }
+      : {
+          remote: value("rpkiRemote"),
+          port: Number(value("rpkiPort")),
+          localAddress: value("rpkiLocalAddress") || null,
+          transport,
+          authentication: value("rpkiAuthentication"),
+          ...(() => {
+            const current = id ? state.inventory.rpki.find((item) => item.id === id) : null;
+            if (value("rpkiPassword")) return { password: value("rpkiPassword") };
+            if (current?.authentication === "md5" && value("rpkiAuthentication") === "md5") return {};
+            return { password: null };
+          })(),
+          refresh: optionalNumber("rpkiRefresh"),
+          retry: optionalNumber("rpkiRetry"),
+          expire: optionalNumber("rpkiExpire"),
+          minVersion: optionalNumber("rpkiMinVersion"),
+          maxVersion: optionalNumber("rpkiMaxVersion"),
+          ignoreMaxLength: value("rpkiIgnoreMaxLength"),
+          keepRefresh: checked("rpkiKeepRefresh"),
+          keepRetry: checked("rpkiKeepRetry"),
+          keepExpire: checked("rpkiKeepExpire"),
+          birdPrivateKey: value("rpkiBirdPrivateKey") || null,
+          remotePublicKey: value("rpkiRemotePublicKey") || null,
+          user: value("rpkiUser") || null,
+        }),
+  };
+  try {
+    const result = await api(id ? `/api/rpki/${id}` : "/api/rpki", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    elements.rpkiDialog.close();
+    toast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
+    await loadDashboard(currentNode()?.id, currentPeer()?.id);
+    activateResourceTab("rpki");
+  } catch (error) { toast(error.message, "error"); }
+}
+
+function policyKindLabel(collection) {
+  return collection === "functions" ? "Function" : collection === "filters" ? "Filter" : "Define";
+}
+
+function defaultPolicySource(collection, name) {
+  if (!name) return "";
+  return collection === "functions"
+    ? `function ${name}()\n{\n  return true;\n}`
+    : collection === "filters"
+      ? `filter ${name}\n{\n  reject;\n}`
+      : "true";
+}
+
+function defaultPolicyResourceName(collection, label, type) {
+  const prefix = collection === "functions"
+    ? "function"
+    : collection === "filters"
+      ? "filter"
+      : type === "cidr4"
+        ? "prefix4"
+        : type === "cidr6"
+          ? "prefix6"
+          : "define";
+  return uniqueBirdName(prefix, label);
+}
+
+function syncPolicyResourceName() {
+  if (value("policyResourceId") || $("#policyResourceName").dataset.edited) return;
+  const collection = value("policyResourceKind");
+  const type = value("policyResourceType") || "cidr4";
+  const previousName = value("policyResourceName");
+  const generated = defaultPolicyResourceName(collection, value("policyResourceLabel"), type);
+  $("#policyResourceName").value = generated;
+  if (!$("#policyResourceSource").dataset.edited) {
+    $("#policyResourceSource").value = collection === "defines" && type.startsWith("cidr") ? "" : defaultPolicySource(collection, generated);
+    updatePolicySourceEditor();
+  } else if (previousName && (collection === "functions" || collection === "filters")) {
+    const declaration = collection === "functions" ? "function" : "filter";
+    const escapedName = previousName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    $("#policyResourceSource").value = $("#policyResourceSource").value.replace(
+      new RegExp(`^(\\s*${declaration}\\s+)${escapedName}(?=\\s*[({])`),
+      `$1${generated}`,
+    );
+    updatePolicySourceEditor();
+  }
+}
+
+function updatePolicySourceEditor() {
+  const editor = $("#policyResourceSource");
+  const lineCount = Math.max(1, editor.value.split("\n").length);
+  $("#policySourceLines").textContent = Array.from({ length: lineCount }, (_, index) => index + 1).join("\n");
+  const beforeCursor = editor.value.slice(0, editor.selectionStart);
+  const lines = beforeCursor.split("\n");
+  $("#policySourcePosition").textContent = `Ln ${lines.length}, Col ${lines.at(-1).length + 1}`;
+  $("#policySourceLines").scrollTop = editor.scrollTop;
+}
+
+function renderPolicySourceReferences() {
+  const nodeId = value("policyResourceNodeId") || null;
+  const compatible = (resource) => resource.nodeId === null || (nodeId !== null && resource.nodeId === nodeId);
+  const currentId = value("policyResourceId");
+  const currentIndex = (state?.inventory?.defines ?? []).findIndex((resource) => resource.id === currentId);
+  const available = (state?.inventory?.defines ?? []).filter((resource, index) =>
+    resource.enabled && resource.id !== currentId && compatible(resource) &&
+    (value("policyResourceKind") !== "defines" || currentIndex < 0 || index < currentIndex),
+  );
+  $("#policySourceReferences").innerHTML = available.length
+    ? available.map((resource) => `<button class="code-reference-button" type="button" title="插入 ${escapeHtml(resource.name)}" data-insert-define="${escapeHtml(resource.name)}">${escapeHtml(resource.label ?? resource.name)} · ${escapeHtml(resource.name)}</button>`).join("")
+    : '<span class="code-reference-empty">无</span>';
+}
+
+function syncPolicyResourceEditor() {
+  const collection = value("policyResourceKind");
+  const isDefine = collection === "defines";
+  const defineType = value("policyResourceType") || "cidr4";
+  $("#policyResourceTypeField").hidden = !isDefine;
+  $("#policyResourceLabelField").hidden = false;
+  $("#policyResourceLabel").required = true;
+  $("#policyResourceSourceLabel").textContent = isDefine
+    ? (defineType === "cidr4" ? "IPv4 CIDR 条目" : defineType === "cidr6" ? "IPv6 CIDR 条目" : "值 / 表达式")
+    : "源码";
+  $("#policyResourceSource").placeholder = collection === "functions"
+    ? "function allow_route()\n{\n  return true;\n}"
+    : collection === "filters"
+      ? "filter peer_policy\n{\n  reject;\n}"
+      : defineType === "cidr4"
+        ? "10.0.0.0/8+\n192.0.2.0/24"
+        : defineType === "cidr6"
+          ? "2001:db8::/32+\n2001:db8:100::/48"
+        : "150";
+  $("#policySourceReferencePanel").hidden = isDefine && defineType.startsWith("cidr");
+  renderPolicySourceReferences();
+  updatePolicySourceEditor();
+}
+
+function replacePolicySource(start, end, text, selectionStart, selectionEnd = selectionStart) {
+  const editor = $("#policyResourceSource");
+  editor.setRangeText(text, start, end, "end");
+  editor.setSelectionRange(selectionStart, selectionEnd);
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function handlePolicySourceKeydown(event) {
+  const editor = event.currentTarget;
+  if (event.key === "Tab") {
+    event.preventDefault();
+    const { selectionStart: start, selectionEnd: end, value: source } = editor;
+    const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+    if (start === end && !event.shiftKey) {
+      replacePolicySource(start, end, "  ", start + 2);
+      return;
+    }
+    const blockEnd = source.indexOf("\n", end);
+    const replaceEnd = blockEnd < 0 ? source.length : blockEnd;
+    const block = source.slice(lineStart, replaceEnd);
+    const lines = block.split("\n");
+    const transformed = lines.map((line) => event.shiftKey ? line.replace(/^ {1,2}/, "") : `  ${line}`);
+    const firstDelta = transformed[0].length - lines[0].length;
+    const totalDelta = transformed.join("\n").length - block.length;
+    replacePolicySource(lineStart, replaceEnd, transformed.join("\n"), Math.max(lineStart, start + firstDelta), Math.max(lineStart, end + totalDelta));
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const { selectionStart: start, selectionEnd: end, value: source } = editor;
+    const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+    const currentLine = source.slice(lineStart, start);
+    const baseIndent = currentLine.match(/^\s*/)?.[0] ?? "";
+    const nested = currentLine.trimEnd().endsWith("{");
+    const indent = nested ? `${baseIndent}  ` : baseIndent;
+    if (nested && source.slice(end).trimStart().startsWith("}")) {
+      const insertion = `\n${indent}\n${baseIndent}`;
+      replacePolicySource(start, end, insertion, start + 1 + indent.length);
+    } else {
+      const insertion = `\n${indent}`;
+      replacePolicySource(start, end, insertion, start + insertion.length);
+    }
+  }
+}
+
+function openPolicyResourceDialog(collection, resource = null) {
+  const kind = policyKindLabel(collection);
+  $("#policyResourceDialogTitle").textContent = `${resource ? "编辑" : "添加"} ${kind}`;
+  $("#policyResourceIcon").textContent = collection === "functions" ? "ƒ" : collection === "filters" ? "F" : "D";
+  $("#policyResourceId").value = resource?.id ?? "";
+  $("#policyResourceKind").value = collection;
+  $("#policyResourceNodeId").innerHTML = resourceScopeOptions(resource ? resource.nodeId : null);
+  $("#policyResourceType").value = resource?.type ?? "cidr4";
+  $("#policyResourceLabel").value = resource?.label ?? resource?.name ?? "";
+  $("#policyResourceName").value = resource?.name ?? "";
+  $("#policyResourceSource").value = resource?.type?.startsWith("cidr")
+    ? resource.entries.join("\n")
+    : resource?.source ?? resource?.value ?? "";
+  $("#policyResourceEnabled").checked = resource?.enabled ?? true;
+  if (resource) {
+    $("#policyResourceSource").dataset.edited = "true";
+    $("#policyResourceName").dataset.edited = "true";
+  } else {
+    delete $("#policyResourceSource").dataset.edited;
+    delete $("#policyResourceName").dataset.edited;
+  }
+  $("#deletePolicyResourceButton").hidden = !resource;
+  syncPolicyResourceEditor();
+  elements.policyResourceDialog.showModal();
+}
+
+async function movePolicyResource(collection, resourceId, direction) {
+  try {
+    await api(`/api/${collection}/${resourceId}/move`, { method: "POST", body: JSON.stringify({ direction }) });
+    await loadDashboard(currentNode().id, currentPeer()?.id);
+    activateResourceTab(collection);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function savePolicyResource(event) {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const id = value("policyResourceId");
+  const collection = value("policyResourceKind");
+  const kind = policyKindLabel(collection);
+  const body = {
+    nodeId: value("policyResourceNodeId") || null,
+    label: value("policyResourceLabel"),
+    name: value("policyResourceName"),
+    enabled: $("#policyResourceEnabled").checked,
+    ...(collection === "defines"
+      ? {
+          type: value("policyResourceType"),
+          ...(value("policyResourceType").startsWith("cidr")
+            ? { entries: $("#policyResourceSource").value }
+            : { value: $("#policyResourceSource").value }),
+        }
+      : { source: $("#policyResourceSource").value }),
+  };
+  const saveButton = $("#savePolicyResourceButton");
+  const originalLabel = saveButton.textContent;
+  saveButton.disabled = true;
+  saveButton.textContent = "正在预检";
+  try {
+    const result = await api(id ? `/api/${collection}/${id}` : `/api/${collection}`, {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(body),
+    });
+    elements.policyResourceDialog.close();
+    toast(`${kind} 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
+    await loadDashboard(body.nodeId ?? currentNode().id, currentPeer()?.id);
+    activateResourceTab(collection);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = originalLabel;
+  }
+}
+
+elements.refresh.addEventListener("click", () => loadDashboard(currentNode()?.id, currentPeer()?.id));
+$("#nodeSelect").addEventListener("change", (event) => loadDashboard(event.target.value));
+$("#peerSelect").addEventListener("change", (event) => loadDashboard(currentNode().id, event.target.value));
+function moveTabFocus(event, tabs, activate) {
+  const keys = ["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"];
+  if (!keys.includes(event.key)) return;
+  event.preventDefault();
+  const current = tabs.indexOf(event.currentTarget);
+  const next = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? tabs.length - 1
+      : (current + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) + tabs.length) % tabs.length;
+  const target = tabs[next];
+  target.focus();
+  activate(target);
+}
+
+const workspaceTabs = $$(".workspace-tab");
+workspaceTabs.forEach((tab) => {
+  tab.addEventListener("click", () => activateWorkspace(tab.dataset.workspace));
+  tab.addEventListener("keydown", (event) => moveTabFocus(event, workspaceTabs, (target) => activateWorkspace(target.dataset.workspace)));
+});
+const resourceTabs = $$(".resource-tab");
+resourceTabs.forEach((tab) => {
+  tab.addEventListener("click", () => activateResourceTab(tab.dataset.resourceTab));
+  tab.addEventListener("keydown", (event) => moveTabFocus(event, resourceTabs, (target) => activateResourceTab(target.dataset.resourceTab)));
+});
+$$('.afi-tab').forEach((tab) => tab.addEventListener("click", () => activateChannelTab(tab.dataset.channelTab)));
+$$('[data-resource-target]').forEach((button) => button.addEventListener("click", () => {
+  activateWorkspace("resourceWorkspace", button.dataset.resourceTarget);
+}));
+$("#emptyAddPeerButton").addEventListener("click", () => activateWorkspace("resourceWorkspace", "peers"));
+$("#manageAddNodeButton").addEventListener("click", () => openNodeDialog());
+$("#manageAddPeerButton").addEventListener("click", () => openPeerDialog());
+$("#manageAddDefineButton").addEventListener("click", () => openPolicyResourceDialog("defines"));
+$("#manageAddFunctionButton").addEventListener("click", () => openPolicyResourceDialog("functions"));
+$("#manageAddFilterButton").addEventListener("click", () => openPolicyResourceDialog("filters"));
+$("#manageAddRPKIButton").addEventListener("click", () => openRPKIDialog());
+$("#nodeEditorTransport").addEventListener("change", toggleSshField);
+$("#nodeForm").addEventListener("submit", saveNode);
+$("#nodeForm").addEventListener("input", () => {
+  if (value("nodeId")) return;
+  resetNodeOnboardingVerification();
+  $("#nodeSetupGuide").hidden = true;
+});
+$("#generateNodeSetupButton").addEventListener("click", generateNodeSetupScript);
+$("#testNodeConnectionButton").addEventListener("click", testNodeConnection);
+$("#copyNodeSetupButton").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("#nodeSetupScript").textContent);
+    toast("准备脚本已复制", "success");
+  } catch {
+    toast("无法访问剪贴板", "error");
+  }
+});
+$("#peerForm").addEventListener("submit", savePeer);
+$("#policyResourceForm").addEventListener("submit", savePolicyResource);
+$("#rpkiForm").addEventListener("submit", saveRPKI);
+$("#rpkiLabel").addEventListener("input", syncRPKINames);
+for (const id of ["rpkiName", "rpkiRoa4Table", "rpkiRoa6Table"]) {
+  $(`#${id}`).addEventListener("input", () => { $(`#${id}`).dataset.edited = "true"; });
+}
+$("#rpkiSourceType").addEventListener("change", syncRPKIFields);
+$("#rpkiTransport").addEventListener("change", syncRPKIFields);
+$("#rpkiAuthentication").addEventListener("change", syncRPKIFields);
+$("#sessionLocalAddress").addEventListener("input", updatePairSummary);
+$("#sessionLocalAsn").addEventListener("input", updatePairSummary);
+elements.sessionForm.addEventListener("change", (event) => {
+  if (event.target.id === "connectionMode") syncConnectionMode();
+  if (event.target.id === "bfdMode") syncBfdMode();
+  if (event.target.id === "bgpAuthentication") syncAuthenticationMode();
+  if ([
+    "capabilities", "routeRefresh", "enhancedRouteRefresh", "gracefulRestart",
+    "longLivedGracefulRestart", "enableAs4", "extendedMessages", "advertiseHostname",
+    "localRole",
+  ].includes(event.target.id)) syncCapabilityRequirements();
+  if (event.target.id === "disableAfterError") {
+    for (const item of CHANNEL_FAMILIES) syncChannelRequirementControls(item);
+  }
+  if (["holdTime", "keepaliveTime", "minHoldTime", "minKeepaliveTime"].includes(event.target.id)) syncTimerConstraints();
+  const family = CHANNEL_FAMILIES.find((item) => event.target.id.startsWith(item) || event.target.name?.startsWith(item));
+  if (family && event.target.id === `${family}Enabled`) syncChannelAvailability(family);
+  if (family && event.target.id === `${family}ExportDefineSelect`) syncExportFormAvailability(family);
+  if (family && [`${family}StaticDefineSelect`, `${family}StaticRouteAction`].includes(event.target.id)) syncStaticAvailability(family);
+  if (family && [
+    `${family}ExtendedNextHop`, `${family}AddPaths`, `${family}GatewayMode`,
+    `${family}ImportLimit`, `${family}ImportLimitAction`,
+  ].includes(event.target.id)) syncChannelRequirementControls(family);
+  for (const direction of ["import", "export"]) {
+    const key = family ? policyPrefix(family, direction) : null;
+    if (key && event.target.id === `${key}FormAction`) {
+      syncFormStepPresentation(family, direction);
+      if (direction === "export") syncExportFormAvailability(family);
+    }
+    if (key && event.target.name === `${key}PolicyMode`) syncPolicyControls(family, direction);
+  }
+  scheduleAutoPreview();
+});
+elements.sessionForm.addEventListener("input", (event) => {
+  if (["holdTime", "keepaliveTime", "minHoldTime", "minKeepaliveTime"].includes(event.target.id)) syncTimerConstraints();
+});
+elements.sessionForm.addEventListener("focusout", (event) => {
+  if (event.target.matches("input, select, textarea")) scheduleAutoPreview();
+});
+$("#policyResourceLabel").addEventListener("input", () => {
+  syncPolicyResourceName();
+});
+$("#policyResourceType").addEventListener("change", () => {
+  $("#policyResourceSource").value = value("policyResourceType").startsWith("cidr") ? "" : "true";
+  delete $("#policyResourceSource").dataset.edited;
+  syncPolicyResourceName();
+  syncPolicyResourceEditor();
+});
+$("#policyResourceName").addEventListener("input", () => {
+  $("#policyResourceName").dataset.edited = "true";
+  if (
+    !value("policyResourceId") &&
+    !$("#policyResourceSource").dataset.edited &&
+    (value("policyResourceKind") !== "defines" || value("policyResourceType") === "expression")
+  ) {
+    $("#policyResourceSource").value = defaultPolicySource(value("policyResourceKind"), value("policyResourceName"));
+    updatePolicySourceEditor();
+  }
+});
+$("#policyResourceSource").addEventListener("input", () => {
+  $("#policyResourceSource").dataset.edited = "true";
+  updatePolicySourceEditor();
+});
+$("#policyResourceSource").addEventListener("keydown", handlePolicySourceKeydown);
+$("#policyResourceSource").addEventListener("scroll", updatePolicySourceEditor);
+$("#policyResourceSource").addEventListener("click", updatePolicySourceEditor);
+$("#policyResourceSource").addEventListener("keyup", updatePolicySourceEditor);
+$("#policyResourceNodeId").addEventListener("change", renderPolicySourceReferences);
+$("#policySourceReferences").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-insert-define]");
+  if (!button) return;
+  const editor = $("#policyResourceSource");
+  const symbol = button.dataset.insertDefine;
+  replacePolicySource(editor.selectionStart, editor.selectionEnd, symbol, editor.selectionStart + symbol.length);
+  editor.focus();
+});
+
+$("#policyActionForm").addEventListener("submit", savePolicyAction);
+$("#policyActionLabel").addEventListener("input", () => {
+  $("#policyActionLabel").dataset.edited = "true";
+  syncPolicyActionName();
+});
+$("#policyActionName").addEventListener("input", () => { $("#policyActionName").dataset.edited = "true"; });
+["policyActionType", "policyActionCommunityOperation", "policyActionCommunityKind", "policyActionPrependAsnMode"].forEach((id) => {
+  $(`#${id}`).addEventListener("change", syncPolicyActionDialog);
+});
+$("#policyActionDefineSelect").addEventListener("change", () => {
+  const define = value("policyActionDefineSelect");
+  if (!define) return;
+  const editor = $("#policyActionCondition");
+  editor.value = `net ~ ${define}`;
+  editor.focus();
+});
+
+$$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
+
+$("#deleteNodeButton").addEventListener("click", async () => {
+  const node = inventoryNode(value("nodeId"));
+  if (!node) return;
+  if (!window.confirm(`删除节点 ${node.name}？`)) return;
+  try {
+    await api(`/api/nodes/${node.id}`, { method: "DELETE" });
+    elements.nodeDialog.close();
+    toast("节点已删除", "success");
+    await loadDashboard();
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#deletePeerButton").addEventListener("click", async () => {
+  const peer = state.inventory.peers.find((item) => item.id === value("peerId"));
+  if (!peer) return;
+  if (!window.confirm(`删除 Peer ${peer.name}？`)) return;
+  try {
+    await api(`/api/peers/${peer.id}`, { method: "DELETE" });
+    elements.peerDialog.close();
+    toast("Peer 已删除", "success");
+    await loadDashboard(peer.nodeId);
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#deletePolicyResourceButton").addEventListener("click", async () => {
+  const collection = value("policyResourceKind");
+  const resource = state.inventory[collection].find((item) => item.id === value("policyResourceId"));
+  if (!resource || !window.confirm(`删除 ${policyKindLabel(collection)} ${resource.name}？`)) return;
+  try {
+    await api(`/api/${collection}/${resource.id}`, { method: "DELETE" });
+    elements.policyResourceDialog.close();
+    toast(`${policyKindLabel(collection)} 已删除`, "success");
+    await loadDashboard(resource.nodeId ?? currentNode().id, currentPeer()?.id);
+    activateResourceTab(collection);
+  } catch (error) { toast(error.message, "error"); }
+});
+
+$("#deleteRPKIButton").addEventListener("click", async () => {
+  const resource = state.inventory.rpki.find((item) => item.id === value("rpkiId"));
+  if (!resource || !window.confirm(`删除 RPKI ${resource.name}？`)) return;
+  try {
+    await api(`/api/rpki/${resource.id}`, { method: "DELETE" });
+    elements.rpkiDialog.close();
+    toast("RPKI 已删除", "success");
+    await loadDashboard(currentNode()?.id, currentPeer()?.id);
+    activateResourceTab("rpki");
+  } catch (error) { toast(error.message, "error"); }
+});
+
+elements.sessionForm.addEventListener("submit", async (event) => { event.preventDefault(); await previewSession(); });
+elements.apply.addEventListener("click", () => {
+  if (!sessionFormValid(true)) return;
+  $("#dialogLocal").textContent = `${value("sessionLocalAddress")} · AS${value("sessionLocalAsn")}`;
+  $("#dialogRemote").textContent = `${currentPeer().name} · AS${currentPeer().asn}`;
+  elements.applyDialog.showModal();
+});
+$("#confirmApplyButton").addEventListener("click", (event) => { event.preventDefault(); applySession(); });
+
+elements.removeSession.addEventListener("click", async () => {
+  const session = currentPeer()?.session;
+  if (!session || !window.confirm(`移除会话 ${session.protocolName}？`)) return;
+  const nodeId = currentNode().id;
+  const peerId = currentPeer().id;
+  setBusy(true, "正在移除会话", elements.removeSession);
+  try {
+    await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+    toast("会话已移除", "success");
+    await loadDashboard(nodeId, peerId);
+  } catch (error) { toast(error.message, "error"); }
+  finally { setBusy(false); }
+});
+
+elements.stop.addEventListener("click", async () => {
+  const node = currentNode();
+  const peer = currentPeer();
+  const session = peer?.session;
+  if (!node || !peer || !session) return;
+  const disabled = peer.protocol?.disabled === true;
+  const action = disabled ? "enable" : "disable";
+  if (!window.confirm(`${disabled ? "启动" : "停止"} ${node.name} 上的 BGP 会话 ${session.protocolName}？`)) return;
+  setBusy(true, disabled ? "正在启动会话" : "正在停止会话", elements.stop);
+  try {
+    await api(`/api/sessions/${session.id}/control`, { method: "POST", body: JSON.stringify({ action }) });
+    toast(disabled ? "BGP 会话已启动" : "BGP 会话已停止", "success");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await loadDashboard(node.id, currentPeer()?.id);
+  } catch (error) { toast(error.message, "error"); }
+  finally { setBusy(false); }
+});
+
+$$('.tab').forEach((tab) => tab.addEventListener("click", () => {
+  $$('.tab').forEach((item) => item.classList.toggle("active", item === tab));
+  $$('.tab').forEach((item) => {
+    const active = item === tab;
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+  });
+  $$('.tab-panel').forEach((panel) => panel.classList.toggle("active", panel.id === tab.dataset.tab));
+}));
+const configTabs = $$(".tab");
+configTabs.forEach((tab) => tab.addEventListener("keydown", (event) => moveTabFocus(event, configTabs, (target) => target.click())));
+
+loadDashboard();

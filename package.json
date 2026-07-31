@@ -1,0 +1,17 @@
+{
+  "name": "birdbox-demo",
+  "version": "0.01a",
+  "private": true,
+  "description": "A dependency-free BIRD 2 node, peer, and BGP session management demo",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pinyin-pro": "3.28.2"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+data/
+artifacts/
+config/nodes.json
+.DS_Store
+npm-debug.log*
