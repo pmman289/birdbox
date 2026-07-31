@@ -9,18 +9,41 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <header class="app-header">
+    <section id="authView" class="auth-view" aria-labelledby="authTitle" hidden>
+      <div class="auth-panel">
+        <div class="auth-brand">
+          <div class="brand-mark" aria-hidden="true">B</div>
+          <div><strong>Birdbox</strong><span>BIRD 2 控制台</span></div>
+        </div>
+        <div class="auth-heading">
+          <p class="eyebrow">ADMIN ACCESS</p>
+          <h1 id="authTitle">登录 Birdbox</h1>
+        </div>
+        <form id="authForm">
+          <div class="field"><label for="authUsername">账户</label><input id="authUsername" value="admin" readonly></div>
+          <div class="field"><label for="authPassword">密码</label><input id="authPassword" type="password" minlength="10" maxlength="128" autocomplete="current-password" required autofocus></div>
+          <div id="authConfirmationField" class="field" hidden><label for="authConfirmation">确认密码</label><input id="authConfirmation" type="password" minlength="10" maxlength="128" autocomplete="new-password"></div>
+          <p id="authError" class="auth-error" role="alert" hidden></p>
+          <button id="authSubmitButton" class="primary-button auth-submit" type="submit">登录</button>
+        </form>
+      </div>
+      <span class="auth-version">0.01a</span>
+    </section>
+
+    <header id="appHeader" class="app-header" hidden>
       <div class="brand-block">
         <div class="brand-mark" aria-hidden="true">B</div>
         <div><h1>Birdbox</h1><p>BIRD 2 控制台</p></div>
       </div>
       <div class="header-actions">
         <span id="globalState" class="global-state"><i></i>正在连接</span>
+        <button id="accountButton" class="header-command" type="button">修改密码</button>
+        <button id="logoutButton" class="header-command" type="button">退出</button>
         <button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
       </div>
     </header>
 
-    <main>
+    <main id="appMain" hidden>
       <nav class="workspace-tabs" role="tablist" aria-label="Birdbox 工作区">
         <button id="sessionWorkspaceTab" class="workspace-tab active" type="button" role="tab" aria-selected="true" aria-controls="sessionWorkspace" data-workspace="sessionWorkspace">会话与拓扑</button>
         <button id="resourceWorkspaceTab" class="workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="resourceWorkspace" data-workspace="resourceWorkspace" tabindex="-1">资源管理</button>
@@ -540,6 +563,25 @@
         <div class="dialog-actions">
           <button class="secondary-button" type="button" data-close="policyActionDialog">取消</button>
           <button id="savePolicyActionButton" class="primary-button" type="submit">生成、预检并加入策略</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="passwordDialog" class="editor-dialog">
+      <form id="passwordForm">
+        <div class="dialog-head">
+          <span class="dialog-icon">A</span>
+          <div><p class="eyebrow">ADMIN</p><h2>修改管理密码</h2></div>
+        </div>
+        <div class="dialog-grid single-column-dialog">
+          <div class="field full-width"><label for="currentPassword">当前密码</label><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></div>
+          <div class="field full-width"><label for="newPassword">新密码</label><input id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
+          <div class="field full-width"><label for="newPasswordConfirmation">确认新密码</label><input id="newPasswordConfirmation" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
+          <p id="passwordError" class="auth-error full-width" role="alert" hidden></p>
+        </div>
+        <div class="dialog-actions">
+          <button class="secondary-button" type="button" data-close="passwordDialog">取消</button>
+          <button id="savePasswordButton" class="primary-button" type="submit">更新密码</button>
         </div>
       </form>
     </dialog>

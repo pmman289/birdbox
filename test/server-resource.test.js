@@ -12,7 +12,7 @@ async function requestJson(port, pathname, options = {}) {
     ...options,
     headers: { "content-type": "application/json", ...(options.headers ?? {}) },
   });
-  return { status: response.status, body: await response.json() };
+  return { status: response.status, body: await response.json(), headers: response.headers };
 }
 
 async function waitForHealth(port) {
@@ -89,7 +89,18 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   context.after(() => stopProcess(child));
   await waitForHealth(port);
 
-  const rejectedLocalNode = await requestJson(port, "/api/nodes", {
+  const setup = await requestJson(port, "/api/auth/setup", {
+    method: "POST",
+    body: JSON.stringify({ password: "test-admin-password", confirmation: "test-admin-password" }),
+  });
+  assert.equal(setup.status, 201);
+  const cookie = setup.headers.get("set-cookie").split(";", 1)[0];
+  const authenticatedRequest = (pathname, options = {}) => requestJson(port, pathname, {
+    ...options,
+    headers: { cookie, ...(options.headers ?? {}) },
+  });
+
+  const rejectedLocalNode = await authenticatedRequest("/api/nodes", {
     method: "POST",
     body: JSON.stringify({
       name: "Rejected local node", transport: "local", routerId: "192.0.2.250", listenPort: 179,
@@ -98,7 +109,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(rejectedLocalNode.status, 400);
   assert.match(rejectedLocalNode.body.error, /仅支持 SSH/);
 
-  const updated = await requestJson(port, "/api/defines/define_test", {
+  const updated = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",
     body: JSON.stringify({ entries: "203.0.113.0/24" }),
   });
@@ -108,14 +119,14 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).defines[0].entries, ["203.0.113.0/24"]);
   assert.match(await fs.readFile(fakeLog, "utf8"), /bird .* -c .*bird\.conf/);
 
-  const stopped = await requestJson(port, "/api/sessions/session_test/control", {
+  const stopped = await authenticatedRequest("/api/sessions/session_test/control", {
     method: "POST",
     body: JSON.stringify({ action: "disable" }),
   });
   assert.equal(stopped.status, 200);
   assert.equal(stopped.body.action, "disable");
   assert.match(await fs.readFile(fakeLog, "utf8"), /birdc .*disable test_bgp/);
-  const started = await requestJson(port, "/api/sessions/session_test/control", {
+  const started = await authenticatedRequest("/api/sessions/session_test/control", {
     method: "POST",
     body: JSON.stringify({ action: "enable" }),
   });
@@ -123,7 +134,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(started.body.action, "enable");
   assert.match(await fs.readFile(fakeLog, "utf8"), /birdc .*enable test_bgp/);
 
-  const disabledSession = await requestJson(port, "/api/sessions/apply", {
+  const disabledSession = await authenticatedRequest("/api/sessions/apply", {
     method: "POST",
     body: JSON.stringify({ ...state.sessions[0], enabled: false }),
   });
@@ -131,7 +142,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(disabledSession.body.enabled, false);
   assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).sessions[0].enabled, false);
 
-  const rejected = await requestJson(port, "/api/defines/define_test", {
+  const rejected = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",
     body: JSON.stringify({ entries: "203.0.113.0/24\n203.0.113.0/24" }),
   });
@@ -140,7 +151,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).defines[0].entries, ["203.0.113.0/24"]);
 
   await fs.writeFile(failApply, "1\n");
-  const failedApply = await requestJson(port, "/api/defines/define_test", {
+  const failedApply = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",
     body: JSON.stringify({ entries: "192.0.2.0/24" }),
   });

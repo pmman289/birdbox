@@ -22,6 +22,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { min-width: 320px; background: var(--canvas); }
 body {
   margin: 0;
@@ -31,9 +32,31 @@ body {
   letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
 }
+body.auth-active { overflow: hidden; }
 button, input, select, textarea { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; -webkit-tap-highlight-color: transparent; transition: border-color var(--motion-base) ease, background-color var(--motion-base) ease, color var(--motion-base) ease, box-shadow var(--motion-base) ease, transform var(--motion-fast) ease, opacity var(--motion-base) ease; }
 button:focus-visible, a:focus-visible { outline: 0; box-shadow: var(--focus-ring); }
+
+.auth-view {
+  min-height: 100svh; padding: 28px 18px; display: grid; place-items: center;
+  background: var(--canvas);
+}
+.auth-panel {
+  width: min(100%, 390px); padding: 28px; background: var(--surface);
+  border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: var(--shadow);
+}
+.auth-brand { display: flex; align-items: center; gap: 11px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+.auth-brand strong, .auth-brand span { display: block; }
+.auth-brand strong { font-size: 16px; }
+.auth-brand span { margin-top: 1px; color: var(--muted); font-size: 11px; }
+.auth-heading { margin: 24px 0 20px; }
+.auth-heading h1 { margin: 3px 0 0; font-size: 24px; line-height: 1.2; }
+.auth-panel form { display: grid; gap: 14px; }
+.auth-panel .field { gap: 6px; }
+.auth-panel input { height: 42px; }
+.auth-submit { width: 100%; min-height: 42px; margin-top: 3px; }
+.auth-error { margin: 0; padding: 9px 10px; color: var(--red); background: var(--red-soft); border: 1px solid #e7bcbc; border-radius: 5px; font-size: 12px; }
+.auth-version { position: fixed; right: 18px; bottom: 14px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .app-header {
   height: 68px;
@@ -53,6 +76,11 @@ button:focus-visible, a:focus-visible { outline: 0; box-shadow: var(--focus-ring
 .brand-block h1 { margin: 0; font-size: 17px; line-height: 20px; }
 .brand-block p { margin: 1px 0 0; color: var(--muted); font-size: 12px; }
 .header-actions { gap: 12px; }
+.header-command {
+  min-height: 32px; padding: 0 8px; color: var(--muted); background: transparent;
+  border: 0; border-bottom: 1px solid transparent; font-size: 11px; font-weight: 650;
+}
+.header-command:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
 .global-state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .global-state i { width: 8px; height: 8px; border-radius: 50%; background: #919b95; }
 .global-state.ready i { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
@@ -492,6 +520,7 @@ dialog form { padding: 22px; }
 .dialog-icon.remote { color: var(--amber); background: var(--amber-soft); }
 .dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 20px; }
 .dialog-grid .full-width { grid-column: 1 / -1; }
+.single-column-dialog { grid-template-columns: 1fr; }
 .code-input {
   display: grid; grid-template-columns: 42px minmax(0, 1fr); grid-template-rows: minmax(290px, 1fr) 27px;
   overflow: hidden; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 5px;
@@ -540,6 +569,9 @@ dialog form { padding: 22px; }
 
 @media (max-width: 700px) {
   .app-header { padding: 0 15px; }
+  .auth-panel { padding: 23px 20px; }
+  .header-actions { gap: 5px; }
+  .header-command { padding: 0 4px; font-size: 10px; }
   .global-state { display: flex; width: 18px; height: 18px; justify-content: center; gap: 0; overflow: hidden; color: transparent; font-size: 0; }
   .global-state i { width: 8px; height: 8px; flex: 0 0 auto; }
   main { padding: 16px 15px; }

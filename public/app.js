@@ -4,6 +4,9 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 const elements = {
+  authView: $("#authView"),
+  appHeader: $("#appHeader"),
+  appMain: $("#appMain"),
   refresh: $("#refreshButton"),
   globalState: $("#globalState"),
   sessionForm: $("#sessionForm"),
@@ -24,6 +27,7 @@ let busy = false;
 let autoPreviewTimer = null;
 let lastPreviewSignature = null;
 let policyActionContext = null;
+let authMonitorTimer = null;
 
 const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
 
@@ -158,6 +162,7 @@ function checked(id) { return $(`#${id}`).checked; }
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
+    credentials: "same-origin",
     ...options,
     headers: { "content-type": "application/json", ...(options.headers ?? {}) },
   });
@@ -165,6 +170,11 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data.error || `请求失败 (${response.status})`);
     error.data = data;
+    error.status = response.status;
+    error.code = data.code;
+    if (response.status === 401 && data.code === "AUTH_REQUIRED") {
+      showAuthentication({ configured: true, authenticated: false, username: "admin" });
+    }
     throw error;
   }
   return data;
@@ -176,6 +186,68 @@ function toast(message, type = "") {
   item.textContent = message;
   $("#toastRegion").append(item);
   setTimeout(() => item.remove(), 4300);
+}
+
+function setAuthError(element, message = "") {
+  element.textContent = message;
+  element.hidden = !message;
+}
+
+function stopAuthMonitor() {
+  clearInterval(authMonitorTimer);
+  authMonitorTimer = null;
+}
+
+function showAuthentication(status) {
+  const setup = status.configured === false;
+  stopAuthMonitor();
+  document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+  document.body.classList.add("auth-active");
+  elements.authView.hidden = false;
+  elements.appHeader.hidden = true;
+  elements.appMain.hidden = true;
+  $("#authForm").dataset.mode = setup ? "setup" : "login";
+  $("#authTitle").textContent = setup ? "设置管理密码" : "登录 Birdbox";
+  $("#authSubmitButton").textContent = setup ? "设置并进入" : "登录";
+  $("#authConfirmationField").hidden = !setup;
+  $("#authConfirmation").required = setup;
+  $("#authPassword").autocomplete = setup ? "new-password" : "current-password";
+  $("#authPassword").value = "";
+  $("#authConfirmation").value = "";
+  setAuthError($("#authError"));
+  setTimeout(() => $("#authPassword").focus(), 0);
+}
+
+function startAuthMonitor() {
+  stopAuthMonitor();
+  authMonitorTimer = setInterval(async () => {
+    try {
+      const status = await api("/api/auth/status");
+      if (!status.authenticated) showAuthentication(status);
+    } catch {
+      // Normal dashboard requests surface connectivity failures.
+    }
+  }, 15000);
+}
+
+async function showApplication() {
+  document.body.classList.remove("auth-active");
+  elements.authView.hidden = true;
+  elements.appHeader.hidden = false;
+  elements.appMain.hidden = false;
+  startAuthMonitor();
+  await loadDashboard();
+}
+
+async function initializeAuthentication() {
+  try {
+    const status = await api("/api/auth/status");
+    if (status.authenticated) await showApplication();
+    else showAuthentication(status);
+  } catch (error) {
+    showAuthentication({ configured: true, authenticated: false, username: "admin" });
+    setAuthError($("#authError"), error.message);
+  }
 }
 
 function deploymentSummary(deployment) {
@@ -1947,6 +2019,72 @@ async function savePolicyResource(event) {
   }
 }
 
+$("#authForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const setup = event.currentTarget.dataset.mode === "setup";
+  const button = $("#authSubmitButton");
+  button.disabled = true;
+  setAuthError($("#authError"));
+  try {
+    await api(setup ? "/api/auth/setup" : "/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        password: $("#authPassword").value,
+        confirmation: setup ? $("#authConfirmation").value : undefined,
+      }),
+    });
+    await showApplication();
+  } catch (error) {
+    setAuthError($("#authError"), error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#accountButton").addEventListener("click", () => {
+  $("#passwordForm").reset();
+  setAuthError($("#passwordError"));
+  $("#passwordDialog").showModal();
+  $("#currentPassword").focus();
+});
+
+$("#logoutButton").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state = null;
+    showAuthentication({ configured: true, authenticated: false, username: "admin" });
+  }
+});
+
+$("#passwordForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  const button = $("#savePasswordButton");
+  button.disabled = true;
+  setAuthError($("#passwordError"));
+  try {
+    await api("/api/auth/password", {
+      method: "POST",
+      body: JSON.stringify({
+        currentPassword: $("#currentPassword").value,
+        password: $("#newPassword").value,
+        confirmation: $("#newPasswordConfirmation").value,
+      }),
+    });
+    $("#passwordDialog").close();
+    event.currentTarget.reset();
+    toast("管理密码已更新", "success");
+  } catch (error) {
+    setAuthError($("#passwordError"), error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 elements.refresh.addEventListener("click", () => loadDashboard(currentNode()?.id, currentPeer()?.id));
 $("#nodeSelect").addEventListener("change", (event) => loadDashboard(event.target.value));
 $("#peerSelect").addEventListener("change", (event) => loadDashboard(currentNode().id, event.target.value));
@@ -2211,4 +2349,4 @@ $$('.tab').forEach((tab) => tab.addEventListener("click", () => {
 const configTabs = $$(".tab");
 configTabs.forEach((tab) => tab.addEventListener("keydown", (event) => moveTabFocus(event, configTabs, (target) => target.click())));
 
-loadDashboard();
+initializeAuthentication();

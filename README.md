@@ -127,6 +127,21 @@ npm test
 npm start
 ```
 
+## Authentication
+
+At first access, Birdbox presents a password setup screen for the single
+`admin` account. The password is stored only as a salted `scrypt` hash in
+`data/auth.json`; the controller never stores the plaintext password.
+
+Only one active browser session exists at a time. A successful login, password
+change, or logout invalidates the previous session. Sessions use an HttpOnly,
+SameSite=Strict cookie and expire after 12 hours. For production, serve
+Birdbox through HTTPS and set `BIRDBOX_SECURE_COOKIE=true` when TLS terminates
+outside the Node process.
+
+To recover a forgotten password, stop the controller, back up and remove
+`data/auth.json`, then start it again and complete password setup.
+
 Open <http://127.0.0.1:3000>. In the Nodes tab, start adding a node and generate
 its preparation script. Run that script with `sudo` on the target, then add the
 displayed line to the system BIRD main configuration:
@@ -150,6 +165,9 @@ belonging to the selected node and their current protocol state.
 
 ## API
 
+- `GET /api/auth/status`: public authentication state
+- `POST /api/auth/setup`, `/api/auth/login`, `/api/auth/logout`: set password and manage the active session
+- `POST /api/auth/password`: authenticated password change
 - `GET /api/dashboard`: inventory, selection, topology, and BGP status
 - `POST /api/nodes/setup-script`: generate the non-privileged node preparation script
 - `POST /api/nodes/test`: check SSH, include ownership, socket access, BIRD 2, and the complete system configuration
@@ -166,7 +184,6 @@ belonging to the selected node and their current protocol state.
 - `DELETE /api/sessions/{id}`: remove a session and redeploy the node
 - `POST /api/sessions/{id}/control`: enable or disable only the selected BGP protocol (`{"action":"enable"}` or `{"action":"disable"}`); the BIRD daemon and other sessions remain running
 
-This is intentionally a demo. It has no authentication, so bind it to a
-trusted management network only. TCP MD5 passwords and TCP-AO key material are
-stored in the inventory and rendered into the generated configuration; do not commit or publish either
-file without redacting routing credentials and peer details.
+TCP MD5 passwords and TCP-AO key material are stored in the inventory and
+rendered into the generated configuration; do not commit or publish either file
+without redacting routing credentials and peer details.

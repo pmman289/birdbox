@@ -26,6 +26,7 @@ import {
   validateInventory,
 } from "./bird.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
+import { AUTH_COOKIE_NAME, AUTH_SESSION_TTL_MS, AuthStore } from "./auth.js";
 import { InventoryStore } from "./store.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,6 +39,7 @@ const execFileAsync = promisify(execFile);
 const controllerSshDir = path.join(dataDir, "ssh");
 const controllerSshKeyPath = process.env.BIRDBOX_SSH_KEY_PATH ?? path.join(controllerSshDir, "id_ed25519");
 const controllerKnownHostsPath = process.env.BIRDBOX_KNOWN_HOSTS_PATH ?? path.join(controllerSshDir, "known_hosts");
+const authStore = new AuthStore({ dataDir });
 const store = new InventoryStore({
   dataDir,
   nodesPath,
@@ -47,7 +49,11 @@ const store = new InventoryStore({
 let deploymentLocked = false;
 let events = [];
 const protocolOverrides = new Map();
+const loginFailures = new Map();
 let controllerPublicKey = "";
+
+const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_ATTEMPT_LIMIT = 5;
 
 async function ensureControllerSshIdentity() {
   await fs.mkdir(path.dirname(controllerSshKeyPath), { recursive: true, mode: 0o700 });
@@ -501,12 +507,14 @@ async function dashboard(state, requestedNodeId, requestedPeerId) {
   };
 }
 
-function sendJson(response, status, payload) {
+function sendJson(response, status, payload, headers = {}) {
   const body = JSON.stringify(payload);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    ...headers,
   });
   response.end(body);
 }
@@ -533,6 +541,117 @@ async function applyInventoryConfig(node, inventory) {
   const result = await applyStagedConfig(node);
   if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
   return config;
+}
+
+function requestSessionToken(request) {
+  const cookie = String(request.headers.cookie ?? "");
+  for (const part of cookie.split(";")) {
+    const [name, ...valueParts] = part.trim().split("=");
+    if (name !== AUTH_COOKIE_NAME) continue;
+    try {
+      return decodeURIComponent(valueParts.join("="));
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function secureCookieEnabled(request) {
+  if (process.env.BIRDBOX_SECURE_COOKIE === "true") return true;
+  if (process.env.BIRDBOX_SECURE_COOKIE === "false") return false;
+  return Boolean(request.socket.encrypted) || String(request.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
+}
+
+function sessionCookie(request, token, maxAgeSeconds = Math.floor(AUTH_SESSION_TTL_MS / 1000)) {
+  const secure = secureCookieEnabled(request) ? "; Secure" : "";
+  return `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+function assertSameOrigin(request) {
+  if (request.method === "GET" || request.method === "HEAD") return;
+  const origin = request.headers.origin;
+  if (!origin) return;
+  try {
+    if (new URL(origin).host !== request.headers.host) fail(403, "请求来源不受信任");
+  } catch {
+    fail(403, "请求来源不受信任");
+  }
+}
+
+function loginAttemptKey(request) {
+  return request.socket.remoteAddress ?? "unknown";
+}
+
+function activeLoginFailures(request) {
+  const key = loginAttemptKey(request);
+  const now = Date.now();
+  const recent = (loginFailures.get(key) ?? []).filter((timestamp) => now - timestamp < LOGIN_ATTEMPT_WINDOW_MS);
+  if (recent.length) loginFailures.set(key, recent);
+  else loginFailures.delete(key);
+  return recent;
+}
+
+function recordLoginFailure(request) {
+  const key = loginAttemptKey(request);
+  loginFailures.set(key, [...activeLoginFailures(request), Date.now()]);
+}
+
+function clearLoginFailures(request) {
+  loginFailures.delete(loginAttemptKey(request));
+}
+
+async function handleAuthApi(request, response, url) {
+  const { pathname } = url;
+  const token = requestSessionToken(request);
+  if (request.method === "GET" && pathname === "/api/auth/status") {
+    sendJson(response, 200, authStore.status(token));
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/api/auth/setup") {
+    const body = await readJson(request);
+    const sessionToken = await authStore.setup(body.password, body.confirmation);
+    sendJson(response, 201, { ok: true, ...authStore.status(sessionToken) }, {
+      "set-cookie": sessionCookie(request, sessionToken),
+    });
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/api/auth/login") {
+    if (activeLoginFailures(request).length >= LOGIN_ATTEMPT_LIMIT) {
+      const error = new Error("登录尝试过多，请稍后再试");
+      error.status = 429;
+      error.code = "AUTH_RATE_LIMITED";
+      throw error;
+    }
+    const body = await readJson(request);
+    const sessionToken = await authStore.login(body.password);
+    if (!sessionToken) {
+      recordLoginFailure(request);
+      const error = new Error("密码不正确");
+      error.status = 401;
+      error.code = "AUTH_INVALID";
+      throw error;
+    }
+    clearLoginFailures(request);
+    sendJson(response, 200, { ok: true, ...authStore.status(sessionToken) }, {
+      "set-cookie": sessionCookie(request, sessionToken),
+    });
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/api/auth/password") {
+    const body = await readJson(request);
+    const sessionToken = await authStore.changePassword(token, body.currentPassword, body.password, body.confirmation);
+    sendJson(response, 200, { ok: true, ...authStore.status(sessionToken) }, {
+      "set-cookie": sessionCookie(request, sessionToken),
+    });
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/api/auth/logout") {
+    await authStore.logout(token);
+    sendJson(response, 200, { ok: true }, { "set-cookie": sessionCookie(request, "", 0) });
+    return true;
+  }
+  return false;
 }
 
 async function handleApi(request, response, url) {
@@ -943,6 +1062,8 @@ async function serveStatic(response, pathname) {
     response.writeHead(200, {
       "content-type": mimeTypes[path.extname(normalized)] ?? "application/octet-stream",
       "content-length": content.length,
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "same-origin",
     });
     response.end(content);
   } catch (error) {
@@ -953,14 +1074,28 @@ async function serveStatic(response, pathname) {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
   try {
-    if (url.pathname.startsWith("/api/")) await handleApi(request, response, url);
-    else await serveStatic(response, url.pathname);
+    if (url.pathname.startsWith("/api/")) {
+      assertSameOrigin(request);
+      if (await handleAuthApi(request, response, url)) return;
+      if (url.pathname !== "/api/health" && !authStore.isAuthenticated(requestSessionToken(request))) {
+        return sendJson(response, 401, { error: "请先登录", code: "AUTH_REQUIRED" }, {
+          "set-cookie": sessionCookie(request, "", 0),
+        });
+      }
+      await handleApi(request, response, url);
+    } else {
+      await serveStatic(response, url.pathname);
+    }
   } catch (error) {
-    event("error", error.message);
-    sendJson(response, error.status ?? 500, { error: error.message, events });
+    if (!url.pathname.startsWith("/api/auth/")) event("error", error.message);
+    const payload = { error: error.message };
+    if (error.code) payload.code = error.code;
+    if (!url.pathname.startsWith("/api/auth/") && error.code !== "AUTH_REQUIRED") payload.events = events;
+    sendJson(response, error.status ?? 500, payload);
   }
 });
 
+await authStore.initialize();
 await ensureControllerSshIdentity();
 
 server.listen(port, host, () => {
