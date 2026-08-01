@@ -25,7 +25,7 @@ services:
       retries: 30
 
   birdbox:
-    image: pmman/birdbox:${BIRDBOX_IMAGE_TAG:-0.01a}
+    image: pmman/birdbox:${BIRDBOX_IMAGE_TAG:-latest}
     pull_policy: missing
     restart: unless-stopped
     environment:

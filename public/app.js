@@ -312,6 +312,32 @@ function setAuthError(element, message = "") {
   element.hidden = !message;
 }
 
+async function copyText(text) {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // HTTP deployments and browser policies may reject the modern API.
+    }
+  }
+  const textarea = document.createElement("textarea");
+  const activeElement = document.activeElement;
+  textarea.value = text;
+  textarea.readOnly = true;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  textarea.remove();
+  activeElement?.focus?.();
+  if (!copied) throw new Error("COPY_UNAVAILABLE");
+}
+
 function stopAuthMonitor() {
   clearInterval(authMonitorTimer);
   authMonitorTimer = null;
@@ -2527,7 +2553,7 @@ $("#generateNodeSetupButton").addEventListener("click", generateNodeSetupScript)
 $("#testNodeConnectionButton").addEventListener("click", testNodeConnection);
 $("#copyNodeSetupButton").addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText($("#nodeSetupScript").textContent);
+    await copyText($("#nodeSetupScript").textContent);
     toast("准备脚本已复制", "success");
   } catch {
     toast("无法访问剪贴板", "error");

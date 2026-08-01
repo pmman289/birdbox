@@ -132,6 +132,12 @@ test("supports password setup and enforces one active admin session", async (con
   assert.equal(setupScript.status, 200);
   assert.match(setupScript.body.script, /不能是符号链接/);
   assert.match(setupScript.body.script, /grep -Fx -- "\$KEY_LINE"/);
+  assert.match(setupScript.body.script, /useradd --system/);
+  assert.match(setupScript.body.script, /adduser --system/);
+  assert.match(setupScript.body.script, /BACKUP_CANDIDATE=\$\(mktemp/);
+  assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" 'configure check'/);
+  assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" configure/);
+  assert.match(setupScript.body.script, /用户、SSH 公钥、Include 和 BIRD 配置均已就绪/);
   const shellCheck = spawn("sh", ["-n"], { stdio: ["pipe", "ignore", "pipe"] });
   let shellError = "";
   shellCheck.stderr.setEncoding("utf8");
@@ -142,6 +148,19 @@ test("supports password setup and enforces one active admin session", async (con
     shellCheck.once("exit", resolve);
   });
   assert.equal(shellExitCode, 0, shellError);
+
+  const rootSetupScript = await requestJson(port, "/api/nodes/setup-script", {
+    method: "POST",
+    headers: { cookie: firstCookie },
+    body: JSON.stringify({
+      name: "Root SSH node",
+      sshHost: "router.example",
+      sshUser: "root",
+      routerId: "192.0.2.2",
+    }),
+  });
+  assert.equal(rootSetupScript.status, 400);
+  assert.match(rootSetupScript.body.error, /非 root SSH 用户/);
 
   const wrongLogin = await requestJson(port, "/api/auth/login", {
     method: "POST",

@@ -12,9 +12,9 @@ Birdbox 适合希望通过浏览器完成以下工作的网络管理员：
 
 ## 工作方式
 
-Birdbox 不替换目标机器上的 BIRD 主配置，也不需要远程 root 登录。每个节点使用一个非特权 SSH 用户，Birdbox 只维护自己的生成配置文件。
+Birdbox 不替换目标机器上的 BIRD 主配置，也不需要日常使用远程 root 登录。首次接入时，由管理员在目标节点以 root 执行一次准备脚本；之后 Birdbox 使用专用的非特权 SSH 用户，只维护自己的生成配置文件。
 
-目标节点需要在 BIRD 主配置中包含 Birdbox 文件：
+准备脚本会自动在 BIRD 主配置中加入 Birdbox 文件：
 
 ```bird
 include "/var/lib/birdbox/generated.conf";
@@ -30,7 +30,7 @@ Birdbox 会在写入库存前使用目标节点上的原生 `bird -p` 校验完�
 - Docker Compose v2；
 - 宿主机可以访问 Docker Hub；
 - 目标路由节点运行 BIRD 2.19.1，并允许 SSH 访问；
-- 目标节点存在非特权用户和 `bird` 用户组；
+- 目标节点的 BIRD 控制 Socket 属于一个可授权的非 root 用户组；
 - 生产环境建议使用 HTTPS 反向代理。
 
 ### 使用 Docker Compose
@@ -44,7 +44,7 @@ cp .env.example .env
 编辑 `.env`，至少修改两个数据库密码：
 
 ```dotenv
-BIRDBOX_IMAGE_TAG=0.01a
+BIRDBOX_IMAGE_TAG=latest
 MYSQL_DATABASE=birdbox
 MYSQL_USER=birdbox
 MYSQL_PASSWORD=请替换为随机密码
@@ -53,6 +53,9 @@ BIRDBOX_BIND_ADDRESS=127.0.0.1
 BIRDBOX_PORT=3000
 BIRDBOX_SECURE_COOKIE=true
 ```
+
+`latest` 便于首次部署直接取得当前稳定版本。生产环境完成验证后，建议把
+`BIRDBOX_IMAGE_TAG` 固定为具体版本 tag 或镜像 digest，避免后续拉取到未经本环境验证的版本。
 
 启动服务并检查状态：
 
@@ -89,33 +92,25 @@ docker compose up -d --force-recreate birdbox
 目标节点应满足：
 
 - BIRD 2.19.1 已安装并正在运行；
-- 已创建专用的非特权 SSH 用户，例如 `birdbox`；
-- 该用户可以读取和更新 `/var/lib/birdbox`；
-- 该用户属于 `bird` 用户组，可以访问 `/run/bird/bird.ctl`；
+- BIRD 控制 Socket 已创建，且所属用户组不是 `root`；
 - BIRD 主配置文件路径已确定，例如 `/etc/bird/bird.conf`。
+- 管理员可以在首次接入时执行一次 root 准备脚本。
 
 ### 2. 生成准备脚本
 
 登录 Birdbox 后进入“资源管理”中的“受管节点”，点击“添加节点”，填写节点地址、SSH 用户、Router ID 和配置路径，然后点击“生成准备脚本”。
 
-在目标节点上使用 root 执行页面生成的脚本：
+复制完整脚本，在目标节点上使用 root 执行：
 
 ```bash
 sudo sh birdbox-node-setup.sh
 ```
 
-脚本会创建配置目录、安装受限 SSH 公钥并检查 BIRD Socket。它不会修改 BIRD 主配置，也不会自动重启 BIRD。
+脚本会自动完成以下工作：创建缺失的专用用户和 Home 目录、加入 BIRD Socket 用户组、安装受限 SSH 公钥、创建受管配置目录、写入主配置 Include，并执行 `configure check` 和 `configure`。主配置修改前会在同目录创建临时备份；任何检查或加载失败都会恢复原配置。脚本可重复执行，不会重复添加用户、公钥或 Include。
 
-### 3. 添加 Include 并检查
+### 3. 测试并保存节点
 
-把页面显示的 Include 行加入目标节点的 BIRD 主配置，然后在目标节点执行：
-
-```bash
-birdc -s /run/bird/bird.ctl configure check
-birdc -s /run/bird/bird.ctl configure
-```
-
-回到 Birdbox 点击“测试连接”。测试通过后保存节点。首次 SSH 连接使用 TOFU（首次信任）策略；高安全环境应在首次连接前人工核对主机指纹。
+脚本成功后回到 Birdbox 点击“测试连接”，通过后保存节点。首次 SSH 连接使用 TOFU（首次信任）策略；高安全环境应在首次连接前人工核对主机指纹。
 
 ## 创建 Peer 和 BGP 会话
 

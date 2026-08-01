@@ -900,6 +900,10 @@ process.exit(result.status ?? 1);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
   await fs.writeFile(mainConfigPath, `/* managed include */ ${includeLine} # active\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
+  await fs.writeFile(mainConfigPath, `  include    "${generatedConfigPath}"   ; // active\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
+  await fs.writeFile(mainConfigPath, `include "${generatedConfigPath}" unexpected;\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
 });
 
 test("parses multiple BGP protocol states independently", () => {

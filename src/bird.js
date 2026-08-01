@@ -1540,7 +1540,6 @@ export async function checkIncludeNodeAccess(nodeInput) {
   const node = normalizeNode(nodeInput);
   assert(node.deploymentMode === "include", "只有 Include 节点需要执行接入检查");
   const directory = path.posix.dirname(node.generatedConfigPath);
-  const includeLine = `include "${node.generatedConfigPath}";`;
   const command = [
     "set -eu",
     `test -S '${node.socketPath}'`,
@@ -1548,7 +1547,7 @@ export async function checkIncludeNodeAccess(nodeInput) {
     `test -d '${directory}'`,
     `test -w '${directory}'`,
     `test -L '${node.generatedConfigPath}'`,
-    `awk -v expected='${includeLine}' '
+    `awk -v target='${node.generatedConfigPath}' '
       {
         source = $0
         line = ""
@@ -1572,7 +1571,15 @@ export async function checkIncludeNodeAccess(nodeInput) {
         }
         sub(/^[[:space:]]*/, "", line)
         sub(/[[:space:]]*$/, "", line)
-        if (line == expected) found = 1
+        if (line ~ /^include[[:space:]]+"/) {
+          rest = line
+          sub(/^include[[:space:]]+"/, "", rest)
+          ending = index(rest, "\\\"")
+          suffix = substr(rest, ending + 1)
+          sub(/^[[:space:]]*/, "", suffix)
+          sub(/[[:space:]]*$/, "", suffix)
+          if (ending && substr(rest, 1, ending - 1) == target && suffix == ";") found = 1
+        }
       }
       END { exit found ? 0 : 1 }
     ' '${node.mainConfigPath}'`,

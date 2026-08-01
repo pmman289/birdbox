@@ -589,6 +589,10 @@ function normalizeOnboardingNode(input, id = "node_onboarding") {
   if (node.deploymentMode !== "include" || node.sshIdentity !== "managed") {
     fail(400, "新节点必须使用 Include 模式和 Birdbox 托管 SSH 密钥");
   }
+  if (node.sshUser === "root") fail(400, "新节点必须使用专用的非 root SSH 用户");
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(node.sshUser)) {
+    fail(400, "新节点的 SSH 用户名必须使用可移植的小写 Linux 用户名");
+  }
   return node;
 }
 
@@ -602,34 +606,67 @@ set -eu
 umask 077
 
 BIRDBOX_USER='${node.sshUser}'
-BIRD_GROUP='bird'
 MAIN_CONFIG='${node.mainConfigPath}'
 GENERATED_CONFIG='${node.generatedConfigPath}'
 CONFIG_DIR='${directory}'
 SOCKET_PATH='${node.socketPath}'
 CONTROLLER_KEY='${controllerPublicKey}'
 KEY_LINE="restrict $CONTROLLER_KEY"
+INCLUDE_LINE='${includeLine}'
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "请使用 sudo sh 执行此脚本" >&2
   exit 1
 fi
+test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }
+test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
+for REQUIRED_COMMAND in birdc stat install mktemp awk grep; do
+  command -v "$REQUIRED_COMMAND" >/dev/null 2>&1 || { echo "缺少 $REQUIRED_COMMAND 命令" >&2; exit 1; }
+done
+BIRD_GROUP=$(stat -c '%G' "$SOCKET_PATH")
+BIRD_GROUP_ID=$(stat -c '%g' "$SOCKET_PATH")
+case "$BIRD_GROUP" in
+  ''|UNKNOWN) echo "无法识别 BIRD Socket 用户组" >&2; exit 1 ;;
+esac
+if [ "$BIRD_GROUP" = root ] || [ "$BIRD_GROUP_ID" = 0 ]; then
+  echo "BIRD Socket 不能使用 root 用户组，请先为 BIRD 配置专用控制组" >&2
+  exit 1
+fi
+
 if ! id "$BIRDBOX_USER" >/dev/null 2>&1; then
-  echo "用户 $BIRDBOX_USER 不存在，请先创建非特权用户" >&2
-  exit 1
+  USER_HOME="/var/lib/birdbox-users/$BIRDBOX_USER"
+  install -d -o root -g root -m 0755 /var/lib/birdbox-users
+  if command -v useradd >/dev/null 2>&1; then
+    useradd --system --create-home --user-group --home-dir "$USER_HOME" --shell /bin/sh "$BIRDBOX_USER"
+  elif command -v adduser >/dev/null 2>&1; then
+    if adduser --system --disabled-password --gecos '' --home "$USER_HOME" --shell /bin/sh --group "$BIRDBOX_USER"; then
+      :
+    else
+      adduser -D -h "$USER_HOME" -s /bin/sh "$BIRDBOX_USER"
+    fi
+  else
+    echo "无法创建用户：缺少 useradd/adduser" >&2
+    exit 1
+  fi
 fi
-if ! getent group "$BIRD_GROUP" >/dev/null 2>&1; then
-  echo "BIRD 用户组 $BIRD_GROUP 不存在" >&2
-  exit 1
+id "$BIRDBOX_USER" >/dev/null 2>&1 || { echo "创建用户 $BIRDBOX_USER 失败" >&2; exit 1; }
+[ "$(id -u "$BIRDBOX_USER")" -ne 0 ] || { echo "Birdbox SSH 用户不能是 root" >&2; exit 1; }
+if ! id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null 2>&1; then
+  if command -v usermod >/dev/null 2>&1; then
+    usermod -a -G "$BIRD_GROUP" "$BIRDBOX_USER"
+  elif command -v addgroup >/dev/null 2>&1; then
+    addgroup "$BIRDBOX_USER" "$BIRD_GROUP"
+  elif command -v gpasswd >/dev/null 2>&1; then
+    gpasswd -a "$BIRDBOX_USER" "$BIRD_GROUP"
+  else
+    echo "无法把 $BIRDBOX_USER 加入 $BIRD_GROUP 用户组" >&2
+    exit 1
+  fi
 fi
-if command -v usermod >/dev/null 2>&1; then
-  usermod -a -G "$BIRD_GROUP" "$BIRDBOX_USER"
-elif command -v addgroup >/dev/null 2>&1; then
-  addgroup "$BIRDBOX_USER" "$BIRD_GROUP"
-else
-  echo "无法添加附加用户组：缺少 usermod/addgroup" >&2
+id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null 2>&1 || {
+  echo "$BIRDBOX_USER 未成功加入 $BIRD_GROUP 用户组" >&2
   exit 1
-fi
+}
 
 if [ -L "$CONFIG_DIR" ]; then
   echo "$CONFIG_DIR 不能是符号链接" >&2
@@ -677,15 +714,37 @@ else
   chown -h "$BIRDBOX_USER:$BIRD_GROUP" "$GENERATED_CONFIG" 2>/dev/null || true
 fi
 
-HOME_DIR=$(getent passwd "$BIRDBOX_USER" | cut -d: -f6)
+if command -v getent >/dev/null 2>&1; then
+  PASSWD_ENTRY=$(getent passwd "$BIRDBOX_USER")
+else
+  PASSWD_ENTRY=$(awk -F: -v user="$BIRDBOX_USER" '$1 == user { print; exit }' /etc/passwd)
+fi
+HOME_DIR=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f6)
+USER_SHELL=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f7)
 PRIMARY_GROUP=$(id -gn "$BIRDBOX_USER")
 case "$HOME_DIR" in
   /?*) ;;
   *) echo "$BIRDBOX_USER 的 Home 目录不合法" >&2; exit 1 ;;
 esac
-test -d "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不存在" >&2; exit 1; }
+case "$USER_SHELL" in
+  */nologin|*/false)
+    if command -v usermod >/dev/null 2>&1; then
+      usermod -s /bin/sh "$BIRDBOX_USER"
+    elif command -v chsh >/dev/null 2>&1; then
+      chsh -s /bin/sh "$BIRDBOX_USER"
+    else
+      echo "无法为 $BIRDBOX_USER 设置可执行 SSH 命令的 Shell" >&2
+      exit 1
+    fi
+    ;;
+esac
 test ! -L "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不能是符号链接" >&2; exit 1; }
-[ "$(stat -c '%U' "$HOME_DIR")" = "$BIRDBOX_USER" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
+if [ -e "$HOME_DIR" ]; then
+  test -d "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 路径不是目录" >&2; exit 1; }
+  [ "$(stat -c '%U' "$HOME_DIR")" = "$BIRDBOX_USER" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
+else
+  install -d -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0750 "$HOME_DIR"
+fi
 if [ -L "$HOME_DIR/.ssh" ]; then
   echo "$HOME_DIR/.ssh 不能是符号链接" >&2
   exit 1
@@ -709,7 +768,8 @@ chmod 0600 "$HOME_DIR/.ssh/authorized_keys"
 if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; then
   CONTROLLER_KEY_ID=$(printf '%s\n' "$CONTROLLER_KEY" | awk '{ print $1 " " $2 }')
   KEY_TEMP=$(mktemp "$HOME_DIR/.ssh/authorized_keys.birdbox.XXXXXX")
-  trap 'rm -f "$KEY_TEMP"' 0 1 2 15
+  trap 'rm -f "$KEY_TEMP"' 0
+  trap 'rm -f "$KEY_TEMP"; exit 1' 1 2 15
   grep -Fv -- "$CONTROLLER_KEY_ID" "$HOME_DIR/.ssh/authorized_keys" > "$KEY_TEMP" || true
   printf '%s\n' "$KEY_LINE" >> "$KEY_TEMP"
   chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$KEY_TEMP"
@@ -718,14 +778,91 @@ if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; t
   trap - 0 1 2 15
 fi
 
-test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
-SOCKET_GROUP=$(stat -c '%G' "$SOCKET_PATH")
-[ "$SOCKET_GROUP" = "$BIRD_GROUP" ] || { echo "Socket 用户组是 $SOCKET_GROUP，不是 $BIRD_GROUP" >&2; exit 1; }
-test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }
+has_active_include() {
+  awk -v target="$GENERATED_CONFIG" '
+    function strip_comments(line, start, finish, hash, slash, comment, prefix) {
+      prefix = ""
+      while (length(line)) {
+        if (block) {
+          finish = index(line, "*/")
+          if (!finish) return prefix
+          line = substr(line, finish + 2)
+          block = 0
+          continue
+        }
+        start = index(line, "/*")
+        hash = index(line, "#")
+        slash = index(line, "//")
+        comment = hash
+        if (slash && (!comment || slash < comment)) comment = slash
+        if (start && (!comment || start < comment)) {
+          prefix = prefix substr(line, 1, start - 1)
+          line = substr(line, start + 2)
+          block = 1
+          continue
+        }
+        if (comment) return prefix substr(line, 1, comment - 1)
+        return prefix line
+      }
+      return prefix
+    }
+    {
+      clean = strip_comments($0)
+      sub(/^[ \t]+/, "", clean)
+      if (clean ~ /^include[ \t]+"/) {
+        rest = clean
+        sub(/^include[ \t]+"/, "", rest)
+        finish = index(rest, "\\\"")
+        suffix = substr(rest, finish + 1)
+        sub(/^[ \t]*/, "", suffix)
+        sub(/[ \t]*$/, "", suffix)
+        if (finish && substr(rest, 1, finish - 1) == target && suffix == ";") found = 1
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$MAIN_CONFIG"
+}
 
-echo "节点权限准备完成。请在 $MAIN_CONFIG 中添加："
-echo '${includeLine}'
-echo "添加后执行：birdc -s $SOCKET_PATH configure check && birdc -s $SOCKET_PATH configure"
+MAIN_BACKUP=''
+restore_main_config() {
+  if [ -n "$MAIN_BACKUP" ] && [ -f "$MAIN_BACKUP" ]; then
+    cp -p "$MAIN_BACKUP" "$MAIN_CONFIG"
+    rm -f "$MAIN_BACKUP"
+    MAIN_BACKUP=''
+  fi
+}
+trap 'restore_main_config' 0
+trap 'restore_main_config; exit 1' 1 2 15
+
+if ! has_active_include; then
+  BACKUP_CANDIDATE=$(mktemp "$MAIN_CONFIG.birdbox.XXXXXX")
+  if ! cp -p "$MAIN_CONFIG" "$BACKUP_CANDIDATE"; then
+    rm -f "$BACKUP_CANDIDATE"
+    echo "无法备份 BIRD 主配置" >&2
+    exit 1
+  fi
+  MAIN_BACKUP="$BACKUP_CANDIDATE"
+  printf '\n%s\n' "$INCLUDE_LINE" >> "$MAIN_CONFIG"
+fi
+
+if ! birdc -s "$SOCKET_PATH" 'configure check'; then
+  restore_main_config
+  echo "BIRD configure check 失败，主配置已恢复" >&2
+  exit 1
+fi
+if ! birdc -s "$SOCKET_PATH" configure; then
+  restore_main_config
+  birdc -s "$SOCKET_PATH" configure >/dev/null 2>&1 || true
+  echo "BIRD configure 失败，主配置已恢复" >&2
+  exit 1
+fi
+if [ -n "$MAIN_BACKUP" ]; then
+  rm -f "$MAIN_BACKUP" || true
+  MAIN_BACKUP=''
+fi
+trap - 0 1 2 15
+
+echo "Birdbox 节点准备完成：用户、SSH 公钥、Include 和 BIRD 配置均已就绪"
 `,
   };
 }

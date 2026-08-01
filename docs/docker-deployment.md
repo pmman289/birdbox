@@ -26,7 +26,7 @@ cp .env.example .env
 编辑 `.env`，至少更改两个 MySQL 密码，并选择要部署的镜像 tag：
 
 ```dotenv
-BIRDBOX_IMAGE_TAG=0.01a
+BIRDBOX_IMAGE_TAG=latest
 MYSQL_PASSWORD=<随机的应用数据库密码>
 MYSQL_ROOT_PASSWORD=<随机的数据库 root 密码>
 BIRDBOX_BIND_ADDRESS=127.0.0.1
@@ -39,6 +39,9 @@ BIRDBOX_SHUTDOWN_TIMEOUT_MS=1800000
 在 HTTPS 已由 Birdbox 或可信反向代理提供时启用。端口默认只绑定宿主机
 `127.0.0.1`；只有防火墙和 HTTPS 入口已准备好时，才把
 `BIRDBOX_BIND_ADDRESS` 改为 `0.0.0.0`。
+
+`latest` 适合作为首次安装的默认值。生产环境验证完成后，建议将
+`BIRDBOX_IMAGE_TAG` 固定为具体版本 tag 或镜像 digest，使升级和回滚结果可重复。
 
 启动并检查服务：
 
