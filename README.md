@@ -1,274 +1,201 @@
-# Birdbox Demo
+# Birdbox
 
-Birdbox is a BIRD 2 GUI controller for managed-node inventory,
-external Peer definitions, and eBGP session deployment. A session references a
-managed node, one of the external Peers defined for that node, and optionally a
-reusable CIDR-type Define.
+Birdbox 是一个面向 BIRD 2 的 Web 控制台，用于管理受管路由节点、外部 BGP Peer、BGP 会话和路由策略。它通过 SSH 连接节点，生成并校验 BIRD 配置，然后安全地部署到目标节点。
 
-Managed nodes are reached only through SSH. Birdbox creates a persistent
-controller key and uses a dedicated, non-privileged account on each node;
-there is no node Agent and Birdbox never needs remote root login. External
-Peers never contain management credentials and cannot execute commands.
-The local BGP address, port, and ASN belong to each session, so one managed node
-can use different local endpoints or ASNs for different Peers.
+Birdbox 适合希望通过浏览器完成以下工作的网络管理员：
 
-Defines are ordered BIRD declarations with a display name, BIRD symbol, type,
-and scope. A Define may be available to every managed node or restricted to one
-node. CIDR-type Defines are rendered as prefix sets:
+- 查看节点和 BGP 会话状态；
+- 创建、预检和部署 IPv4/IPv6 eBGP 会话；
+- 管理 CIDR Define、Function、Filter 和 RPKI 资源；
+- 为每个会话独立设置导入、导出、静态路由和高级 BGP 参数；
+- 在配置失败时保留原库存并回滚已完成的节点部署。
 
-```bird
-define MY_EXPORTS = [ 10.0.0.0/8+, 192.0.2.0/24 ];
-```
+## 工作方式
 
-The CIDR editor has separate IPv4 and IPv6 types and accepts BIRD prefix-set
-forms such as `10.0.0.0/8+`, `198.51.100.0/24{24,28}`, and
-`2001:db8::/32{48,64}`. These Defines are
-reusable resources; BGP export filtering references a selected symbol with
-`net ~ MY_EXPORTS`. Export form actions can export all routes, export none, or
-export only a selected CIDR Define. Static origination is configured separately
-for each session channel, so it remains active with form, combined, or custom
-export policy. Exact prefixes from a selected CIDR Define may use `blackhole`,
-`reject`, `unreachable`, or `prohibit`. Each channel also accepts bounded custom
-Static Protocol statements such as `route ... via ...;`; range expressions
-remain filter patterns and do not generate routes. Leaving both the action and
-custom source empty creates no static routes. Valid form changes are
-automatically previewed after a field loses focus.
+Birdbox 不替换目标机器上的 BIRD 主配置，也不需要远程 root 登录。每个节点使用一个非特权 SSH 用户，Birdbox 只维护自己的生成配置文件。
 
-RPKI resources are managed in their own tab. A source can load BIRD ROA route
-files through a Static Protocol, or connect to an RPKI-RTR cache server over
-TCP/TCP-MD5 or SSH. IPv4 and IPv6 ROA Tables are independently selectable and
-can be shared by multiple sources, so Filters may use `roa_check(TABLE, net,
-bgp_path.last)` without hand-editing the generated global declarations. RPKI
-server refresh, retry, expire, RTR version, and max-length settings are
-validated against BIRD 2.19.1 ranges. SSH transport additionally requires the
-target BIRD binary to be built with libssh support; native `bird -p` remains the
-final capability check.
-
-Functions and Filters are reusable BIRD policy resources. Each resource may be
-global or restricted to one managed node and is parsed by the target node's
-native `bird -p` before it is saved. Function declaration order is adjusted
-directly in the Functions resource list. A
-Function resource contains one complete top-level `function` declaration; a
-Filter resource contains one complete named `filter` declaration. Functions
-with parameters may be used by other policy source, while parameterless
-Functions are also available as session policy steps. The source editor includes
-line numbers, cursor position, Tab/Shift+Tab indentation, and inherited line
-indentation. It also lists compatible, enabled Defines available before the
-edited resource and inserts their symbols at the cursor. Expression-type Defines
-store any safe BIRD expression and are emitted as `define NAME = VALUE;`.
-CIDR-type and expression-type Defines share one ordered resource list. Policy
-resources are validated in the complete node configuration; cross-scope or
-disabled Define references are rejected before native parsing. Rename, type,
-scope, disable, and delete operations are protected while a session or policy
-resource depends on the affected Define.
-
-Import and export policy are selected independently for every BGP session:
-
-- **Form** explicitly emits `import all` by default (or `import none` when
-  selected). Export independently supports `all`, `none`, or a selected CIDR
-  Define.
-- **Combined** contains an ordered list of parameterless Function steps plus one
-  movable form-policy step. Function steps are optional; when present, each can
-  accept on a true result, reject on a true result, or execute without making a
-  route decision. Import uses its
-  movable `all`/`none` form decision without an extra fallback. Export always
-  appends the generated fallback `reject;` after every movable step. Available
-  Functions are added explicitly from the picker.
-- **Custom** references one complete named Filter directly. Static resources
-  remain independent and are still generated with custom export policy.
-
-Session options follow the BIRD 2.19.1 protocol model. IPv4 and IPv6 channels
-are enabled by default and can be controlled independently, including their
-policies, CIDR Defines, static routes, limits, and advanced channel options. Common
-controls include direct/multihop mode and TTL, passive mode, BFD, GTSM, hold and
-keepalive timers, and import/export route limits. The collapsed advanced area
-covers capability requirements, graceful restart bounds, Send Hold Timer,
-TCP MD5/TCP-AO authentication, Onlink sessions, eBGP attribute handling,
-route selection, IPv6 link-local next-hop formatting, next-hop and gateway
-behavior, Adj-RIB-In/Out, Add Paths, AIGP, and channel-specific limits.
-Additional protocol-block and per-channel
-directives can be entered as bounded BIRD snippets; they cannot close the
-managed outer block and are checked in the complete configuration by native
-`bird -p` before save or deployment. Selecting BFD emits one shared
-`protocol bfd birdbox_bfd` instance for the node.
-
-Each session also has a session-level enable switch. A disabled session remains
-in inventory for later editing but is omitted from the generated BGP and Static
-configuration; the node deployment dialog applies only enabled sessions.
-
-The generated declaration order is the user-ordered Defines list, ROA Tables and
-RPKI sources, Functions, Filters, static routes, and BGP protocols. Editing a
-node, Peer, Define, Function, Filter, or RPKI resource first validates the
-complete inventory and each affected node with native `bird -p`, then applies
-the candidate configuration to all nodes in the old/new scope. The API reports
-the affected sessions; a preflight or apply failure leaves inventory unchanged
-and rolls back nodes that were already applied.
-
-Birdbox does not replace the system BIRD main configuration. New nodes use:
-
-- controller inventory: MySQL `birdbox_state.inventory` (legacy import: `data/inventory.json`)
-- controller SSH identity: `data/ssh/id_ed25519`
-- generated include on each node: `/var/lib/birdbox/generated.conf`
-- system BIRD control socket: `/run/bird/bird.ctl`
-- default BGP TCP port: `179`
-
-## Storage and deployment
-
-MySQL 8.4 or newer is the primary persistent store. Inventory and authentication
-state are kept as versioned JSON documents in MySQL, so cross-resource
-validation and a complete node configuration are committed atomically. The
-controller imports an existing `data/inventory.json` or `data/auth.json` only
-when the corresponding MySQL state does not exist yet. After import, those
-files are not written back and should be treated as migration input only.
-
-Every remote configuration change records a durable deployment journal before
-the first node is switched. After an interrupted process or container, startup
-replays the intended commit or rollback under the database deployment lock and
-refuses to serve requests if the saved inventory no longer matches either side
-of that journal.
-
-The SSH private key and `known_hosts` remain in the controller data directory,
-because OpenSSH consumes them as files. Persist `/var/lib/birdbox` together
-with MySQL; the Compose file provides `birdbox_data` and `birdbox_mysql`
-volumes for this purpose.
-
-For a production-like one-command deployment:
-
-```bash
-cp .env.example .env
-# Replace every placeholder secret and set BIRDBOX_IMAGE_TAG before exposing the service.
-docker compose pull
-docker compose up -d
-docker compose ps
-```
-
-See [Docker Compose deployment](docs/docker-deployment.md) for installation,
-backup, upgrade, rollback, and legacy JSON migration. Maintainers should follow
-[Docker Hub release](docs/docker-release.md) when publishing
-`pmman/birdbox:<tag>`.
-
-Set `BIRDBOX_SECURE_COOKIE=true` when HTTPS is terminated by a trusted proxy.
-The Compose service binds
-`${BIRDBOX_BIND_ADDRESS:-127.0.0.1}:${BIRDBOX_PORT:-3000}` and waits for the
-MySQL health check before starting. Back up both named volumes; a MySQL dump
-alone does not contain the controller SSH identity.
-
-The relevant environment variables are:
-
-- `BIRDBOX_IMAGE_TAG` (Docker Hub image tag, default `0.01a` in `.env.example`)
-- `BIRDBOX_DATABASE_URL` (optional `mysql://user:password@host:3306/database`)
-- `BIRDBOX_DB_HOST`, `BIRDBOX_DB_PORT`, `BIRDBOX_DB_NAME`, `BIRDBOX_DB_USER`, `BIRDBOX_DB_PASSWORD`
-- `BIRDBOX_DB_POOL_SIZE`, `BIRDBOX_DB_CONNECT_RETRIES`, `BIRDBOX_DB_CONNECT_RETRY_MS`, `BIRDBOX_DB_SSL`
-- `BIRDBOX_DATA_DIR`, `BIRDBOX_HOST`, `BIRDBOX_BIND_ADDRESS`, `BIRDBOX_PORT`, `BIRDBOX_SECURE_COOKIE`
-- `BIRDBOX_SHUTDOWN_TIMEOUT_MS` (deployment drain timeout, default `1800000`)
-
-For local development without MySQL, tests explicitly set
-`NODE_ENV=test BIRDBOX_DATABASE_URL=memory:`. The application itself defaults
-to MySQL and will report an unhealthy status when MySQL is unavailable. To run
-the real MySQL integration test against an isolated test database, set
-`BIRDBOX_TEST_MYSQL_URL=mysql://user:password@host:3306/database` before
-running `npm test`.
-
-## Requirements
-
-- Node.js 18 or newer on the controller
-- BIRD 2.19.1 and `birdc` on every managed node
-- an SSH server and an existing non-privileged account on every managed node
-- IP reachability between the two configured BGP addresses
-- a separately configured external BGP peer
-
-Start the controller after MySQL is available:
-
-```bash
-npm test
-npm start
-```
-
-## Authentication
-
-At first access, Birdbox presents a one-time password setup for the single
-`admin` account. The setup endpoint is closed permanently after the first
-successful setup.
-The password is stored only as a salted `scrypt` hash in
-MySQL; the controller never stores the plaintext password. A legacy
-`data/auth.json` is imported once when MySQL has no authentication state.
-
-Only one active browser session exists at a time. A successful login, password
-change, or logout invalidates the previous session. Sessions use an HttpOnly,
-SameSite=Strict cookie and expire after 12 hours. For production, serve
-Birdbox through HTTPS and set `BIRDBOX_SECURE_COOKIE=true` when TLS terminates
-outside the Node process.
-
-To recover a forgotten password, stop the controller and reset the `auth`
-state in MySQL (after taking a backup), then start it again and complete
-password setup. Removing `data/auth.json` only affects a not-yet-imported
-installation.
-
-Open <http://127.0.0.1:3000>. In the Nodes tab, start adding a node and generate
-its preparation script. Run that script with `sudo` on the target, then add the
-displayed line to the system BIRD main configuration:
+目标节点需要在 BIRD 主配置中包含 Birdbox 文件：
 
 ```bird
 include "/var/lib/birdbox/generated.conf";
 ```
 
-Validate and load that one-time main-config change on the target before using
-**Test connection** and **Save node** in Birdbox. The script grants only the
-dedicated user access to the generated configuration directory and membership
-of the BIRD socket group; it does not edit the main configuration or restart
-BIRD. The controller public key is installed with OpenSSH `restrict`, which
-disables forwarding and PTY allocation.
+Birdbox 会在写入库存前使用目标节点上的原生 `bird -p` 校验完整配置。远程部署期间会使用数据库锁和持久恢复记录，服务重启后能够继续完成提交或回滚。
 
-Deleting a managed node first applies an empty Birdbox include so global RPKI
-protocols and policy declarations do not remain active, then removes the node
-from inventory. It intentionally does not edit the target user's
-`authorized_keys`; when permanently retiring a host, remove the corresponding
-restricted Birdbox controller key after deletion and remove the include line
-from the system BIRD configuration.
+## 快速部署
 
-If a permanently offline node cannot be cleaned up, **Force forget** removes
-the node and cascades its sessions, Peers, and node-scoped resources without
-contacting it. The response sets `cleanupRequired: true`; the generated include,
-the include line, and the restricted controller key must then be removed on the
-host manually before it is reused.
+### 前置条件
 
-A persisted node's SSH target, deployment mode, main/generated configuration
-paths, and control socket are immutable. To migrate those settings, delete the
-node so Birdbox can clear the old target, prepare the replacement target, and
-add it as a new node.
+- Docker Engine 24 或更高版本；
+- Docker Compose v2；
+- 宿主机可以访问 Docker Hub；
+- 目标路由节点运行 BIRD 2.19.1，并允许 SSH 访问；
+- 目标节点存在非特权用户和 `bird` 用户组；
+- 生产环境建议使用 HTTPS 反向代理。
 
-The managed SSH client records the first host key in `data/ssh/known_hosts`,
-hashes host names in that file, and rejects later key changes. This is
-trust-on-first-use: for sensitive environments, verify the target fingerprint
-out of band and pre-populate `known_hosts` before the first connection.
+### 使用 Docker Compose
 
-Add or edit external Peers, typed Defines, Functions, Filters, and RPKI sources
-in their tabs under **Resource Management**. The session workspace keeps
-only the selectors and session-specific settings; its question-mark buttons
-open the corresponding management section. The topology shows all Peers
-belonging to the selected node and their current protocol state.
+```bash
+git clone https://github.com/pmman289/birdbox.git
+cd birdbox
+cp .env.example .env
+```
 
-## API
+编辑 `.env`，至少修改两个数据库密码：
 
-- `GET /api/auth/status`: public authentication state
-- `POST /api/auth/setup`, `/api/auth/login`, `/api/auth/logout`: set password and manage the active session
-- `POST /api/auth/password`: authenticated password change
-- `GET /api/dashboard`: inventory, selection, topology, and BGP status
-- `POST /api/nodes/setup-script`: generate the non-privileged node preparation script
-- `POST /api/nodes/test`: check SSH, include ownership, socket access, BIRD 2, and the complete system configuration
-- `POST /api/nodes`, `PUT/DELETE /api/nodes/{id}`: managed-node inventory (`DELETE ...?force=true` forgets an offline node and returns `cleanupRequired: true`)
-- `POST /api/nodes/{id}/peers`, `PUT/DELETE /api/peers/{id}`: external Peer definitions
-- `POST /api/functions`, `PUT/DELETE /api/functions/{id}`: BIRD Function resources
-- `POST /api/functions/{id}/move`: move a Function declaration up or down
-- `POST /api/defines`, `PUT/DELETE /api/defines/{id}`: typed BIRD Define resources (`cidr4`, `cidr6`, or `expression`)
-- `POST /api/defines/{id}/move`: move a Define declaration up or down
-- `POST /api/filters`, `PUT/DELETE /api/filters/{id}`: BIRD Filter resources
-- `POST /api/rpki`, `PUT/DELETE /api/rpki/{id}`: local ROA file and RPKI-RTR source resources
-- `POST /api/sessions/preview`: render and validate the selected node
-- `POST /api/sessions/apply`: merge and deploy all sessions for the node
-- `DELETE /api/sessions/{id}`: remove a session and redeploy the node
-- `POST /api/sessions/{id}/control`: enable or disable only the selected BGP protocol (`{"action":"enable"}` or `{"action":"disable"}`); the BIRD daemon and other sessions remain running
+```dotenv
+BIRDBOX_IMAGE_TAG=0.01a
+MYSQL_DATABASE=birdbox
+MYSQL_USER=birdbox
+MYSQL_PASSWORD=请替换为随机密码
+MYSQL_ROOT_PASSWORD=请替换为另一组随机密码
+BIRDBOX_BIND_ADDRESS=127.0.0.1
+BIRDBOX_PORT=3000
+BIRDBOX_SECURE_COOKIE=true
+```
 
-TCP MD5 passwords and TCP-AO key material are stored in the inventory and
-rendered into the generated configuration; do not commit or publish either file
-without redacting routing credentials and peer details.
+启动服务并检查状态：
+
+```bash
+docker compose config
+docker compose pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:3000/api/health
+```
+
+浏览器打开 <http://127.0.0.1:3000>。第一次访问时直接设置 `admin` 管理密码。设置成功后，初始化接口会永久关闭。
+
+### 使用局域网访问
+
+默认只把宿主机端口绑定到 `127.0.0.1`。如果需要从局域网其它设备访问，把 `.env` 改为：
+
+```dotenv
+BIRDBOX_BIND_ADDRESS=0.0.0.0
+```
+
+然后重建容器：
+
+```bash
+docker compose up -d --force-recreate birdbox
+```
+
+同时在防火墙中只允许可信网段访问 `BIRDBOX_PORT`。未初始化的服务不能直接暴露到公网。
+
+## 接入第一个节点
+
+### 1. 准备目标节点
+
+目标节点应满足：
+
+- BIRD 2.19.1 已安装并正在运行；
+- 已创建专用的非特权 SSH 用户，例如 `birdbox`；
+- 该用户可以读取和更新 `/var/lib/birdbox`；
+- 该用户属于 `bird` 用户组，可以访问 `/run/bird/bird.ctl`；
+- BIRD 主配置文件路径已确定，例如 `/etc/bird/bird.conf`。
+
+### 2. 生成准备脚本
+
+登录 Birdbox 后进入“资源管理”中的“受管节点”，点击“添加节点”，填写节点地址、SSH 用户、Router ID 和配置路径，然后点击“生成准备脚本”。
+
+在目标节点上使用 root 执行页面生成的脚本：
+
+```bash
+sudo sh birdbox-node-setup.sh
+```
+
+脚本会创建配置目录、安装受限 SSH 公钥并检查 BIRD Socket。它不会修改 BIRD 主配置，也不会自动重启 BIRD。
+
+### 3. 添加 Include 并检查
+
+把页面显示的 Include 行加入目标节点的 BIRD 主配置，然后在目标节点执行：
+
+```bash
+birdc -s /run/bird/bird.ctl configure check
+birdc -s /run/bird/bird.ctl configure
+```
+
+回到 Birdbox 点击“测试连接”。测试通过后保存节点。首次 SSH 连接使用 TOFU（首次信任）策略；高安全环境应在首次连接前人工核对主机指纹。
+
+## 创建 Peer 和 BGP 会话
+
+1. 在当前节点下添加外部 Peer，填写邻居地址、ASN 和 BGP 端口。
+2. 在“会话与拓扑”中选择节点和 Peer。
+3. 填写本地地址、本地 ASN、协议名称和启用的 Address Family。
+4. 选择导入/导出策略，必要时添加 CIDR Define、静态路由或高级 BGP 参数。
+5. 点击“预检”，确认生成的完整 BIRD 配置通过校验。
+6. 点击“应用”，等待节点接受配置并查看 Established 状态。
+
+预检或部署失败时，Birdbox 不会提交库存变更；已经完成的节点会尝试回滚。重复提交前应先刷新状态，确认远端和库存是否已经完成变更。
+
+## 路由策略资源
+
+### Define
+
+Define 可以是全局资源，也可以只属于某个节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
+
+### Function 和 Filter
+
+Function 用于可复用的策略步骤，Filter 用于完整的自定义路由过滤器。Birdbox 会在目标节点的完整配置中解析它们，并阻止引用不存在、禁用或作用域不匹配的资源。
+
+### RPKI
+
+RPKI 资源支持本地 ROA 文件和 RPKI-RTR 缓存。IPv4、IPv6 ROA Table 可以分别启用，并在 Filter 中通过 `roa_check()` 使用。
+
+## 数据、备份和升级
+
+生产环境必须同时备份 MySQL 和 Birdbox 数据卷：
+
+- MySQL 保存库存、认证状态和部署恢复记录；
+- `birdbox_data` 保存控制器 SSH 私钥、`known_hosts` 和运行数据。
+
+只备份 MySQL 无法恢复控制器 SSH 身份。Compose 部署的完整备份、恢复、升级和旧 JSON 迁移流程见 [Docker Compose 部署文档](docs/docker-deployment.md)。
+
+升级镜像：
+
+```bash
+docker compose pull birdbox
+docker compose up -d --no-deps birdbox
+docker compose ps
+```
+
+不要使用 `docker compose down -v`，除非确定要删除全部数据库和控制器数据。
+
+## 节点退役
+
+在线节点的正常退役会先部署空的 Birdbox Include，再从库存删除节点。系统 BIRD 主配置中的 Include 行和目标用户 `authorized_keys` 中的控制器公钥仍需要人工删除。
+
+如果节点永久离线，在节点编辑页面选择“强制遗忘”，并输入：
+
+```text
+遗忘 <node.id>
+```
+
+该操作会级联删除会话、Peer 和节点级资源，但不会连接远端清理配置。完成后请按页面清单手动删除主配置 Include、生成配置和控制器公钥。
+
+## 安全建议
+
+- 生产环境使用 HTTPS，并设置 `BIRDBOX_SECURE_COOKIE=true`；
+- 不要把 `.env`、MySQL 密码、SSH 私钥、`known_hosts` 或包含 TCP MD5/TCP-AO 密钥的库存文件提交到 Git；
+- 首次初始化前不要把服务暴露到公网；
+- 为每个路由节点使用专用的非特权 SSH 用户；
+- 高安全环境预先核对并固定目标 SSH 主机指纹；
+- 通过防火墙限制 Web 端口和 SSH 管理端口的来源网段。
+
+## 本地开发
+
+需要 Node.js 18 或更高版本。应用默认使用 MySQL；测试使用内存数据库：
+
+```bash
+npm install
+NODE_ENV=test BIRDBOX_DATABASE_URL=memory: npm test
+npm start
+```
+
+真实 MySQL 集成测试：
+
+```bash
+BIRDBOX_TEST_MYSQL_URL='mysql://用户:密码@主机:3306/测试库' npm test
+```
+
+更多运维说明见 [docs/README.md](docs/README.md)。
