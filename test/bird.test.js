@@ -902,8 +902,12 @@ process.exit(result.status ?? 1);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
   await fs.writeFile(mainConfigPath, `  include    "${generatedConfigPath}"   ; // active\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
+  await fs.writeFile(mainConfigPath, `include "/etc/bird/conf.d/*.conf";\n${includeLine}\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
   await fs.writeFile(mainConfigPath, `include "${generatedConfigPath}" unexpected;\n`);
-  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
+  const invalid = await checkIncludeNodeAccess(includeNode);
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.stderr, /缺少活动 Include/);
 });
 
 test("parses multiple BGP protocol states independently", () => {

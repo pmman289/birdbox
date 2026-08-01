@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
 
 import {
+  ACTIVE_BIRD_INCLUDE_AWK,
   applyStagedConfig,
   birdSourceReferencesSymbol,
   checkIncludeNodeAccess,
@@ -779,48 +780,7 @@ if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; t
 fi
 
 has_active_include() {
-  awk -v target="$GENERATED_CONFIG" '
-    function strip_comments(line, start, finish, hash, slash, comment, prefix) {
-      prefix = ""
-      while (length(line)) {
-        if (block) {
-          finish = index(line, "*/")
-          if (!finish) return prefix
-          line = substr(line, finish + 2)
-          block = 0
-          continue
-        }
-        start = index(line, "/*")
-        hash = index(line, "#")
-        slash = index(line, "//")
-        comment = hash
-        if (slash && (!comment || slash < comment)) comment = slash
-        if (start && (!comment || start < comment)) {
-          prefix = prefix substr(line, 1, start - 1)
-          line = substr(line, start + 2)
-          block = 1
-          continue
-        }
-        if (comment) return prefix substr(line, 1, comment - 1)
-        return prefix line
-      }
-      return prefix
-    }
-    {
-      clean = strip_comments($0)
-      sub(/^[ \t]+/, "", clean)
-      if (clean ~ /^include[ \t]+"/) {
-        rest = clean
-        sub(/^include[ \t]+"/, "", rest)
-        finish = index(rest, "\\\"")
-        suffix = substr(rest, finish + 1)
-        sub(/^[ \t]*/, "", suffix)
-        sub(/[ \t]*$/, "", suffix)
-        if (finish && substr(rest, 1, finish - 1) == target && suffix == ";") found = 1
-      }
-    }
-    END { exit found ? 0 : 1 }
-  ' "$MAIN_CONFIG"
+  awk -v target="$GENERATED_CONFIG" '${ACTIVE_BIRD_INCLUDE_AWK}' "$MAIN_CONFIG"
 }
 
 MAIN_BACKUP=''

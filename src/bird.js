@@ -52,6 +52,65 @@ const MAX_POLICY_SOURCE_LENGTH = 32 * 1024;
 const MAX_GRACEFUL_RESTART_TIME = 4095;
 const MAX_LONG_LIVED_STALE_TIME = 16777215;
 
+export const ACTIVE_BIRD_INCLUDE_AWK = `
+BEGIN {
+  quote = sprintf("%c", 34)
+  backslash = sprintf("%c", 92)
+}
+function strip_comments(source, output, cursor, character, pair, quoted, escaped, ending) {
+  output = ""
+  for (cursor = 1; cursor <= length(source);) {
+    character = substr(source, cursor, 1)
+    pair = substr(source, cursor, 2)
+    if (in_block_comment) {
+      ending = index(substr(source, cursor), "*/")
+      if (!ending) return output
+      cursor += ending + 1
+      in_block_comment = 0
+      continue
+    }
+    if (quoted) {
+      output = output character
+      if (escaped) escaped = 0
+      else if (character == backslash) escaped = 1
+      else if (character == quote) quoted = 0
+      cursor += 1
+      continue
+    }
+    if (character == quote) {
+      quoted = 1
+      output = output character
+      cursor += 1
+      continue
+    }
+    if (pair == "/*") {
+      in_block_comment = 1
+      cursor += 2
+      continue
+    }
+    if (pair == "//" || character == "#") break
+    output = output character
+    cursor += 1
+  }
+  return output
+}
+{
+  line = strip_comments($0)
+  sub(/^[[:space:]]*/, "", line)
+  sub(/[[:space:]]*$/, "", line)
+  if (line ~ /^include[[:space:]]+"/) {
+    rest = line
+    sub(/^include[[:space:]]+"/, "", rest)
+    ending = index(rest, quote)
+    suffix = substr(rest, ending + 1)
+    sub(/^[[:space:]]*/, "", suffix)
+    sub(/[[:space:]]*$/, "", suffix)
+    if (ending && substr(rest, 1, ending - 1) == target && suffix == ";") found = 1
+  }
+}
+END { exit found ? 0 : 1 }
+`.trim();
+
 function assert(condition, message) {
   if (!condition) {
     const error = new Error(message);
@@ -1542,48 +1601,13 @@ export async function checkIncludeNodeAccess(nodeInput) {
   const directory = path.posix.dirname(node.generatedConfigPath);
   const command = [
     "set -eu",
-    `test -S '${node.socketPath}'`,
-    `test -r '${node.mainConfigPath}'`,
-    `test -d '${directory}'`,
-    `test -w '${directory}'`,
-    `test -L '${node.generatedConfigPath}'`,
-    `awk -v target='${node.generatedConfigPath}' '
-      {
-        source = $0
-        line = ""
-        for (cursor = 1; cursor <= length(source);) {
-          pair = substr(source, cursor, 2)
-          if (in_block_comment) {
-            ending = index(substr(source, cursor), "*/")
-            if (!ending) break
-            cursor += ending + 1
-            in_block_comment = 0
-            continue
-          }
-          if (pair == "/*") {
-            in_block_comment = 1
-            cursor += 2
-            continue
-          }
-          if (pair == "//" || substr(source, cursor, 1) == "#") break
-          line = line substr(source, cursor, 1)
-          cursor += 1
-        }
-        sub(/^[[:space:]]*/, "", line)
-        sub(/[[:space:]]*$/, "", line)
-        if (line ~ /^include[[:space:]]+"/) {
-          rest = line
-          sub(/^include[[:space:]]+"/, "", rest)
-          ending = index(rest, "\\\"")
-          suffix = substr(rest, ending + 1)
-          sub(/^[[:space:]]*/, "", suffix)
-          sub(/[[:space:]]*$/, "", suffix)
-          if (ending && substr(rest, 1, ending - 1) == target && suffix == ";") found = 1
-        }
-      }
-      END { exit found ? 0 : 1 }
-    ' '${node.mainConfigPath}'`,
-    `birdc -s '${node.socketPath}' 'show status'`,
+    `test -S '${node.socketPath}' || { echo 'BIRD 控制 Socket 不存在：${node.socketPath}' >&2; exit 1; }`,
+    `test -r '${node.mainConfigPath}' || { echo 'SSH 用户无法读取 BIRD 主配置：${node.mainConfigPath}' >&2; exit 1; }`,
+    `test -d '${directory}' || { echo 'Birdbox 配置目录不存在：${directory}' >&2; exit 1; }`,
+    `test -w '${directory}' || { echo 'SSH 用户无法写入 Birdbox 配置目录：${directory}' >&2; exit 1; }`,
+    `test -L '${node.generatedConfigPath}' || { echo 'Birdbox 生成配置不是符号链接：${node.generatedConfigPath}' >&2; exit 1; }`,
+    `awk -v target='${node.generatedConfigPath}' '${ACTIVE_BIRD_INCLUDE_AWK}' '${node.mainConfigPath}' || { echo 'BIRD 主配置缺少活动 Include：${node.generatedConfigPath}' >&2; exit 1; }`,
+    `birdc -s '${node.socketPath}' 'show status' || { echo 'SSH 用户无法访问 BIRD 控制 Socket：${node.socketPath}' >&2; exit 1; }`,
     "printf '\n---BIRDBOX-ACCESS---\n'",
     "id -un",
     "id -Gn",
@@ -1637,8 +1661,10 @@ export async function stageAndValidate(node, config) {
       `test -S '${normalizedNode.socketPath}'`,
       `test -L '${activePath}'`,
       `test -w '${directory}'`,
+      `bird_group=$(stat -c '%G' '${normalizedNode.socketPath}')`,
+      `test -n "$bird_group" && test "$bird_group" != UNKNOWN`,
       `install -d -m 0750 '${directory}/versions'`,
-      `chgrp bird '${directory}/versions'`,
+      `chgrp "$bird_group" '${directory}/versions'`,
       `chmod 0750 '${directory}/versions'`,
       `current_target=$(readlink '${activePath}')`,
       `current_file=$(readlink -f '${activePath}')`,
@@ -1647,7 +1673,7 @@ export async function stageAndValidate(node, config) {
       `cleanup_staged_versions() { for file in '${directory}/versions/'${basename}.*.conf '${directory}/versions/'${basename}.*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file"); if [ "$file_target" != "$current_file" ]; then rm -f -- "$file"; fi; done; }`,
       "cleanup_staged_versions",
       `cat > '${versionPath}.tmp'`,
-      `chgrp bird '${versionPath}.tmp'`,
+      `chgrp "$bird_group" '${versionPath}.tmp'`,
       `chmod 0640 '${versionPath}.tmp'`,
       `mv -f '${versionPath}.tmp' '${versionPath}'`,
       `ln -sfn '${candidateTarget}' '${candidateLink}'`,
