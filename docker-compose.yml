@@ -1,0 +1,65 @@
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-birdbox}
+      MYSQL_USER: ${MYSQL_USER:-birdbox}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - birdbox_mysql:/var/lib/mysql
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 1m
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  birdbox:
+    image: pmman/birdbox:${BIRDBOX_IMAGE_TAG:-0.01a}
+    pull_policy: missing
+    restart: unless-stopped
+    environment:
+      BIRDBOX_HOST: 0.0.0.0
+      BIRDBOX_PORT: 3000
+      BIRDBOX_DATA_DIR: /var/lib/birdbox
+      BIRDBOX_DB_HOST: db
+      BIRDBOX_DB_PORT: 3306
+      BIRDBOX_DB_NAME: ${MYSQL_DATABASE:-birdbox}
+      BIRDBOX_DB_USER: ${MYSQL_USER:-birdbox}
+      BIRDBOX_DB_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
+      BIRDBOX_SECURE_COOKIE: ${BIRDBOX_SECURE_COOKIE:-false}
+      BIRDBOX_SHUTDOWN_TIMEOUT_MS: ${BIRDBOX_SHUTDOWN_TIMEOUT_MS:-1800000}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${BIRDBOX_BIND_ADDRESS:-127.0.0.1}:${BIRDBOX_PORT:-3000}:3000"
+    volumes:
+      - birdbox_data:/var/lib/birdbox
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 30m10s
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+volumes:
+  birdbox_mysql:
+  birdbox_data:

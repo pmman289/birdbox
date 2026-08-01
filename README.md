@@ -1,6 +1,6 @@
 # Birdbox Demo
 
-Birdbox is a dependency-free BIRD 2 GUI demo for managed-node inventory,
+Birdbox is a BIRD 2 GUI controller for managed-node inventory,
 external Peer definitions, and eBGP session deployment. A session references a
 managed node, one of the external Peers defined for that node, and optionally a
 reusable CIDR-type Define.
@@ -106,11 +106,68 @@ and rolls back nodes that were already applied.
 
 Birdbox does not replace the system BIRD main configuration. New nodes use:
 
-- controller inventory: `data/inventory.json`
+- controller inventory: MySQL `birdbox_state.inventory` (legacy import: `data/inventory.json`)
 - controller SSH identity: `data/ssh/id_ed25519`
 - generated include on each node: `/var/lib/birdbox/generated.conf`
 - system BIRD control socket: `/run/bird/bird.ctl`
 - default BGP TCP port: `179`
+
+## Storage and deployment
+
+MySQL 8.4 or newer is the primary persistent store. Inventory and authentication
+state are kept as versioned JSON documents in MySQL, so cross-resource
+validation and a complete node configuration are committed atomically. The
+controller imports an existing `data/inventory.json` or `data/auth.json` only
+when the corresponding MySQL state does not exist yet. After import, those
+files are not written back and should be treated as migration input only.
+
+Every remote configuration change records a durable deployment journal before
+the first node is switched. After an interrupted process or container, startup
+replays the intended commit or rollback under the database deployment lock and
+refuses to serve requests if the saved inventory no longer matches either side
+of that journal.
+
+The SSH private key and `known_hosts` remain in the controller data directory,
+because OpenSSH consumes them as files. Persist `/var/lib/birdbox` together
+with MySQL; the Compose file provides `birdbox_data` and `birdbox_mysql`
+volumes for this purpose.
+
+For a production-like one-command deployment:
+
+```bash
+cp .env.example .env
+# Replace every placeholder secret and set BIRDBOX_IMAGE_TAG before exposing the service.
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+See [Docker Compose deployment](docs/docker-deployment.md) for installation,
+backup, upgrade, rollback, and legacy JSON migration. Maintainers should follow
+[Docker Hub release](docs/docker-release.md) when publishing
+`pmman/birdbox:<tag>`.
+
+Set `BIRDBOX_SECURE_COOKIE=true` when HTTPS is terminated by a trusted proxy.
+The Compose service binds
+`${BIRDBOX_BIND_ADDRESS:-127.0.0.1}:${BIRDBOX_PORT:-3000}` and waits for the
+MySQL health check before starting. Back up both named volumes; a MySQL dump
+alone does not contain the controller SSH identity.
+
+The relevant environment variables are:
+
+- `BIRDBOX_IMAGE_TAG` (Docker Hub image tag, default `0.01a` in `.env.example`)
+- `BIRDBOX_DATABASE_URL` (optional `mysql://user:password@host:3306/database`)
+- `BIRDBOX_DB_HOST`, `BIRDBOX_DB_PORT`, `BIRDBOX_DB_NAME`, `BIRDBOX_DB_USER`, `BIRDBOX_DB_PASSWORD`
+- `BIRDBOX_DB_POOL_SIZE`, `BIRDBOX_DB_CONNECT_RETRIES`, `BIRDBOX_DB_CONNECT_RETRY_MS`, `BIRDBOX_DB_SSL`
+- `BIRDBOX_DATA_DIR`, `BIRDBOX_HOST`, `BIRDBOX_BIND_ADDRESS`, `BIRDBOX_PORT`, `BIRDBOX_SECURE_COOKIE`
+- `BIRDBOX_SHUTDOWN_TIMEOUT_MS` (deployment drain timeout, default `1800000`)
+
+For local development without MySQL, tests explicitly set
+`NODE_ENV=test BIRDBOX_DATABASE_URL=memory:`. The application itself defaults
+to MySQL and will report an unhealthy status when MySQL is unavailable. To run
+the real MySQL integration test against an isolated test database, set
+`BIRDBOX_TEST_MYSQL_URL=mysql://user:password@host:3306/database` before
+running `npm test`.
 
 ## Requirements
 
@@ -120,7 +177,7 @@ Birdbox does not replace the system BIRD main configuration. New nodes use:
 - IP reachability between the two configured BGP addresses
 - a separately configured external BGP peer
 
-Start the controller:
+Start the controller after MySQL is available:
 
 ```bash
 npm test
@@ -129,9 +186,12 @@ npm start
 
 ## Authentication
 
-At first access, Birdbox presents a password setup screen for the single
-`admin` account. The password is stored only as a salted `scrypt` hash in
-`data/auth.json`; the controller never stores the plaintext password.
+At first access, Birdbox presents a one-time password setup for the single
+`admin` account. The setup endpoint is closed permanently after the first
+successful setup.
+The password is stored only as a salted `scrypt` hash in
+MySQL; the controller never stores the plaintext password. A legacy
+`data/auth.json` is imported once when MySQL has no authentication state.
 
 Only one active browser session exists at a time. A successful login, password
 change, or logout invalidates the previous session. Sessions use an HttpOnly,
@@ -139,8 +199,10 @@ SameSite=Strict cookie and expire after 12 hours. For production, serve
 Birdbox through HTTPS and set `BIRDBOX_SECURE_COOKIE=true` when TLS terminates
 outside the Node process.
 
-To recover a forgotten password, stop the controller, back up and remove
-`data/auth.json`, then start it again and complete password setup.
+To recover a forgotten password, stop the controller and reset the `auth`
+state in MySQL (after taking a backup), then start it again and complete
+password setup. Removing `data/auth.json` only affects a not-yet-imported
+installation.
 
 Open <http://127.0.0.1:3000>. In the Nodes tab, start adding a node and generate
 its preparation script. Run that script with `sudo` on the target, then add the
@@ -157,6 +219,29 @@ of the BIRD socket group; it does not edit the main configuration or restart
 BIRD. The controller public key is installed with OpenSSH `restrict`, which
 disables forwarding and PTY allocation.
 
+Deleting a managed node first applies an empty Birdbox include so global RPKI
+protocols and policy declarations do not remain active, then removes the node
+from inventory. It intentionally does not edit the target user's
+`authorized_keys`; when permanently retiring a host, remove the corresponding
+restricted Birdbox controller key after deletion and remove the include line
+from the system BIRD configuration.
+
+If a permanently offline node cannot be cleaned up, **Force forget** removes
+the node and cascades its sessions, Peers, and node-scoped resources without
+contacting it. The response sets `cleanupRequired: true`; the generated include,
+the include line, and the restricted controller key must then be removed on the
+host manually before it is reused.
+
+A persisted node's SSH target, deployment mode, main/generated configuration
+paths, and control socket are immutable. To migrate those settings, delete the
+node so Birdbox can clear the old target, prepare the replacement target, and
+add it as a new node.
+
+The managed SSH client records the first host key in `data/ssh/known_hosts`,
+hashes host names in that file, and rejects later key changes. This is
+trust-on-first-use: for sensitive environments, verify the target fingerprint
+out of band and pre-populate `known_hosts` before the first connection.
+
 Add or edit external Peers, typed Defines, Functions, Filters, and RPKI sources
 in their tabs under **Resource Management**. The session workspace keeps
 only the selectors and session-specific settings; its question-mark buttons
@@ -171,7 +256,7 @@ belonging to the selected node and their current protocol state.
 - `GET /api/dashboard`: inventory, selection, topology, and BGP status
 - `POST /api/nodes/setup-script`: generate the non-privileged node preparation script
 - `POST /api/nodes/test`: check SSH, include ownership, socket access, BIRD 2, and the complete system configuration
-- `POST /api/nodes`, `PUT/DELETE /api/nodes/{id}`: managed-node inventory
+- `POST /api/nodes`, `PUT/DELETE /api/nodes/{id}`: managed-node inventory (`DELETE ...?force=true` forgets an offline node and returns `cleanupRequired: true`)
 - `POST /api/nodes/{id}/peers`, `PUT/DELETE /api/peers/{id}`: external Peer definitions
 - `POST /api/functions`, `PUT/DELETE /api/functions/{id}`: BIRD Function resources
 - `POST /api/functions/{id}/move`: move a Function declaration up or down

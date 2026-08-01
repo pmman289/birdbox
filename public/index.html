@@ -3,13 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light">
+    <meta name="color-scheme" content="light dark">
     <title>Birdbox · BIRD 2 控制台</title>
     <link rel="icon" href="data:,">
+    <script src="/theme-init.js"></script>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <section id="authView" class="auth-view" aria-labelledby="authTitle" hidden>
+      <button class="icon-button theme-toggle auth-theme-toggle" type="button" data-theme-toggle title="切换到暗色模式" aria-label="切换到暗色模式"><span aria-hidden="true">☾</span></button>
       <div class="auth-panel">
         <div class="auth-brand">
           <div class="brand-mark" aria-hidden="true">B</div>
@@ -37,6 +39,7 @@
       </div>
       <div class="header-actions">
         <span id="globalState" class="global-state"><i></i>正在连接</span>
+        <button id="themeToggle" class="icon-button theme-toggle" type="button" data-theme-toggle title="切换到暗色模式" aria-label="切换到暗色模式"><span aria-hidden="true">☾</span></button>
         <button id="accountButton" class="header-command" type="button">修改密码</button>
         <button id="logoutButton" class="header-command" type="button">退出</button>
         <button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
@@ -70,6 +73,7 @@
           <span>当前会话</span>
           <strong id="selectionSummary">未选择</strong>
         </div>
+        <span id="selectionLoadingStatus" class="selection-loading-status" role="status" aria-live="polite" hidden>正在加载会话状态…</span>
       </section>
 
       <section class="topology-section" aria-labelledby="topologyTitle">
@@ -370,9 +374,10 @@
       </section>
     </main>
 
+    <div id="operationStatus" class="visually-hidden" role="status" aria-live="polite"></div>
     <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
 
-    <dialog id="nodeDialog" class="editor-dialog">
+    <dialog id="nodeDialog" class="editor-dialog" aria-labelledby="nodeDialogTitle">
       <form id="nodeForm">
         <div class="dialog-head">
           <span class="dialog-icon">N</span>
@@ -412,7 +417,10 @@
           </section>
         </div>
         <div class="dialog-actions split-actions">
-          <button id="deleteNodeButton" class="text-danger-button" type="button" hidden>删除节点</button>
+          <div id="nodeRetireActions" class="node-retire-actions" hidden>
+            <button id="deleteNodeButton" class="text-danger-button" type="button">安全退役</button>
+            <details><summary>节点永久离线</summary><button id="forceDeleteNodeButton" class="text-danger-button" type="button">强制遗忘</button></details>
+          </div>
           <span></span>
           <button class="secondary-button" type="button" data-close="nodeDialog">取消</button>
           <button id="saveNodeButton" class="primary-button" type="submit">保存节点</button>
@@ -420,7 +428,23 @@
       </form>
     </dialog>
 
-    <dialog id="peerDialog" class="editor-dialog">
+    <dialog id="nodeCleanupDialog" aria-labelledby="nodeCleanupDialogTitle">
+      <form method="dialog">
+        <div class="dialog-head">
+          <span class="dialog-icon managed">!</span>
+          <div><p class="eyebrow">需要人工清理</p><h2 id="nodeCleanupDialogTitle">节点已强制遗忘</h2></div>
+        </div>
+        <p id="nodeCleanupTarget" class="dialog-note"></p>
+        <ul class="cleanup-list">
+          <li>先从主配置移除 include 行并执行 BIRD configure check/configure</li>
+          <li>再删除远端生成配置，最后从 authorized_keys 删除控制器公钥</li>
+          <li>重新纳管或复用主机前核对 BIRD 当前配置</li>
+        </ul>
+        <div class="dialog-actions"><button class="primary-button" value="default">我已记录</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="peerDialog" class="editor-dialog" aria-labelledby="peerDialogTitle">
       <form id="peerForm">
         <div class="dialog-head">
           <span class="dialog-icon remote">P</span>
@@ -443,7 +467,7 @@
       </form>
     </dialog>
 
-    <dialog id="rpkiDialog" class="editor-dialog">
+    <dialog id="rpkiDialog" class="editor-dialog" aria-labelledby="rpkiDialogTitle">
       <form id="rpkiForm">
         <div class="dialog-head">
           <span class="dialog-icon">R</span>
@@ -496,7 +520,7 @@
       </form>
     </dialog>
 
-    <dialog id="policyResourceDialog" class="editor-dialog policy-editor-dialog">
+    <dialog id="policyResourceDialog" class="editor-dialog policy-editor-dialog" aria-labelledby="policyResourceDialogTitle">
       <form id="policyResourceForm">
         <div class="dialog-head">
           <span id="policyResourceIcon" class="dialog-icon">ƒ</span>
@@ -533,7 +557,7 @@
       </form>
     </dialog>
 
-    <dialog id="policyActionDialog" class="editor-dialog policy-action-dialog">
+    <dialog id="policyActionDialog" class="editor-dialog policy-action-dialog" aria-labelledby="policyActionDialogTitle">
       <form id="policyActionForm">
         <div class="dialog-head">
           <span class="dialog-icon">↳</span>
@@ -567,11 +591,11 @@
       </form>
     </dialog>
 
-    <dialog id="passwordDialog" class="editor-dialog">
+    <dialog id="passwordDialog" class="editor-dialog" aria-labelledby="passwordDialogTitle">
       <form id="passwordForm">
         <div class="dialog-head">
           <span class="dialog-icon">A</span>
-          <div><p class="eyebrow">ADMIN</p><h2>修改管理密码</h2></div>
+          <div><p class="eyebrow">ADMIN</p><h2 id="passwordDialogTitle">修改管理密码</h2></div>
         </div>
         <div class="dialog-grid single-column-dialog">
           <div class="field full-width"><label for="currentPassword">当前密码</label><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></div>
@@ -586,11 +610,11 @@
       </form>
     </dialog>
 
-    <dialog id="applyDialog">
+    <dialog id="applyDialog" aria-labelledby="applyDialogTitle">
       <form method="dialog">
         <div class="dialog-head">
           <span class="dialog-icon">⇄</span>
-          <div><p class="eyebrow">节点部署</p><h2>应用节点会话配置</h2></div>
+          <div><p class="eyebrow">节点部署</p><h2 id="applyDialogTitle">应用节点会话配置</h2></div>
         </div>
         <div class="dialog-route"><span id="dialogLocal">本机</span><i></i><span id="dialogRemote">远端</span></div>
         <p class="dialog-note">将合并此节点的全部已启用会话，预检通过后更新该节点。</p>

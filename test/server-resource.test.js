@@ -29,6 +29,7 @@ async function waitForHealth(port) {
 }
 
 function stopProcess(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => {
     child.once("exit", resolve);
     child.kill("SIGTERM");
@@ -73,6 +74,8 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,
+      NODE_ENV: "test",
+      BIRDBOX_DATABASE_URL: "memory:",
       BIRDBOX_PORT: String(port),
       BIRDBOX_DATA_DIR: dataDir,
       BIRDBOX_NODES_FILE: path.join(root, "nodes.json"),
@@ -109,6 +112,13 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(rejectedLocalNode.status, 400);
   assert.match(rejectedLocalNode.body.error, /仅支持 SSH/);
 
+  const rejectedDeploymentTargetChange = await authenticatedRequest("/api/nodes/local", {
+    method: "PUT",
+    body: JSON.stringify({ generatedConfigPath: "/tmp/replaced-birdbox.conf" }),
+  });
+  assert.equal(rejectedDeploymentTargetChange.status, 409);
+  assert.match(rejectedDeploymentTargetChange.body.error, /不可直接修改/);
+
   const updated = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",
     body: JSON.stringify({ entries: "203.0.113.0/24" }),
@@ -116,7 +126,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(updated.status, 200);
   assert.equal(updated.body.deployment.applied, true);
   assert.deepEqual(updated.body.deployment.sessions.map((session) => session.id), ["session_test"]);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).defines[0].entries, ["203.0.113.0/24"]);
+  assert.deepEqual(updated.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
   assert.match(await fs.readFile(fakeLog, "utf8"), /bird .* -c .*bird\.conf/);
 
   const stopped = await authenticatedRequest("/api/sessions/session_test/control", {
@@ -140,7 +150,8 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   });
   assert.equal(disabledSession.status, 200);
   assert.equal(disabledSession.body.enabled, false);
-  assert.equal(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).sessions[0].enabled, false);
+  const afterDisable = await authenticatedRequest("/api/dashboard");
+  assert.equal(afterDisable.body.inventory.sessions[0].enabled, false);
 
   const rejected = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",
@@ -148,7 +159,8 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   });
   assert.equal(rejected.status, 400);
   assert.match(rejected.body.error, /重复/);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).defines[0].entries, ["203.0.113.0/24"]);
+  const afterRejected = await authenticatedRequest("/api/dashboard");
+  assert.deepEqual(afterRejected.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
 
   await fs.writeFile(failApply, "1\n");
   const failedApply = await authenticatedRequest("/api/defines/define_test", {
@@ -156,5 +168,6 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
     body: JSON.stringify({ entries: "192.0.2.0/24" }),
   });
   assert.equal(failedApply.status, 500);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"))).defines[0].entries, ["203.0.113.0/24"]);
+  const afterFailedApply = await authenticatedRequest("/api/dashboard");
+  assert.deepEqual(afterFailedApply.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
 });

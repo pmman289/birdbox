@@ -1,14 +1,30 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   loadSeedNodes,
   normalizeDefine,
   normalizePeer,
   normalizeSession,
-  saveJsonAtomic,
   validateInventory,
 } from "./bird.js";
+
+const INVENTORY_STATE_KEY = "inventory";
+const CURRENT_INVENTORY_VERSION = 17;
+const NORMALIZATION_RETRIES = 3;
+
+function inventoryVersionError(version) {
+  const error = new Error(`库存版本 ${version} 高于当前 Birdbox 支持的版本 ${CURRENT_INVENTORY_VERSION}，拒绝降级写入`);
+  error.status = 409;
+  error.code = "INVENTORY_VERSION_TOO_NEW";
+  return error;
+}
+
+function assertSupportedInventoryVersion(input) {
+  const version = Number(input?.version);
+  if (Number.isFinite(version) && version > CURRENT_INVENTORY_VERSION) throw inventoryVersionError(version);
+}
 
 function safeLegacyId(prefix, value) {
   const normalized = String(value ?? "item").replace(/[^A-Za-z0-9_]/g, "_").slice(0, 40);
@@ -95,6 +111,7 @@ function upgradeSessionV15(session, nodes) {
 }
 
 function upgradeInventory(input) {
+  assertSupportedInventoryVersion(input);
   if (Number(input.version) >= 11) {
     return {
       ...input,
@@ -175,39 +192,78 @@ function upgradeInventory(input) {
 }
 
 export class InventoryStore {
-  constructor({ dataDir, nodesPath, legacySessionPath }) {
+  constructor({ database, dataDir, nodesPath, legacySessionPath, stateKey = INVENTORY_STATE_KEY }) {
+    this.database = database;
+    this.stateKey = stateKey;
     this.inventoryPath = path.join(dataDir, "inventory.json");
     this.nodesPath = nodesPath;
     this.legacySessionPath = legacySessionPath;
-    this.writeQueue = Promise.resolve();
+    this.revisions = new WeakMap();
+    this.initialization = null;
+  }
+
+  async initialize() {
+    if (!this.initialization) {
+      this.initialization = this.#initialize().catch((error) => {
+        this.initialization = null;
+        throw error;
+      });
+    }
+    return this.initialization;
+  }
+
+  async #initialize() {
+    await this.database.initialize();
+    const existing = await this.database.readState(this.stateKey);
+    if (!existing) {
+      const initial = await this.loadLegacyInventory();
+      await this.database.createState(this.stateKey, initial);
+    }
+    await this.#readNormalized();
   }
 
   async read() {
+    await this.initialize();
+    return this.#readNormalized();
+  }
+
+  async #readNormalized() {
+    for (let attempt = 0; attempt < NORMALIZATION_RETRIES; attempt += 1) {
+      let record = await this.database.readState(this.stateKey);
+      const normalized = validateInventory(upgradeInventory(record.value));
+      if (isDeepStrictEqual(normalized, record.value)) return this.#track(normalized, record.revision);
+      try {
+        record = await this.database.replaceState(this.stateKey, record.revision, normalized);
+        return this.#track(normalized, record.revision);
+      } catch (error) {
+        if (error.code !== "STATE_CONFLICT" || attempt === NORMALIZATION_RETRIES - 1) throw error;
+      }
+    }
+    throw new Error("库存规范化重试次数超限");
+  }
+
+  async loadLegacyInventory() {
     try {
-      const stored = JSON.parse(await fs.readFile(this.inventoryPath, "utf8"));
-      const upgraded = upgradeInventory(stored);
-      const normalized = validateInventory(upgraded);
-      const missingResourceLabels = ["defines", "functions", "filters"].some((collection) =>
-        (stored[collection] ?? []).some((resource) => !resource.label),
-      );
-      if (stored.version !== normalized.version || missingResourceLabels) await saveJsonAtomic(this.inventoryPath, normalized);
-      return normalized;
+      return validateInventory(upgradeInventory(JSON.parse(await fs.readFile(this.inventoryPath, "utf8"))));
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
-      const initial = await this.createInitialInventory();
-      await this.write(initial);
-      return initial;
+      return this.createInitialInventory();
     }
   }
 
   async createInitialInventory() {
-    const nodes = await loadSeedNodes(this.nodesPath);
+    let nodes = [];
+    try {
+      nodes = await loadSeedNodes(this.nodesPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     const state = { version: 17, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));
       const local = legacy.local ?? legacy.left;
       const remote = legacy.remote ?? legacy.right;
-      if (!local || !remote) return validateInventory(state);
+      if (!local || !remote || !nodes.length) return validateInventory(state);
       const node = nodes.find((item) => item.id === local.nodeId) ?? nodes[0];
       const peer = normalizePeer({
         id: safeLegacyId("peer", remote.name ?? "external"),
@@ -248,20 +304,58 @@ export class InventoryStore {
   }
 
   async write(value) {
+    await this.initialize();
     const normalized = validateInventory(value);
-    await saveJsonAtomic(this.inventoryPath, normalized);
-    return normalized;
+    const current = await this.database.readState(this.stateKey);
+    const written = await this.database.replaceState(this.stateKey, current.revision, normalized);
+    return this.#track(normalized, written.revision);
+  }
+
+  async replace(current, value) {
+    await this.initialize();
+    const revision = this.revisions.get(current);
+    if (!revision) {
+      const error = new Error("无法确认库存版本，请刷新后重试");
+      error.status = 409;
+      error.code = "STATE_CONFLICT";
+      throw error;
+    }
+    const normalized = validateInventory(value);
+    try {
+      const written = await this.database.replaceState(this.stateKey, revision, normalized);
+      return this.#track(normalized, written.revision);
+    } catch (error) {
+      // MySQL may commit the CAS before a lost connection hides its response.
+      // Confirm the durable value so callers do not roll back a committed deploy.
+      try {
+        const record = await this.database.readState(this.stateKey);
+        if (record && isDeepStrictEqual(record.value, normalized)) {
+          return this.#track(normalized, record.revision);
+        }
+      } catch {
+        // Preserve the original write error when confirmation is unavailable.
+      }
+      throw error;
+    }
   }
 
   async mutate(mutator) {
-    const operation = this.writeQueue.then(async () => {
-      const current = await this.read();
-      const draft = structuredClone(current);
-      const result = await mutator(draft);
-      const state = await this.write(draft);
-      return { state, result };
-    });
-    this.writeQueue = operation.catch(() => undefined);
-    return operation;
+    await this.initialize();
+    const operation = await this.database.mutateState(
+      this.stateKey,
+      { version: 17, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] },
+      async (current) => {
+        const draft = structuredClone(validateInventory(upgradeInventory(current)));
+        const result = await mutator(draft);
+        const state = validateInventory(draft);
+        return { value: state, result };
+      },
+    );
+    return { state: this.#track(operation.value, operation.revision), result: operation.result };
+  }
+
+  #track(value, revision) {
+    this.revisions.set(value, revision);
+    return value;
   }
 }

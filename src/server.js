@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 
 import {
   applyStagedConfig,
@@ -27,51 +27,202 @@ import {
 } from "./bird.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
 import { AUTH_COOKIE_NAME, AUTH_SESSION_TTL_MS, AuthStore } from "./auth.js";
+import { createDatabaseFromEnvironment } from "./database.js";
 import { InventoryStore } from "./store.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDir = path.join(rootDir, "public");
 const dataDir = process.env.BIRDBOX_DATA_DIR ?? path.join(rootDir, "data");
 const nodesPath = process.env.BIRDBOX_NODES_FILE ?? path.join(rootDir, "config", "nodes.json");
-const host = process.env.BIRDBOX_HOST ?? "0.0.0.0";
-const port = Number(process.env.BIRDBOX_PORT ?? 3000);
+const host = normalizeListenHost(process.env.BIRDBOX_HOST ?? "0.0.0.0");
+const port = normalizeListenPort(process.env.BIRDBOX_PORT ?? 3000);
 const execFileAsync = promisify(execFile);
 const controllerSshDir = path.join(dataDir, "ssh");
 const controllerSshKeyPath = process.env.BIRDBOX_SSH_KEY_PATH ?? path.join(controllerSshDir, "id_ed25519");
 const controllerKnownHostsPath = process.env.BIRDBOX_KNOWN_HOSTS_PATH ?? path.join(controllerSshDir, "known_hosts");
-const authStore = new AuthStore({ dataDir });
+const secureCookieSetting = normalizeEnvironmentBoolean(process.env.BIRDBOX_SECURE_COOKIE, "BIRDBOX_SECURE_COOKIE");
+const shutdownTimeoutMs = normalizeShutdownTimeout(process.env.BIRDBOX_SHUTDOWN_TIMEOUT_MS ?? 1800000);
+const database = createDatabaseFromEnvironment();
+const authStore = new AuthStore({ database, dataDir });
 const store = new InventoryStore({
+  database,
   dataDir,
   nodesPath,
   legacySessionPath: path.join(dataDir, "session.json"),
 });
 
 let deploymentLocked = false;
+let activeDeployment = null;
+let shuttingDown = false;
 let events = [];
-const protocolOverrides = new Map();
 const loginFailures = new Map();
+let loginAttemptSequence = 0;
+let lastLoginFailurePruneAt = 0;
 let controllerPublicKey = "";
 
 const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 const LOGIN_ATTEMPT_LIMIT = 5;
+const MAX_LOGIN_FAILURE_KEYS = 10000;
+const MAX_EVENT_MESSAGE_LENGTH = 8192;
+const DEPLOYMENT_JOURNAL_KEY = "deployment_journal";
+const EMPTY_DEPLOYMENT_JOURNAL = Object.freeze({ version: 1, active: null });
 
-async function ensureControllerSshIdentity() {
-  await fs.mkdir(path.dirname(controllerSshKeyPath), { recursive: true, mode: 0o700 });
-  try {
-    await fs.access(controllerSshKeyPath);
-  } catch {
-    await execFileAsync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "birdbox-controller", "-f", controllerSshKeyPath]);
+const SECURITY_HEADERS = Object.freeze({
+  "content-security-policy": "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self'",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+  "referrer-policy": "same-origin",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+});
+
+function normalizeListenHost(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized || /[\0\r\n]/.test(normalized)) throw new Error("BIRDBOX_HOST 不合法");
+  return normalized;
+}
+
+function normalizeListenPort(value) {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 1 || normalized > 65535) {
+    throw new Error("BIRDBOX_PORT 必须是 1 到 65535 之间的整数");
   }
+  return normalized;
+}
+
+function normalizeEnvironmentBoolean(value, label) {
+  if (value === undefined || value === "") return null;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${label} 必须是 true 或 false`);
+}
+
+function normalizeShutdownTimeout(value) {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 30000 || normalized > 1800000) {
+    throw new Error("BIRDBOX_SHUTDOWN_TIMEOUT_MS 必须是 30000 到 1800000 之间的整数");
+  }
+  return normalized;
+}
+
+function applySecurityHeaders(response) {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) response.setHeader(name, value);
+}
+
+async function withDeploymentLock(operation, { allowPendingJournal = false } = {}) {
+  if (shuttingDown) fail(503, "服务正在关闭，暂不接受新的部署");
+  if (deploymentLocked) fail(409, "另一个部署正在进行");
+  deploymentLocked = true;
+  const deployment = database.withLock("deployment", async () => {
+    if (!allowPendingJournal && (await readDeploymentJournal()).active) {
+      fail(503, "存在尚未完成的部署恢复任务，请重启服务完成恢复");
+    }
+    return operation();
+  });
+  activeDeployment = deployment;
+  try {
+    return await deployment;
+  } finally {
+    if (activeDeployment === deployment) activeDeployment = null;
+    deploymentLocked = false;
+  }
+}
+
+async function fileStat(filePath) {
+  try {
+    return await fs.lstat(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertRegularFile(stat, label) {
+  if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`${label} 必须是普通文件且不能是符号链接`);
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${label} 必须属于 Birdbox 运行用户`);
+}
+
+async function ensureSecureDirectory(directory) {
+  const existing = await fileStat(directory);
+  if (!existing) await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${directory} 必须是目录且不能是符号链接`);
+  if (!existing || path.resolve(directory) === path.resolve(controllerSshDir)) {
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) throw new Error(`${directory} 必须属于 Birdbox 运行用户`);
+    await fs.chmod(directory, 0o700);
+  }
+}
+
+function publicKeyIdentity(value) {
+  const fields = String(value ?? "").trim().split(/\s+/);
+  if (fields.length < 2 || fields[0] !== "ssh-ed25519" || !/^[A-Za-z0-9+/]+={0,2}$/.test(fields[1])) {
+    throw new Error("Birdbox 控制器 SSH 公钥格式不合法");
+  }
+  return `${fields[0]} ${fields[1]}`;
+}
+
+async function ensureControllerSshIdentity(additionalNodes = []) {
+  const inventory = await store.read();
+  const managedNodes = [...new Map(
+    [...inventory.nodes, ...additionalNodes]
+      .filter((node) => node.transport === "ssh" && node.sshIdentity === "managed")
+      .map((node) => [node.id, node]),
+  ).values()];
+  const identityRequired = managedNodes.length > 0;
+  await ensureSecureDirectory(path.dirname(controllerSshKeyPath));
+  await ensureSecureDirectory(path.dirname(controllerKnownHostsPath));
+
+  let privateKeyStat = await fileStat(controllerSshKeyPath);
+  if (!privateKeyStat) {
+    if (identityRequired) throw new Error("已有受管节点，但 Birdbox 控制器 SSH 私钥缺失；拒绝静默轮换身份");
+    await execFileAsync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "birdbox-controller", "-f", controllerSshKeyPath]);
+    privateKeyStat = await fs.lstat(controllerSshKeyPath);
+  }
+  assertRegularFile(privateKeyStat, "Birdbox 控制器 SSH 私钥");
   await fs.chmod(controllerSshKeyPath, 0o600);
-  await fs.chmod(`${controllerSshKeyPath}.pub`, 0o644);
-  await fs.appendFile(controllerKnownHostsPath, "", { mode: 0o600 });
+
+  const derived = publicKeyIdentity((await execFileAsync("ssh-keygen", ["-y", "-f", controllerSshKeyPath])).stdout);
+  const publicKeyPath = `${controllerSshKeyPath}.pub`;
+  const publicKeyStat = await fileStat(publicKeyPath);
+  if (!publicKeyStat) {
+    await fs.writeFile(publicKeyPath, `${derived} birdbox-controller\n`, { mode: 0o644, flag: "wx" });
+  } else {
+    assertRegularFile(publicKeyStat, "Birdbox 控制器 SSH 公钥");
+    if (publicKeyIdentity(await fs.readFile(publicKeyPath, "utf8")) !== derived) {
+      throw new Error("Birdbox 控制器 SSH 公私钥不匹配");
+    }
+  }
+  await fs.chmod(publicKeyPath, 0o644);
+
+  const knownHostsStat = await fileStat(controllerKnownHostsPath);
+  if (!knownHostsStat) {
+    if (identityRequired) throw new Error("已有受管节点，但 SSH known_hosts 缺失；拒绝丢失主机身份绑定");
+    await fs.writeFile(controllerKnownHostsPath, "", { mode: 0o600, flag: "wx" });
+  } else {
+    assertRegularFile(knownHostsStat, "SSH known_hosts");
+  }
+  const knownHosts = await fs.readFile(controllerKnownHostsPath, "utf8");
+  if (identityRequired && !knownHosts.trim()) throw new Error("已有受管节点，但 SSH known_hosts 为空；拒绝重新信任主机身份");
+  for (const node of managedNodes) {
+    const target = node.sshPort === 22 ? node.sshHost : `[${node.sshHost}]:${node.sshPort}`;
+    try {
+      await execFileAsync("ssh-keygen", ["-F", target, "-f", controllerKnownHostsPath]);
+    } catch {
+      throw new Error(`SSH known_hosts 缺少已有受管节点 ${node.name} 的主机身份；拒绝重新信任`);
+    }
+  }
   await fs.chmod(controllerKnownHostsPath, 0o600);
-  controllerPublicKey = (await fs.readFile(`${controllerSshKeyPath}.pub`, "utf8")).trim();
+  controllerPublicKey = `${derived} birdbox-controller`;
   configureManagedSsh({ identityFile: controllerSshKeyPath, knownHostsFile: controllerKnownHostsPath });
 }
 
 function event(level, message, nodeId = null) {
-  const entry = { timestamp: new Date().toISOString(), level, message, nodeId };
+  const fullMessage = String(message ?? "");
+  const boundedMessage = fullMessage.length > MAX_EVENT_MESSAGE_LENGTH
+    ? `${fullMessage.slice(0, MAX_EVENT_MESSAGE_LENGTH)}\n...消息已截断`
+    : fullMessage;
+  const entry = { timestamp: new Date().toISOString(), level, message: boundedMessage, nodeId };
   events = [...events.slice(-99), entry];
   return entry;
 }
@@ -84,6 +235,14 @@ function fail(status, message) {
   const error = new Error(message);
   error.status = status;
   throw error;
+}
+
+function isPublicError(error) {
+  return Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599;
+}
+
+function safeErrorMessage(error) {
+  return isPublicError(error) ? error.message : "服务器内部错误";
 }
 
 function findNode(state, nodeId) {
@@ -148,6 +307,122 @@ function configForNode(state, node) {
   );
 }
 
+function deploymentTargets(inventory, nodeIds, fallbackNodes = []) {
+  const fallbackById = new Map(fallbackNodes.map((node) => [node.id, node]));
+  return uniqueNodeIds(nodeIds).map((nodeId) => {
+    const inventoryNode = inventory.nodes.find((node) => node.id === nodeId);
+    const node = inventoryNode ?? fallbackById.get(nodeId);
+    if (!node) fail(500, `部署日志无法解析节点 ${nodeId}`);
+    return {
+      node,
+      config: inventoryNode
+        ? configForNode(inventory, inventoryNode)
+        : renderBirdConfig(node, [], [], [], [], [], []),
+    };
+  });
+}
+
+function validateDeploymentJournal(value) {
+  if (!value || value.version !== 1 || !(Object.hasOwn(value, "active"))) {
+    throw new Error("部署恢复日志格式不兼容");
+  }
+  if (value.active === null) return { version: 1, active: null };
+  const active = value.active;
+  if (!active || typeof active.id !== "string" || !["forward", "rollback"].includes(active.direction)) {
+    throw new Error("部署恢复日志内容不合法");
+  }
+  const before = validateInventory(active.before);
+  const after = validateInventory(active.after);
+  const normalizeTargets = (targets) => {
+    if (!Array.isArray(targets)) throw new Error("部署恢复日志缺少节点目标");
+    const seen = new Set();
+    return targets.map((target) => {
+      const node = normalizeNode(target?.node);
+      if (seen.has(node.id) || typeof target?.config !== "string") throw new Error("部署恢复日志节点目标不合法");
+      seen.add(node.id);
+      return { node, config: target.config };
+    });
+  };
+  return {
+    version: 1,
+    active: {
+      id: active.id,
+      direction: active.direction,
+      before,
+      after,
+      forwardTargets: normalizeTargets(active.forwardTargets),
+      rollbackTargets: normalizeTargets(active.rollbackTargets),
+    },
+  };
+}
+
+async function readDeploymentJournal() {
+  const record = await database.readState(DEPLOYMENT_JOURNAL_KEY);
+  return validateDeploymentJournal(record?.value ?? EMPTY_DEPLOYMENT_JOURNAL);
+}
+
+async function beginDeploymentJournal(before, after, nodeIds, fallbackNodes = []) {
+  const active = {
+    id: `deployment_${randomUUID()}`,
+    direction: "forward",
+    before,
+    after,
+    forwardTargets: deploymentTargets(after, nodeIds, fallbackNodes),
+    rollbackTargets: deploymentTargets(before, nodeIds, fallbackNodes),
+  };
+  await database.mutateState(DEPLOYMENT_JOURNAL_KEY, EMPTY_DEPLOYMENT_JOURNAL, (current) => {
+    const journal = validateDeploymentJournal(current);
+    if (journal.active) fail(503, "存在尚未完成的部署恢复任务，请重启服务完成恢复");
+    return { value: { version: 1, active } };
+  });
+  return active;
+}
+
+async function setDeploymentJournalDirection(active, direction) {
+  await database.mutateState(DEPLOYMENT_JOURNAL_KEY, EMPTY_DEPLOYMENT_JOURNAL, (current) => {
+    const journal = validateDeploymentJournal(current);
+    if (journal.active?.id !== active.id) throw new Error("部署恢复日志已被意外替换");
+    return { value: { version: 1, active: { ...journal.active, direction } } };
+  });
+}
+
+async function clearDeploymentJournal(active) {
+  await database.mutateState(DEPLOYMENT_JOURNAL_KEY, EMPTY_DEPLOYMENT_JOURNAL, (current) => {
+    const journal = validateDeploymentJournal(current);
+    if (journal.active?.id !== active.id) throw new Error("部署恢复日志已被意外替换");
+    return { value: { version: 1, active: null } };
+  });
+}
+
+async function recoverDeploymentJournal() {
+  return withDeploymentLock(async () => {
+    const journal = await readDeploymentJournal();
+    const active = journal.active;
+    if (!active) return;
+    const actual = await store.read();
+    const desired = active.direction === "forward" ? active.after : active.before;
+    const opposite = active.direction === "forward" ? active.before : active.after;
+    if (!isDeepStrictEqual(actual, desired) && !isDeepStrictEqual(actual, opposite)) {
+      throw new Error("库存与未完成部署日志均不匹配；拒绝自动覆盖，请从备份恢复");
+    }
+    const needsRemoteReplay = active.direction === "rollback" || !isDeepStrictEqual(actual, desired);
+    if (needsRemoteReplay) {
+      const targets = active.direction === "forward" ? active.forwardTargets : active.rollbackTargets;
+      for (const target of targets) {
+        const validation = await stageAndValidate(target.node, target.config);
+        if (!validation.ok) throw new Error(validation.stderr || validation.stdout || `${target.node.name} 的恢复配置检查失败`);
+      }
+      for (const target of targets) {
+        const applied = await applyStagedConfig(target.node);
+        if (!applied.ok) throw new Error(applied.stderr || applied.stdout || `${target.node.name} 的恢复配置应用失败`);
+      }
+    }
+    if (!isDeepStrictEqual(actual, desired)) await store.replace(actual, desired);
+    await clearDeploymentJournal(active);
+    event("warning", `已完成中断部署 ${active.id} 的${active.direction === "forward" ? "提交" : "回滚"}恢复`);
+  }, { allowPendingJournal: true });
+}
+
 function deploymentReport(inventory, nodeIds) {
   const ids = uniqueNodeIds(nodeIds);
   return {
@@ -161,14 +436,18 @@ function deploymentReport(inventory, nodeIds) {
 }
 
 async function mutateAndApply(mutator, nodeIdsForDraft) {
-  if (deploymentLocked) fail(409, "另一个部署正在进行");
-  deploymentLocked = true;
-  const attemptedNodes = [];
-  let deployment;
-  try {
-    const result = await store.mutate(async (draft) => {
+  return withDeploymentLock(async () => {
+    const attemptedNodes = [];
+    let committed = false;
+    let current;
+    let inventory;
+    let deployment;
+    let journal = null;
+    try {
+      current = await store.read();
+      const draft = structuredClone(current);
       const mutation = await mutator(draft);
-      const inventory = validateInventory(draft);
+      inventory = validateInventory(draft);
       const nodeIds = uniqueNodeIds(typeof nodeIdsForDraft === "function" ? nodeIdsForDraft(mutation, inventory) : nodeIdsForDraft);
       const nodes = nodeIds.map((nodeId) => findNode(inventory, nodeId));
 
@@ -176,24 +455,51 @@ async function mutateAndApply(mutator, nodeIdsForDraft) {
         const validation = await stageAndValidate(node, configForNode(inventory, node));
         if (!validation.ok) fail(422, validation.stderr || `${node.name} 的 BIRD 语法检查失败`);
       }
+      if (nodes.length) journal = await beginDeploymentJournal(current, inventory, nodeIds, nodes);
       for (const node of nodes) {
         attemptedNodes.push(node);
         const applied = await applyStagedConfig(node);
         if (!applied.ok) fail(500, applied.stderr || applied.stdout || `${node.name} 的 BIRD 配置应用失败`);
       }
+      const state = await store.replace(current, inventory);
+      committed = true;
+      if (journal) {
+        await clearDeploymentJournal(journal);
+        journal = null;
+      }
       deployment = deploymentReport(inventory, nodeIds);
-      return mutation;
-    });
-    return { ...result, deployment };
-  } catch (error) {
-    for (const node of attemptedNodes.reverse()) {
-      const rollback = await rollbackNode(node);
-      if (!rollback.ok) event("error", `${node.name} 回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
+      return { state, result: mutation, deployment };
+    } catch (error) {
+      if (!committed) {
+        let journalMarkedForRollback = false;
+        if (journal) {
+          try {
+            await setDeploymentJournalDirection(journal, "rollback");
+            journalMarkedForRollback = true;
+          } catch (journalError) {
+            console.error(journalError);
+          }
+        }
+        let rollbackSucceeded = true;
+        for (const node of attemptedNodes.reverse()) {
+          const rollback = await rollbackNode(node);
+          if (!rollback.ok) {
+            rollbackSucceeded = false;
+            event("error", `${node.name} 回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
+          }
+        }
+        if (journal && journalMarkedForRollback && rollbackSucceeded) {
+          try {
+            await clearDeploymentJournal(journal);
+            journal = null;
+          } catch (journalError) {
+            console.error(journalError);
+          }
+        }
+      }
+      throw error;
     }
-    throw error;
-  } finally {
-    deploymentLocked = false;
-  }
+  });
 }
 
 async function preflightPolicyResource(stateInput, collection, resourceId) {
@@ -227,6 +533,7 @@ function protocolFor(runtime, protocolName) {
   return runtime.protocols.find((item) => item.name === protocolName) ?? {
     name: protocolName,
     configured: false,
+    disabled: false,
     state: null,
     established: false,
     neighbor: null,
@@ -234,18 +541,6 @@ function protocolFor(runtime, protocolName) {
     imported: null,
     exported: null,
   };
-}
-
-function protocolOverrideKey(nodeId, protocolName) {
-  return `${nodeId}:${protocolName}`;
-}
-
-function protocolWithOverride(runtime, nodeId, protocolName) {
-  const protocol = protocolFor(runtime, protocolName);
-  const overrideKey = protocolOverrideKey(nodeId, protocolName);
-  return protocolOverrides.has(overrideKey)
-    ? { ...protocol, disabled: protocolOverrides.get(overrideKey) }
-    : protocol;
 }
 
 function summarizeInventoryHealth(state, runtimes) {
@@ -261,7 +556,7 @@ function summarizeInventoryHealth(state, runtimes) {
     for (const session of nodeSessions(state, node.id)) {
       if (session.enabled === false) continue;
       activeSessions += 1;
-      const protocol = protocolWithOverride(runtime ?? { protocols: [] }, node.id, session.protocolName);
+      const protocol = protocolFor(runtime ?? { protocols: [] }, session.protocolName);
       if (online && protocol.established && protocol.disabled !== true) normalSessions += 1;
     }
   }
@@ -304,6 +599,7 @@ function nodeSetupScript(node) {
     includeLine,
     script: `#!/bin/sh
 set -eu
+umask 077
 
 BIRDBOX_USER='${node.sshUser}'
 BIRD_GROUP='bird'
@@ -335,12 +631,45 @@ else
   exit 1
 fi
 
-install -d -o "$BIRDBOX_USER" -g "$BIRD_GROUP" -m 0750 "$CONFIG_DIR" "$CONFIG_DIR/versions"
-if [ -e "$GENERATED_CONFIG" ] && [ ! -L "$GENERATED_CONFIG" ]; then
-  echo "$GENERATED_CONFIG 已存在且不是符号链接，拒绝覆盖" >&2
+if [ -L "$CONFIG_DIR" ]; then
+  echo "$CONFIG_DIR 不能是符号链接" >&2
   exit 1
 fi
-if [ ! -L "$GENERATED_CONFIG" ]; then
+if [ -e "$CONFIG_DIR" ]; then
+  test -d "$CONFIG_DIR" || { echo "$CONFIG_DIR 不是目录" >&2; exit 1; }
+  [ "$(stat -c '%U:%G' "$CONFIG_DIR")" = "$BIRDBOX_USER:$BIRD_GROUP" ] || {
+    echo "$CONFIG_DIR 已存在但不属于 $BIRDBOX_USER:$BIRD_GROUP，拒绝接管" >&2
+    exit 1
+  }
+else
+  install -d -o "$BIRDBOX_USER" -g "$BIRD_GROUP" -m 0750 "$CONFIG_DIR"
+fi
+if [ -L "$CONFIG_DIR/versions" ]; then
+  echo "$CONFIG_DIR/versions 不能是符号链接" >&2
+  exit 1
+fi
+if [ -e "$CONFIG_DIR/versions" ]; then
+  test -d "$CONFIG_DIR/versions" || { echo "$CONFIG_DIR/versions 不是目录" >&2; exit 1; }
+  [ "$(stat -c '%U:%G' "$CONFIG_DIR/versions")" = "$BIRDBOX_USER:$BIRD_GROUP" ] || {
+    echo "$CONFIG_DIR/versions 已存在但不属于 $BIRDBOX_USER:$BIRD_GROUP，拒绝接管" >&2
+    exit 1
+  }
+else
+  install -d -o "$BIRDBOX_USER" -g "$BIRD_GROUP" -m 0750 "$CONFIG_DIR/versions"
+fi
+chmod 0750 "$CONFIG_DIR" "$CONFIG_DIR/versions"
+if [ -L "$GENERATED_CONFIG" ]; then
+  CURRENT_TARGET=$(readlink "$GENERATED_CONFIG")
+  TARGET_FILE=\${CURRENT_TARGET#versions/}
+  case "$CURRENT_TARGET:$TARGET_FILE" in
+    versions/*:|versions/*:.|versions/*:..|versions/*:*/*) echo "$GENERATED_CONFIG 的现有目标不安全" >&2; exit 1 ;;
+    versions/*:*) ;;
+    *) echo "$GENERATED_CONFIG 必须指向 versions 目录中的文件" >&2; exit 1 ;;
+  esac
+elif [ -e "$GENERATED_CONFIG" ]; then
+  echo "$GENERATED_CONFIG 已存在且不是符号链接，拒绝覆盖" >&2
+  exit 1
+else
   printf '%s\n' '# Birdbox initial empty include' > "$CONFIG_DIR/versions/initial.conf"
   chown "$BIRDBOX_USER:$BIRD_GROUP" "$CONFIG_DIR/versions/initial.conf"
   chmod 0640 "$CONFIG_DIR/versions/initial.conf"
@@ -350,12 +679,43 @@ fi
 
 HOME_DIR=$(getent passwd "$BIRDBOX_USER" | cut -d: -f6)
 PRIMARY_GROUP=$(id -gn "$BIRDBOX_USER")
-install -d -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0700 "$HOME_DIR/.ssh"
-touch "$HOME_DIR/.ssh/authorized_keys"
-chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR/.ssh/authorized_keys"
+case "$HOME_DIR" in
+  /?*) ;;
+  *) echo "$BIRDBOX_USER 的 Home 目录不合法" >&2; exit 1 ;;
+esac
+test -d "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不存在" >&2; exit 1; }
+test ! -L "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不能是符号链接" >&2; exit 1; }
+[ "$(stat -c '%U' "$HOME_DIR")" = "$BIRDBOX_USER" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
+if [ -L "$HOME_DIR/.ssh" ]; then
+  echo "$HOME_DIR/.ssh 不能是符号链接" >&2
+  exit 1
+elif [ -e "$HOME_DIR/.ssh" ]; then
+  test -d "$HOME_DIR/.ssh" || { echo "$HOME_DIR/.ssh 不是目录" >&2; exit 1; }
+  [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh 属主不正确" >&2; exit 1; }
+else
+  install -d -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0700 "$HOME_DIR/.ssh"
+fi
+chmod 0700 "$HOME_DIR/.ssh"
+if [ -L "$HOME_DIR/.ssh/authorized_keys" ]; then
+  echo "$HOME_DIR/.ssh/authorized_keys 不能是符号链接" >&2
+  exit 1
+elif [ -e "$HOME_DIR/.ssh/authorized_keys" ]; then
+  test -f "$HOME_DIR/.ssh/authorized_keys" || { echo "$HOME_DIR/.ssh/authorized_keys 不是普通文件" >&2; exit 1; }
+  [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh/authorized_keys")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh/authorized_keys 属主不正确" >&2; exit 1; }
+else
+  install -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0600 /dev/null "$HOME_DIR/.ssh/authorized_keys"
+fi
 chmod 0600 "$HOME_DIR/.ssh/authorized_keys"
-if ! grep -F "$CONTROLLER_KEY" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; then
-  printf '%s\n' "$KEY_LINE" >> "$HOME_DIR/.ssh/authorized_keys"
+if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; then
+  CONTROLLER_KEY_ID=$(printf '%s\n' "$CONTROLLER_KEY" | awk '{ print $1 " " $2 }')
+  KEY_TEMP=$(mktemp "$HOME_DIR/.ssh/authorized_keys.birdbox.XXXXXX")
+  trap 'rm -f "$KEY_TEMP"' 0 1 2 15
+  grep -Fv -- "$CONTROLLER_KEY_ID" "$HOME_DIR/.ssh/authorized_keys" > "$KEY_TEMP" || true
+  printf '%s\n' "$KEY_LINE" >> "$KEY_TEMP"
+  chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$KEY_TEMP"
+  chmod 0600 "$KEY_TEMP"
+  mv -f "$KEY_TEMP" "$HOME_DIR/.ssh/authorized_keys"
+  trap - 0 1 2 15
 fi
 
 test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
@@ -370,14 +730,88 @@ echo "添加后执行：birdc -s $SOCKET_PATH configure check && birdc -s $SOCKE
   };
 }
 
-async function verifyOnboardingNode(node) {
+async function inspectOnboardingNode(node) {
   const access = await checkIncludeNodeAccess(node);
   if (!access.ok) fail(422, access.stderr || access.stdout || "节点接入条件检查失败");
   const runtime = await inspectNode(node);
   if (!runtime.reachable || !runtime.bird2) fail(422, runtime.error || "目标节点未运行受支持的 BIRD 2");
-  const validation = await stageAndValidate(node, renderBirdConfig(node, [], [], [], [], [], []));
+  return runtime;
+}
+
+async function verifyOnboardingNode(node, config) {
+  const runtime = await inspectOnboardingNode(node);
+  const validation = await stageAndValidate(node, config);
   if (!validation.ok) fail(422, validation.stderr || validation.stdout || "系统主配置预检失败");
   return { runtime, validation: { ok: true } };
+}
+
+async function decommissionNode(nodeId, force = false) {
+  return withDeploymentLock(async () => {
+    let applied = false;
+    let committed = false;
+    let node;
+    let journal = null;
+    try {
+      const current = await store.read();
+      node = findNode(current, nodeId);
+      if (force) {
+        const inventory = validateInventory({
+          ...current,
+          nodes: current.nodes.filter((item) => item.id !== node.id),
+          peers: current.peers.filter((item) => item.nodeId !== node.id),
+          sessions: current.sessions.filter((item) => item.nodeId !== node.id),
+          defines: current.defines.filter((item) => item.nodeId !== node.id),
+          functions: current.functions.filter((item) => item.nodeId !== node.id),
+          filters: current.filters.filter((item) => item.nodeId !== node.id),
+          rpki: current.rpki.filter((item) => item.nodeId !== node.id),
+        });
+        const state = await store.replace(current, inventory);
+        committed = true;
+        return { state, node, forced: true };
+      }
+      if (nodePeers(current, node.id).length || ownedNodePolicyResources(current, node.id).length || nodeSessions(current, node.id).length) {
+        fail(409, "请先删除该节点的会话、Peer 和节点级资源");
+      }
+      const inventory = validateInventory({
+        ...current,
+        nodes: current.nodes.filter((item) => item.id !== node.id),
+      });
+      const validation = await stageAndValidate(node, renderBirdConfig(node, [], [], [], [], [], []));
+      if (!validation.ok) fail(422, validation.stderr || validation.stdout || "节点退役配置检查失败");
+      journal = await beginDeploymentJournal(current, inventory, [node.id], [node]);
+      applied = true;
+      const result = await applyStagedConfig(node);
+      if (!result.ok) fail(500, result.stderr || result.stdout || "节点退役配置应用失败");
+      const state = await store.replace(current, inventory);
+      committed = true;
+      await clearDeploymentJournal(journal);
+      journal = null;
+      return { state, node, forced: false };
+    } catch (error) {
+      if (applied && !committed && node) {
+        let journalMarkedForRollback = false;
+        if (journal) {
+          try {
+            await setDeploymentJournalDirection(journal, "rollback");
+            journalMarkedForRollback = true;
+          } catch (journalError) {
+            console.error(journalError);
+          }
+        }
+        const rollback = await rollbackNode(node);
+        if (!rollback.ok) event("error", `${node.name} 退役回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
+        else if (journal && journalMarkedForRollback) {
+          try {
+            await clearDeploymentJournal(journal);
+            journal = null;
+          } catch (journalError) {
+            console.error(journalError);
+          }
+        }
+      }
+      throw error;
+    }
+  });
 }
 
 function prepareSession(state, payload) {
@@ -461,6 +895,7 @@ async function waitForProtocol(node, protocolName, timeoutMs = 25000) {
 
 function chooseSelection(state, requestedNodeId, requestedPeerId) {
   const node = state.nodes.find((item) => item.id === requestedNodeId) ?? state.nodes[0];
+  if (!node) return { node: null, peer: null, peers: [] };
   const peers = nodePeers(state, node.id);
   const peer = peers.find((item) => item.id === requestedPeerId) ?? peers[0] ?? null;
   return { node, peer, peers };
@@ -468,6 +903,25 @@ function chooseSelection(state, requestedNodeId, requestedPeerId) {
 
 async function dashboard(state, requestedNodeId, requestedPeerId) {
   const selection = chooseSelection(state, requestedNodeId, requestedPeerId);
+  if (!selection.node) {
+    return {
+      inventory: state,
+      selection: { nodeId: null, peerId: null },
+      node: null,
+      peers: [],
+      cidrDefines: { ipv4: [], ipv6: [] },
+      defines: [],
+      functions: [],
+      filters: [],
+      rpki: [],
+      selectedPeer: null,
+      runtime: { nodeId: null, reachable: false, bird2: false, version: null, protocols: [], error: "尚未添加受管节点" },
+      health: summarizeInventoryHealth(state, []),
+      established: false,
+      config: "",
+      events,
+    };
+  }
   const runtimes = await Promise.all(state.nodes.map((node) => inspectNode(node)));
   const runtime = runtimes.find((item) => item.nodeId === selection.node.id) ?? {
     nodeId: selection.node.id, reachable: false, bird2: false, version: null, protocols: [], error: "节点状态不可用",
@@ -476,7 +930,7 @@ async function dashboard(state, requestedNodeId, requestedPeerId) {
     const session = state.sessions.find((item) => item.nodeId === selection.node.id && item.peerId === peer.id) ?? null;
     const protocolName = session?.protocolName;
     const protocol = session
-      ? protocolWithOverride(runtime, selection.node.id, protocolName)
+      ? protocolFor(runtime, protocolName)
       : null;
     return {
       ...peer,
@@ -528,19 +982,12 @@ async function readJson(request) {
     chunks.push(chunk);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    const value = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail(400, "JSON 请求体必须是对象");
+    return value;
   } catch {
-    fail(400, "JSON 请求体不合法");
+    fail(400, "JSON 请求体必须是合法对象");
   }
-}
-
-async function applyInventoryConfig(node, inventory) {
-  const config = configForNode(inventory, node);
-  const validation = await stageAndValidate(node, config);
-  if (!validation.ok) fail(422, validation.stderr || "候选配置检查失败");
-  const result = await applyStagedConfig(node);
-  if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
-  return config;
 }
 
 function requestSessionToken(request) {
@@ -558,8 +1005,7 @@ function requestSessionToken(request) {
 }
 
 function secureCookieEnabled(request) {
-  if (process.env.BIRDBOX_SECURE_COOKIE === "true") return true;
-  if (process.env.BIRDBOX_SECURE_COOKIE === "false") return false;
+  if (secureCookieSetting !== null) return secureCookieSetting;
   return Boolean(request.socket.encrypted) || String(request.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
 }
 
@@ -573,7 +1019,7 @@ function assertSameOrigin(request) {
   const origin = request.headers.origin;
   if (!origin) return;
   try {
-    if (new URL(origin).host !== request.headers.host) fail(403, "请求来源不受信任");
+    if (new URL(origin).host.toLowerCase() !== String(request.headers.host ?? "").toLowerCase()) fail(403, "请求来源不受信任");
   } catch {
     fail(403, "请求来源不受信任");
   }
@@ -586,15 +1032,50 @@ function loginAttemptKey(request) {
 function activeLoginFailures(request) {
   const key = loginAttemptKey(request);
   const now = Date.now();
-  const recent = (loginFailures.get(key) ?? []).filter((timestamp) => now - timestamp < LOGIN_ATTEMPT_WINDOW_MS);
+  const recent = (loginFailures.get(key) ?? []).filter((attempt) => now - attempt.timestamp < LOGIN_ATTEMPT_WINDOW_MS);
   if (recent.length) loginFailures.set(key, recent);
   else loginFailures.delete(key);
   return recent;
 }
 
-function recordLoginFailure(request) {
+function pruneLoginFailureKeys() {
+  const now = Date.now();
+  if (loginFailures.size < MAX_LOGIN_FAILURE_KEYS && now - lastLoginFailurePruneAt < 60000) return;
+  for (const [key, attempts] of loginFailures) {
+    const recent = attempts.filter((attempt) => now - attempt.timestamp < LOGIN_ATTEMPT_WINDOW_MS);
+    if (recent.length) loginFailures.set(key, recent);
+    else loginFailures.delete(key);
+  }
+  lastLoginFailurePruneAt = now;
+}
+
+function reserveLoginAttempt(request) {
+  pruneLoginFailureKeys();
   const key = loginAttemptKey(request);
-  loginFailures.set(key, [...activeLoginFailures(request), Date.now()]);
+  const recent = activeLoginFailures(request);
+  if (recent.length >= LOGIN_ATTEMPT_LIMIT) {
+    const error = new Error("登录尝试过多，请稍后再试");
+    error.status = 429;
+    error.code = "AUTH_RATE_LIMITED";
+    request.resume();
+    throw error;
+  }
+  if (!loginFailures.has(key) && loginFailures.size >= MAX_LOGIN_FAILURE_KEYS) {
+    request.resume();
+    const error = new Error("登录尝试过多，请稍后再试");
+    error.status = 429;
+    error.code = "AUTH_RATE_LIMITED";
+    throw error;
+  }
+  const reservation = { id: ++loginAttemptSequence, timestamp: Date.now() };
+  loginFailures.set(key, [...recent, reservation]);
+  return { key, id: reservation.id };
+}
+
+function cancelLoginAttempt(reservation) {
+  const remaining = (loginFailures.get(reservation.key) ?? []).filter((attempt) => attempt.id !== reservation.id);
+  if (remaining.length) loginFailures.set(reservation.key, remaining);
+  else loginFailures.delete(reservation.key);
 }
 
 function clearLoginFailures(request) {
@@ -605,35 +1086,41 @@ async function handleAuthApi(request, response, url) {
   const { pathname } = url;
   const token = requestSessionToken(request);
   if (request.method === "GET" && pathname === "/api/auth/status") {
-    sendJson(response, 200, authStore.status(token));
+    sendJson(response, 200, await authStore.status(token));
     return true;
   }
   if (request.method === "POST" && pathname === "/api/auth/setup") {
     const body = await readJson(request);
     const sessionToken = await authStore.setup(body.password, body.confirmation);
-    sendJson(response, 201, { ok: true, ...authStore.status(sessionToken) }, {
+    sendJson(response, 201, { ok: true, ...await authStore.status(sessionToken) }, {
       "set-cookie": sessionCookie(request, sessionToken),
     });
     return true;
   }
   if (request.method === "POST" && pathname === "/api/auth/login") {
-    if (activeLoginFailures(request).length >= LOGIN_ATTEMPT_LIMIT) {
-      const error = new Error("登录尝试过多，请稍后再试");
-      error.status = 429;
-      error.code = "AUTH_RATE_LIMITED";
+    const reservation = reserveLoginAttempt(request);
+    let body;
+    try {
+      body = await readJson(request);
+    } catch (error) {
+      cancelLoginAttempt(reservation);
       throw error;
     }
-    const body = await readJson(request);
-    const sessionToken = await authStore.login(body.password);
+    let sessionToken;
+    try {
+      sessionToken = await authStore.login(body.password);
+    } catch (error) {
+      cancelLoginAttempt(reservation);
+      throw error;
+    }
     if (!sessionToken) {
-      recordLoginFailure(request);
       const error = new Error("密码不正确");
       error.status = 401;
       error.code = "AUTH_INVALID";
       throw error;
     }
     clearLoginFailures(request);
-    sendJson(response, 200, { ok: true, ...authStore.status(sessionToken) }, {
+    sendJson(response, 200, { ok: true, ...await authStore.status(sessionToken) }, {
       "set-cookie": sessionCookie(request, sessionToken),
     });
     return true;
@@ -641,7 +1128,7 @@ async function handleAuthApi(request, response, url) {
   if (request.method === "POST" && pathname === "/api/auth/password") {
     const body = await readJson(request);
     const sessionToken = await authStore.changePassword(token, body.currentPassword, body.password, body.confirmation);
-    sendJson(response, 200, { ok: true, ...authStore.status(sessionToken) }, {
+    sendJson(response, 200, { ok: true, ...await authStore.status(sessionToken) }, {
       "set-cookie": sessionCookie(request, sessionToken),
     });
     return true;
@@ -657,6 +1144,7 @@ async function handleAuthApi(request, response, url) {
 async function handleApi(request, response, url) {
   const { pathname, searchParams } = url;
   if (request.method === "GET" && pathname === "/api/health") {
+    await database.ping();
     return sendJson(response, 200, { status: "ok", deploymentLocked });
   }
 
@@ -672,7 +1160,13 @@ async function handleApi(request, response, url) {
 
   if (request.method === "POST" && pathname === "/api/nodes/test") {
     const node = normalizeOnboardingNode(await readJson(request));
-    const verification = await verifyOnboardingNode(node);
+    const verification = await withDeploymentLock(async () => {
+      const current = await store.read();
+      const candidate = structuredClone(current);
+      candidate.nodes.push(node);
+      const inventory = validateInventory(candidate);
+      return verifyOnboardingNode(node, configForNode(inventory, node));
+    });
     return sendJson(response, 200, {
       ok: true,
       node: { name: node.name, sshHost: node.sshHost, sshPort: node.sshPort, sshUser: node.sshUser },
@@ -683,10 +1177,13 @@ async function handleApi(request, response, url) {
   if (request.method === "POST" && pathname === "/api/nodes") {
     const body = await readJson(request);
     const node = normalizeOnboardingNode(body, makeId("node"));
-    await verifyOnboardingNode(node);
-    const { state } = await store.mutate((draft) => { draft.nodes.push(node); });
+    const { state, deployment } = await mutateAndApply(async (draft) => {
+      await inspectOnboardingNode(node);
+      draft.nodes.push(node);
+      return node;
+    }, () => [node.id]);
     event("success", `已添加受管节点 ${node.name}`, node.id);
-    return sendJson(response, 201, { node, inventory: state, events });
+    return sendJson(response, 201, { node, inventory: state, deployment, events });
   }
 
   const nodeMatch = pathname.match(/^\/api\/nodes\/([A-Za-z_][A-Za-z0-9_]*)$/);
@@ -697,13 +1194,14 @@ async function handleApi(request, response, url) {
       const index = draft.nodes.findIndex((item) => item.id === nodeId);
       if (index < 0) fail(404, "受管节点不存在");
       const previous = draft.nodes[index];
-      if (draft.sessions.some((session) => session.nodeId === nodeId) && (
-        (body.transport ?? previous.transport) !== previous.transport ||
-        (body.sshHost ?? previous.sshHost) !== previous.sshHost
-      )) {
-        fail(409, "节点存在现有会话时不能修改管理连接方式或 SSH 目标");
+      const updated = normalizeNode({ ...previous, ...body, id: nodeId });
+      const immutableDeploymentFields = [
+        "transport", "sshHost", "sshPort", "sshUser", "sshIdentity", "deploymentMode",
+        "mainConfigPath", "generatedConfigPath", "socketPath",
+      ];
+      if (immutableDeploymentFields.some((field) => updated[field] !== previous[field])) {
+        fail(409, "节点的 SSH 目标、部署模式和配置路径不可直接修改；请先删除节点并重新添加");
       }
-      const updated = normalizeSshNode({ ...previous, ...body, id: nodeId });
       draft.nodes[index] = updated;
       return updated;
     }, () => [nodeId]);
@@ -712,25 +1210,28 @@ async function handleApi(request, response, url) {
   }
   if (nodeMatch && request.method === "DELETE") {
     const nodeId = nodeMatch[1];
-    const { state } = await store.mutate((draft) => {
-      const node = findNode(draft, nodeId);
-      if (nodePeers(draft, node.id).length || ownedNodePolicyResources(draft, node.id).length || nodeSessions(draft, node.id).length) {
-        fail(409, "请先删除该节点的会话、Peer 和节点级资源");
-      }
-      draft.nodes = draft.nodes.filter((item) => item.id !== node.id);
+    const force = searchParams.get("force") === "true";
+    const { state, node, forced } = await decommissionNode(nodeId, force);
+    event(forced ? "warning" : "success", forced
+      ? `已强制遗忘受管节点 ${node.name}；远端配置和控制器公钥仍需手动清理`
+      : `已清理远端配置并删除受管节点 ${node.name}`, nodeId);
+    return sendJson(response, 200, {
+      inventory: state,
+      cleanupRequired: forced,
+      deployment: { applied: !forced, nodeIds: [node.id], nodes: [{ id: node.id, name: node.name }], sessions: [] },
+      events,
     });
-    event("success", "已删除受管节点", nodeId);
-    return sendJson(response, 200, { inventory: state, events });
   }
 
   const peerCollectionMatch = pathname.match(/^\/api\/nodes\/([A-Za-z_][A-Za-z0-9_]*)\/peers$/);
   if (peerCollectionMatch && request.method === "POST") {
     const body = await readJson(request);
     const nodeId = peerCollectionMatch[1];
-    const current = await store.read();
-    findNode(current, nodeId);
     const peer = normalizePeer({ ...body, id: makeId("peer"), nodeId });
-    const { state } = await store.mutate((draft) => { draft.peers.push(peer); });
+    const { state } = await withDeploymentLock(() => store.mutate((draft) => {
+      findNode(draft, nodeId);
+      draft.peers.push(peer);
+    }));
     event("success", `已添加外部 Peer ${peer.name}`, nodeId);
     return sendJson(response, 201, { peer, inventory: state, events });
   }
@@ -753,12 +1254,12 @@ async function handleApi(request, response, url) {
   }
   if (peerMatch && request.method === "DELETE") {
     const peerId = peerMatch[1];
-    const { state, result: peer } = await store.mutate((draft) => {
+    const { state, result: peer } = await withDeploymentLock(() => store.mutate((draft) => {
       const peer = findPeer(draft, peerId);
       if (draft.sessions.some((item) => item.peerId === peer.id)) fail(409, "请先移除该 Peer 的会话");
       draft.peers = draft.peers.filter((item) => item.id !== peer.id);
       return peer;
-    });
+    }));
     event("success", `已删除外部 Peer ${peer.name}`, peer.nodeId);
     return sendJson(response, 200, { inventory: state, events });
   }
@@ -770,7 +1271,7 @@ async function handleApi(request, response, url) {
     const { state, deployment } = await mutateAndApply(async (draft) => {
       draft.rpki.push(resource);
       const candidate = validateInventory(draft);
-      await preflightRPKIResource(candidate, resource.id);
+      if (!resource.enabled) await preflightRPKIResource(candidate, resource.id);
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
     event("success", `已添加 RPKI 资源 ${resource.name}`, resource.nodeId);
@@ -797,7 +1298,7 @@ async function handleApi(request, response, url) {
       draft.rpki[index] = updated;
       affectedNodeIds = resourceChangeNodeIds(draft, previous, updated);
       const candidate = validateInventory(draft);
-      await preflightRPKIResource(candidate, resourceId);
+      if (!updated.enabled) await preflightRPKIResource(candidate, resourceId);
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 RPKI 资源 ${resource.name}`, resource.nodeId);
@@ -834,7 +1335,7 @@ async function handleApi(request, response, url) {
     const { state, deployment } = await mutateAndApply(async (draft) => {
       draft[policyCollection.collection].push(resource);
       const candidate = validateInventory(draft);
-      await preflightPolicyResource(candidate, policyCollection.collection, resource.id);
+      if (!resource.enabled) await preflightPolicyResource(candidate, policyCollection.collection, resource.id);
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
     event("success", `已添加 ${policyCollection.kind} ${resource.name}`, resource.nodeId);
@@ -858,7 +1359,7 @@ async function handleApi(request, response, url) {
       if (targetIndex < 0 || targetIndex >= draft[collection].length) return draft[collection][index];
       [draft[collection][index], draft[collection][targetIndex]] = [draft[collection][targetIndex], draft[collection][index]];
       const candidate = validateInventory(draft);
-      await preflightPolicyResource(candidate, collection, resourceId);
+      if (!candidate[collection][targetIndex].enabled) await preflightPolicyResource(candidate, collection, resourceId);
       affectedNodeIds = uniqueNodeIds(affectedNodeIds, resourceNodeIds(draft, draft[collection][targetIndex]));
       return candidate[collection][targetIndex];
     }, () => affectedNodeIds);
@@ -889,7 +1390,7 @@ async function handleApi(request, response, url) {
       draft[collection][index] = updated;
       affectedNodeIds = resourceChangeNodeIds(draft, previous, updated);
       const candidate = validateInventory(draft);
-      await preflightPolicyResource(candidate, collection, resourceId);
+      if (!updated.enabled) await preflightPolicyResource(candidate, collection, resourceId);
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 ${kind} ${resource.name}`, resource.nodeId);
@@ -924,8 +1425,11 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === "POST" && pathname === "/api/sessions/preview") {
-    const state = await store.read();
-    const staged = await stageSession(state, await readJson(request));
+    const body = await readJson(request);
+    const staged = await withDeploymentLock(async () => {
+      const state = await store.read();
+      return stageSession(state, body);
+    });
     return sendJson(response, staged.valid ? 200 : 422, {
       valid: staged.valid,
       session: staged.session,
@@ -940,103 +1444,159 @@ async function handleApi(request, response, url) {
     const body = await readJson(request);
     const action = String(body.action ?? "").trim().toLowerCase();
     if (action !== "enable" && action !== "disable") fail(400, "BGP 协议动作只能是 enable 或 disable");
-    const state = await store.read();
-    const session = state.sessions.find((item) => item.id === sessionControlMatch[1]);
-    if (!session) fail(404, "会话不存在");
-    if (!session.enabled) fail(409, "会话配置已停用，请先应用启用会话");
-    const node = findNode(state, session.nodeId);
-    const result = await setProtocolState(node, session.protocolName, action === "enable");
-    if (!result.ok) fail(502, result.stderr || result.stdout || `无法${action === "enable" ? "启动" : "停止"} BGP 协议`);
-    protocolOverrides.set(protocolOverrideKey(node.id, session.protocolName), action === "disable");
-    event("success", `${node.name} 的 BGP 协议 ${session.protocolName} 已${action === "enable" ? "启动" : "停止"}`, node.id);
-    return sendJson(response, 200, {
-      sessionId: session.id,
-      nodeId: node.id,
-      protocolName: session.protocolName,
-      action,
-      enabled: action === "enable",
-      result,
-      events,
+    const control = await withDeploymentLock(async () => {
+      const state = await store.read();
+      const session = state.sessions.find((item) => item.id === sessionControlMatch[1]);
+      if (!session) fail(404, "会话不存在");
+      if (!session.enabled) fail(409, "会话配置已停用，请先应用启用会话");
+      const node = findNode(state, session.nodeId);
+      const result = await setProtocolState(node, session.protocolName, action === "enable");
+      if (!result.ok) fail(502, result.stderr || result.stdout || `无法${action === "enable" ? "启动" : "停止"} BGP 协议`);
+      event("success", `${node.name} 的 BGP 协议 ${session.protocolName} 已${action === "enable" ? "启动" : "停止"}`, node.id);
+      return {
+        sessionId: session.id,
+        nodeId: node.id,
+        protocolName: session.protocolName,
+        action,
+        enabled: action === "enable",
+        result,
+        events,
+      };
     });
+    return sendJson(response, 200, control);
   }
 
   if (request.method === "POST" && pathname === "/api/sessions/apply") {
-    if (deploymentLocked) fail(409, "另一个部署正在进行");
-    deploymentLocked = true;
+    const body = await readJson(request);
     let staged;
     let applied = false;
-    try {
-      staged = await stageSession(await store.read(), await readJson(request));
-      if (!staged.valid) return sendJson(response, 422, { error: "候选配置检查失败", ...staged, events });
-      event("info", `正在向 ${staged.node.name} 应用配置`, staged.node.id);
-      applied = true;
-      const result = await applyStagedConfig(staged.node);
-      if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
-      await store.write(staged.inventory);
-      event("success", `${staged.node.name} 的 BIRD 2 实例已接受配置`, staged.node.id);
-      if (!staged.session.enabled) {
-        event("success", `会话 ${staged.session.protocolName} 已停用`, staged.node.id);
-        return sendJson(response, 200, {
+    let committed = false;
+    let journal = null;
+    return withDeploymentLock(async () => {
+      try {
+        const currentInventory = await store.read();
+        staged = await stageSession(currentInventory, body);
+        if (!staged.valid) return sendJson(response, 422, { error: "候选配置检查失败", ...staged, events });
+        journal = await beginDeploymentJournal(currentInventory, staged.inventory, [staged.node.id], [staged.node]);
+        event("info", `正在向 ${staged.node.name} 应用配置`, staged.node.id);
+        applied = true;
+        const result = await applyStagedConfig(staged.node);
+        if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
+        await store.replace(currentInventory, staged.inventory);
+        committed = true;
+        await clearDeploymentJournal(journal);
+        journal = null;
+        event("success", `${staged.node.name} 的 BIRD 2 实例已接受配置`, staged.node.id);
+        if (!staged.session.enabled) {
+          event("success", `会话 ${staged.session.protocolName} 已停用`, staged.node.id);
+          return sendJson(response, 200, {
+            applied: true,
+            enabled: false,
+            established: false,
+            session: staged.session,
+            config: staged.config,
+            status: null,
+            events,
+          });
+        }
+        const status = await waitForProtocol(staged.node, staged.session.protocolName);
+        event(
+          status.protocol.established ? "success" : "warning",
+          status.protocol.established ? `与 ${staged.peer.name} 的 BGP 会话已 Established` : `配置已应用，正在等待 ${staged.peer.name}`,
+          staged.node.id,
+        );
+        return sendJson(response, status.protocol.established ? 200 : 202, {
           applied: true,
-          enabled: false,
-          established: false,
+          enabled: true,
+          established: status.protocol.established,
           session: staged.session,
           config: staged.config,
-          status: null,
+          status,
           events,
         });
+      } catch (error) {
+        event("error", safeErrorMessage(error), staged?.node?.id ?? null);
+        if (applied && !committed && staged?.node) {
+          let journalMarkedForRollback = false;
+          if (journal) {
+            try {
+              await setDeploymentJournalDirection(journal, "rollback");
+              journalMarkedForRollback = true;
+            } catch (journalError) {
+              console.error(journalError);
+            }
+          }
+          const rollback = await rollbackNode(staged.node);
+          event(
+            rollback.ok ? "warning" : "error",
+            rollback.ok ? "已回滚受管节点" : `受管节点回滚失败：${rollback.stderr || rollback.stdout}`,
+            staged.node.id,
+          );
+          if (rollback.ok && journal && journalMarkedForRollback) {
+            try {
+              await clearDeploymentJournal(journal);
+              journal = null;
+            } catch (journalError) {
+              console.error(journalError);
+            }
+          }
+        }
+        throw error;
       }
-      const status = await waitForProtocol(staged.node, staged.session.protocolName);
-      event(
-        status.protocol.established ? "success" : "warning",
-        status.protocol.established ? `与 ${staged.peer.name} 的 BGP 会话已 Established` : `配置已应用，正在等待 ${staged.peer.name}`,
-        staged.node.id,
-      );
-      return sendJson(response, status.protocol.established ? 200 : 202, {
-        applied: true,
-        enabled: true,
-        established: status.protocol.established,
-        session: staged.session,
-        config: staged.config,
-        status,
-        events,
-      });
-    } catch (error) {
-      event("error", error.message, staged?.node?.id ?? null);
-      if (applied && staged?.node) {
-        await rollbackNode(staged.node);
-        event("warning", "已回滚受管节点", staged.node.id);
-      }
-      throw error;
-    } finally {
-      deploymentLocked = false;
-    }
+    });
   }
 
   const sessionMatch = pathname.match(/^\/api\/sessions\/([A-Za-z_][A-Za-z0-9_]*)$/);
   if (sessionMatch && request.method === "DELETE") {
-    if (deploymentLocked) fail(409, "另一个部署正在进行");
-    deploymentLocked = true;
     let applied = false;
+    let committed = false;
     let node;
-    try {
-      const state = await store.read();
-      const session = state.sessions.find((item) => item.id === sessionMatch[1]);
-      if (!session) fail(404, "会话不存在");
-      node = findNode(state, session.nodeId);
-      const candidate = validateInventory({ ...state, sessions: state.sessions.filter((item) => item.id !== session.id) });
-      await applyInventoryConfig(node, candidate);
-      applied = true;
-      await store.write(candidate);
-      protocolOverrides.delete(protocolOverrideKey(node.id, session.protocolName));
-      event("success", `已移除会话 ${session.protocolName}`, node.id);
-      return sendJson(response, 200, { inventory: candidate, events });
-    } catch (error) {
-      if (applied && node) await rollbackNode(node);
-      throw error;
-    } finally {
-      deploymentLocked = false;
-    }
+    let journal = null;
+    return withDeploymentLock(async () => {
+      try {
+        const state = await store.read();
+        const session = state.sessions.find((item) => item.id === sessionMatch[1]);
+        if (!session) fail(404, "会话不存在");
+        node = findNode(state, session.nodeId);
+        const candidate = validateInventory({ ...state, sessions: state.sessions.filter((item) => item.id !== session.id) });
+        const config = configForNode(candidate, node);
+        const validation = await stageAndValidate(node, config);
+        if (!validation.ok) fail(422, validation.stderr || "候选配置检查失败");
+        journal = await beginDeploymentJournal(state, candidate, [node.id], [node]);
+        applied = true;
+        const result = await applyStagedConfig(node);
+        if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
+        await store.replace(state, candidate);
+        committed = true;
+        await clearDeploymentJournal(journal);
+        journal = null;
+        event("success", `已移除会话 ${session.protocolName}`, node.id);
+        return sendJson(response, 200, { inventory: candidate, events });
+      } catch (error) {
+        if (applied && !committed && node) {
+          let journalMarkedForRollback = false;
+          if (journal) {
+            try {
+              await setDeploymentJournalDirection(journal, "rollback");
+              journalMarkedForRollback = true;
+            } catch (journalError) {
+              console.error(journalError);
+            }
+          }
+          const rollback = await rollbackNode(node);
+          if (!rollback.ok) event("error", `${node.name} 回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
+          else if (journal && journalMarkedForRollback) {
+            try {
+              await clearDeploymentJournal(journal);
+              journal = null;
+            } catch (journalError) {
+              console.error(journalError);
+            }
+          }
+        }
+        throw error;
+      }
+    });
   }
 
   fail(404, "接口不存在");
@@ -1062,8 +1622,6 @@ async function serveStatic(response, pathname) {
     response.writeHead(200, {
       "content-type": mimeTypes[path.extname(normalized)] ?? "application/octet-stream",
       "content-length": content.length,
-      "x-content-type-options": "nosniff",
-      "referrer-policy": "same-origin",
     });
     response.end(content);
   } catch (error) {
@@ -1072,12 +1630,14 @@ async function serveStatic(response, pathname) {
 }
 
 const server = http.createServer(async (request, response) => {
-  const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
+  applySecurityHeaders(response);
+  let url;
   try {
+    url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname.startsWith("/api/")) {
       assertSameOrigin(request);
       if (await handleAuthApi(request, response, url)) return;
-      if (url.pathname !== "/api/health" && !authStore.isAuthenticated(requestSessionToken(request))) {
+      if (url.pathname !== "/api/health" && !await authStore.isAuthenticated(requestSessionToken(request))) {
         return sendJson(response, 401, { error: "请先登录", code: "AUTH_REQUIRED" }, {
           "set-cookie": sessionCookie(request, "", 0),
         });
@@ -1087,17 +1647,67 @@ const server = http.createServer(async (request, response) => {
       await serveStatic(response, url.pathname);
     }
   } catch (error) {
-    if (!url.pathname.startsWith("/api/auth/")) event("error", error.message);
-    const payload = { error: error.message };
-    if (error.code) payload.code = error.code;
-    if (!url.pathname.startsWith("/api/auth/") && error.code !== "AUTH_REQUIRED") payload.events = events;
-    sendJson(response, error.status ?? 500, payload);
+    const pathname = url?.pathname ?? "";
+    const authPath = pathname.startsWith("/api/auth/");
+    const healthPath = pathname === "/api/health";
+    const unexpected = !isPublicError(error);
+    if (!authPath && !healthPath) event("error", safeErrorMessage(error));
+    if (healthPath) {
+      if (!response.headersSent) sendJson(response, 503, { status: "error" });
+      return;
+    }
+    if (unexpected) console.error(error);
+    const payload = { error: unexpected ? "服务器内部错误" : error.message };
+    if (!unexpected && error.code) payload.code = error.code;
+    if (!authPath && error.code !== "AUTH_REQUIRED") payload.events = events;
+    if (!response.headersSent) sendJson(response, error.status ?? 500, payload);
+    else response.destroy();
   }
 });
 
+server.requestTimeout = 30000;
+server.headersTimeout = 15000;
+server.keepAliveTimeout = 5000;
+server.maxHeadersCount = 100;
+
+await database.initialize();
 await authStore.initialize();
-await ensureControllerSshIdentity();
+await store.initialize();
+await database.createState(DEPLOYMENT_JOURNAL_KEY, EMPTY_DEPLOYMENT_JOURNAL);
+const pendingDeployment = (await readDeploymentJournal()).active;
+const recoveryNodes = pendingDeployment
+  ? [...pendingDeployment.forwardTargets, ...pendingDeployment.rollbackTargets].map((target) => target.node)
+  : [];
+await ensureControllerSshIdentity(recoveryNodes);
+await recoverDeploymentJournal();
 
 server.listen(port, host, () => {
   console.log(`Birdbox Demo listening on http://${host}:${port}`);
 });
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down`);
+  const forcedExit = setTimeout(() => process.exit(1), shutdownTimeoutMs);
+  forcedExit.unref();
+  const serverClosed = new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeIdleConnections?.();
+  });
+  try {
+    const deployment = activeDeployment;
+    if (deployment) await deployment.catch(() => undefined);
+    server.closeIdleConnections?.();
+    await serverClosed;
+    await database.close();
+    clearTimeout(forcedExit);
+    process.exit(0);
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

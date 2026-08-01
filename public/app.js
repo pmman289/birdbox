@@ -8,6 +8,9 @@ const elements = {
   appHeader: $("#appHeader"),
   appMain: $("#appMain"),
   refresh: $("#refreshButton"),
+  nodeSelect: $("#nodeSelect"),
+  peerSelect: $("#peerSelect"),
+  selectionLoadingStatus: $("#selectionLoadingStatus"),
   globalState: $("#globalState"),
   sessionForm: $("#sessionForm"),
   preview: $("#previewButton"),
@@ -20,6 +23,7 @@ const elements = {
   policyResourceDialog: $("#policyResourceDialog"),
   policyActionDialog: $("#policyActionDialog"),
   rpkiDialog: $("#rpkiDialog"),
+  nodeCleanupDialog: $("#nodeCleanupDialog"),
 };
 
 let state = null;
@@ -28,8 +32,86 @@ let autoPreviewTimer = null;
 let lastPreviewSignature = null;
 let policyActionContext = null;
 let authMonitorTimer = null;
+let dashboardRequestId = 0;
+let dashboardAbortController = null;
+let dashboardLoading = false;
+let previewRequestId = 0;
+let previewAbortController = null;
+let previewInFlight = false;
+let policyActionContextId = 0;
+let resourceMutationBusy = false;
+let sessionApplyInFlight = false;
+let unknownOutcomeRefreshTimer = null;
 
 const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
+const THEME_STORAGE_KEY = "birdbox-theme";
+const systemThemeQuery = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+const API_READ_TIMEOUT_MS = 20000;
+const API_MUTATION_TIMEOUT_MS = 60000;
+const API_DEPLOYMENT_TIMEOUT_MS = 1810000;
+
+function isDeploymentMutation(path, method) {
+  if (method === "GET") return false;
+  if (/^\/api\/(defines|functions|filters|rpki)(?:\/|$)/.test(path)) return true;
+  if (/^\/api\/sessions\/(?:preview|apply)$/.test(path)) return true;
+  if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
+  if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
+  if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT") return true;
+  if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "DELETE" && !path.includes("force=true")) return true;
+  return /^\/api\/peers\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT";
+}
+
+function scheduleUnknownOutcomeRefresh() {
+  clearTimeout(unknownOutcomeRefreshTimer);
+  unknownOutcomeRefreshTimer = window.setTimeout(async () => {
+    unknownOutcomeRefreshTimer = null;
+    try {
+      await loadDashboard(currentNode()?.id, currentPeer()?.id);
+      toast("请求结果未知，已刷新库存和节点状态", "success");
+    } catch {
+      // The original timeout remains visible; a later manual refresh can retry reconciliation.
+    }
+  }, 0);
+}
+
+function storedTheme() {
+  try {
+    const theme = localStorage.getItem(THEME_STORAGE_KEY);
+    return theme === "dark" || theme === "light" ? theme : null;
+  } catch {
+    return null;
+  }
+}
+
+function applyTheme(theme, persist = false) {
+  const next = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = next;
+  document.documentElement.style.colorScheme = next;
+  if (persist) {
+    try { localStorage.setItem(THEME_STORAGE_KEY, next); } catch {}
+  }
+  const dark = next === "dark";
+  $$('[data-theme-toggle]').forEach((button) => {
+    const actionLabel = dark ? "切换到白色模式" : "切换到暗色模式";
+    button.title = actionLabel;
+    button.setAttribute("aria-label", actionLabel);
+    button.removeAttribute("aria-pressed");
+    const icon = button.querySelector("span");
+    if (icon) icon.textContent = dark ? "☀" : "☾";
+  });
+}
+
+function initializeTheme() {
+  applyTheme(storedTheme() ?? (systemThemeQuery?.matches ? "dark" : "light"));
+  $$('[data-theme-toggle]').forEach((button) => button.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+  }));
+  const followSystemTheme = (event) => {
+    if (!storedTheme()) applyTheme(event.matches ? "dark" : "light");
+  };
+  if (systemThemeQuery?.addEventListener) systemThemeQuery.addEventListener("change", followSystemTheme);
+  else systemThemeQuery?.addListener?.(followSystemTheme);
+}
 
 function familyLabel(family) { return family === "ipv4" ? "IPv4" : "IPv6"; }
 function directionKey(direction) { return direction === "import" ? "Import" : "Export"; }
@@ -72,7 +154,7 @@ function channelEditorMarkup(family, active) {
       </div>
     </section>`;
   };
-  return `<section id="${family}ChannelPanel" class="afi-channel-panel ${active ? "active" : ""}" data-family="${family}" role="tabpanel" ${active ? "" : "hidden"}>
+  return `<section id="${family}ChannelPanel" class="afi-channel-panel ${active ? "active" : ""}" data-family="${family}" role="tabpanel" aria-labelledby="${family}ChannelTab" ${active ? "" : "hidden"}>
     <div class="channel-enable-row">
       <div><span>${label}</span><h3>${label} Channel</h3></div>
       <label class="compact-toggle" for="${family}Enabled"><span>启用</span><input id="${family}Enabled" type="checkbox"><i aria-hidden="true"></i></label>
@@ -141,7 +223,7 @@ function channelEditorMarkup(family, active) {
 
 function renderChannelEditorShells() {
   $("#channelEditors").innerHTML = `<nav class="afi-tabs" role="tablist" aria-label="BGP Address Family">
-    ${CHANNEL_FAMILIES.map((family, index) => `<button class="afi-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0}" data-channel-tab="${family}">${familyLabel(family)} <span id="${family}TabState">开启</span></button>`).join("")}
+    ${CHANNEL_FAMILIES.map((family, index) => `<button id="${family}ChannelTab" class="afi-tab ${index === 0 ? "active" : ""}" type="button" role="tab" aria-selected="${index === 0}" aria-controls="${family}ChannelPanel" tabindex="${index === 0 ? 0 : -1}" data-channel-tab="${family}">${familyLabel(family)} <span id="${family}TabState">开启</span></button>`).join("")}
   </nav>${CHANNEL_FAMILIES.map((family, index) => channelEditorMarkup(family, index === 0)).join("")}`;
 }
 
@@ -161,23 +243,60 @@ function optionalNumber(id) { return value(id) === "" ? null : Number(value(id))
 function checked(id) { return $(`#${id}`).checked; }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: { "content-type": "application/json", ...(options.headers ?? {}) },
-  });
-  const data = await response.json();
-  if (!response.ok) {
-    const error = new Error(data.error || `请求失败 (${response.status})`);
-    error.data = data;
-    error.status = response.status;
-    error.code = data.code;
-    if (response.status === 401 && data.code === "AUTH_REQUIRED") {
-      showAuthentication({ configured: true, authenticated: false, username: "admin" });
+  const { signal: callerSignal, timeoutMs, headers, ...fetchOptions } = options;
+  const method = String(fetchOptions.method ?? "GET").toUpperCase();
+  const controller = new AbortController();
+  const timeout = timeoutMs ?? (method === "GET"
+    ? API_READ_TIMEOUT_MS
+    : isDeploymentMutation(path, method) ? API_DEPLOYMENT_TIMEOUT_MS : API_MUTATION_TIMEOUT_MS);
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeout);
+  try {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      ...fetchOptions,
+      signal: controller.signal,
+      headers: { "content-type": "application/json", ...(headers ?? {}) },
+    });
+    const body = await response.text();
+    let data;
+    try {
+      data = body ? JSON.parse(body) : {};
+    } catch {
+      throw new Error(`服务器返回了无效响应 (${response.status})`);
+    }
+    if (!response.ok) {
+      const error = new Error(data.error || `请求失败 (${response.status})`);
+      error.data = data;
+      error.status = response.status;
+      error.code = data.code;
+      if (response.status === 401 && data.code === "AUTH_REQUIRED") {
+        showAuthentication({ configured: true, authenticated: false, username: "admin" });
+      }
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (timedOut) {
+      const timeoutError = new Error("请求超时，服务端可能仍在处理；请刷新状态后确认结果");
+      timeoutError.code = "REQUEST_TIMEOUT";
+      timeoutError.unknownOutcome = method !== "GET";
+      if (timeoutError.unknownOutcome && isDeploymentMutation(path, method)) scheduleUnknownOutcomeRefresh();
+      throw timeoutError;
     }
     throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
-  return data;
 }
 
 function toast(message, type = "") {
@@ -201,6 +320,14 @@ function stopAuthMonitor() {
 function showAuthentication(status) {
   const setup = status.configured === false;
   stopAuthMonitor();
+  dashboardRequestId += 1;
+  dashboardAbortController?.abort();
+  dashboardAbortController = null;
+  dashboardLoading = false;
+  elements.refresh.classList.remove("loading");
+  elements.refresh.removeAttribute("aria-busy");
+  cancelPendingPreview();
+  setSelectionLoading(false);
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
   document.body.classList.add("auth-active");
   elements.authView.hidden = false;
@@ -257,28 +384,109 @@ function deploymentSummary(deployment) {
   return `已同步 ${nodeCount} 个节点${sessionCount ? `、${sessionCount} 条现有会话` : ""}`;
 }
 
+function setButtonLoading(button, next, label = "处理中") {
+  if (!button) return;
+  if (next) {
+    if (!button.dataset.loadingLabel) {
+      button.dataset.loadingLabel = button.textContent;
+      button.dataset.loadingDisabled = String(button.disabled);
+    }
+    button.textContent = label;
+    button.disabled = true;
+    button.classList.add("is-loading");
+    button.setAttribute("aria-busy", "true");
+    $("#operationStatus").textContent = label;
+    return;
+  }
+  if (!Object.hasOwn(button.dataset, "loadingLabel")) return;
+  if (button.dataset.loadingLabel) button.textContent = button.dataset.loadingLabel;
+  delete button.dataset.loadingLabel;
+  const wasDisabled = button.dataset.loadingDisabled === "true";
+  delete button.dataset.loadingDisabled;
+  button.classList.remove("is-loading");
+  button.removeAttribute("aria-busy");
+  button.disabled = wasDisabled;
+  $("#operationStatus").textContent = "";
+}
+
+function setFormPending(form, next) {
+  if (!form) return;
+  if (next) {
+    if (!form.dataset.pendingInert) form.dataset.pendingInert = String(form.inert === true);
+    form.inert = true;
+    form.setAttribute("aria-busy", "true");
+    return;
+  }
+  if (!Object.hasOwn(form.dataset, "pendingInert")) return;
+  const wasInert = form.dataset.pendingInert === "true";
+  delete form.dataset.pendingInert;
+  form.inert = wasInert;
+  form.removeAttribute("aria-busy");
+}
+
+function currentSessionContext() {
+  const node = currentNode();
+  const peer = currentPeer();
+  return node && peer ? { nodeId: node.id, peerId: peer.id } : null;
+}
+
+function sameSessionContext(context) {
+  const current = currentSessionContext();
+  return Boolean(context && current && context.nodeId === current.nodeId && context.peerId === current.peerId);
+}
+
+function cancelPendingPreview() {
+  clearTimeout(autoPreviewTimer);
+  autoPreviewTimer = null;
+  previewRequestId += 1;
+  previewAbortController?.abort();
+  previewAbortController = null;
+  if (previewInFlight) {
+    previewInFlight = false;
+    setBusy(false);
+  }
+}
+
+function updateSessionActionState() {
+  const sessionUnavailable = !currentPeer();
+  const locked = busy || dashboardLoading;
+  elements.sessionForm.inert = locked;
+  if (locked) elements.sessionForm.setAttribute("aria-busy", "true");
+  else elements.sessionForm.removeAttribute("aria-busy");
+  elements.preview.disabled = locked || sessionUnavailable;
+  elements.apply.disabled = locked || sessionUnavailable;
+  elements.removeSession.disabled = locked;
+  const session = currentPeer()?.session;
+  elements.stop.disabled = locked || !currentNode() || !session || session.enabled === false || currentPeer()?.protocol?.configured === false;
+}
+
+function setSelectionLoading(next) {
+  const nodesAvailable = (state?.inventory?.nodes?.length ?? 0) > 0;
+  const peersAvailable = (state?.peers?.length ?? 0) > 0;
+  const locked = next || busy;
+  elements.nodeSelect.disabled = locked || !nodesAvailable;
+  elements.peerSelect.disabled = locked || !peersAvailable;
+  for (const select of [elements.nodeSelect, elements.peerSelect]) {
+    select.closest(".select-actions")?.classList.toggle("is-loading", next);
+    if (next) select.setAttribute("aria-busy", "true");
+    else select.removeAttribute("aria-busy");
+  }
+  elements.selectionLoadingStatus.hidden = !next;
+  updateSessionActionState();
+}
+
 function setBusy(next, label = "处理中", activeButton = elements.apply) {
   busy = next;
-  const sessionUnavailable = !currentPeer();
-  elements.preview.disabled = next || sessionUnavailable;
-  elements.apply.disabled = next || sessionUnavailable;
-  elements.removeSession.disabled = next;
-  const session = currentPeer()?.session;
-  elements.stop.disabled = next || !currentNode() || !session || session.enabled === false || currentPeer()?.protocol?.configured === false;
   const buttons = [elements.preview, elements.apply, elements.removeSession, elements.stop];
   buttons.forEach((button) => {
     if (next && button === activeButton) {
-      if (!button.dataset.label) button.dataset.label = button.textContent;
-      button.textContent = label;
-      button.classList.add("is-loading");
-      button.setAttribute("aria-busy", "true");
+      setButtonLoading(button, true, label);
     } else if (!next) {
-      if (button.dataset.label && button.classList.contains("is-loading")) button.textContent = button.dataset.label;
-      delete button.dataset.label;
-      button.classList.remove("is-loading");
-      button.removeAttribute("aria-busy");
+      if (button.classList.contains("is-loading")) setButtonLoading(button, false);
     }
   });
+  updateSessionActionState();
+  setSelectionLoading(dashboardLoading);
 }
 
 function birdNameSlug(label) {
@@ -530,10 +738,13 @@ function sessionPayload() {
 
 function renderSelectors() {
   const nodes = state.inventory.nodes;
-  $("#nodeSelect").innerHTML = nodes
+  $("#nodeSelect").innerHTML = nodes.length
+    ? nodes
     .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.name)}</option>`)
-    .join("");
-  $("#nodeSelect").value = state.selection.nodeId;
+    .join("")
+    : '<option value="">尚未添加节点</option>';
+  $("#nodeSelect").value = state.selection.nodeId ?? "";
+  $("#nodeSelect").disabled = nodes.length === 0;
 
   if (state.peers.length) {
     $("#peerSelect").innerHTML = state.peers
@@ -545,7 +756,9 @@ function renderSelectors() {
     $("#peerSelect").innerHTML = '<option value="">尚无远端 Peer</option>';
     $("#peerSelect").disabled = true;
   }
-  $("#selectionSummary").textContent = currentPeer()
+  $("#selectionSummary").textContent = !currentNode()
+    ? "尚未添加受管节点"
+    : currentPeer()
     ? `${currentNode().name} → ${currentPeer().name}`
     : `${currentNode().name} → 未选择`;
 }
@@ -579,6 +792,19 @@ function globalHealthPresentation() {
 
 function renderTopology() {
   const node = currentNode();
+  if (!node) {
+    $("#nodeName").textContent = "尚未添加受管节点";
+    $("#nodeAddress").textContent = "请在资源管理中添加节点";
+    $("#nodeRouterId").textContent = "-";
+    $("#birdVersion").textContent = "-";
+    $("#nodeTransport").textContent = "-";
+    $("#nodeReachable").className = "status-pill unknown";
+    $("#nodeReachable").textContent = "未配置";
+    $("#managedNodeCard").classList.remove("online");
+    $(".topology-network").classList.remove("has-peers");
+    $("#peerTopology").innerHTML = '<div class="topology-empty">尚无受管节点</div>';
+    return;
+  }
   const online = state.runtime.reachable && state.runtime.bird2;
   $("#nodeName").textContent = node.name;
   $("#nodeAddress").textContent = `默认会话端口 ${node.listenPort}`;
@@ -752,11 +978,13 @@ function renderSessionForm() {
   const session = peer?.session;
   const manuallyDisabled = peer?.protocol?.disabled === true;
   elements.stop.textContent = manuallyDisabled ? "启动当前会话" : "停止当前会话";
-  elements.stop.className = `protocol-control ${manuallyDisabled ? "start" : "stop"}`;
+  elements.stop.className = `protocol-control ${manuallyDisabled ? "start" : "stop"}${elements.stop.classList.contains("is-loading") ? " is-loading" : ""}`;
   elements.stop.setAttribute("aria-label", `${manuallyDisabled ? "启动" : "停止"} ${session?.protocolName ?? "当前 BGP 会话"}`);
   elements.stop.title = manuallyDisabled ? "启动当前选中的 BGP 会话" : "只停止当前选中的 BGP 会话";
-  elements.stop.disabled = busy || !currentNode() || !session || session.enabled === false || peer?.protocol?.configured === false;
-  if (!peer) return;
+  if (!peer) {
+    updateSessionActionState();
+    return;
+  }
 
   $("#pairRemote").textContent = `${peer.address} · AS${peer.asn}`;
   $("#protocolName").value = peer.session?.protocolName ?? defaultProtocolName(peer);
@@ -805,7 +1033,7 @@ function renderSessionForm() {
   elements.removeSession.hidden = !peer.session;
   updatePairSummary();
   lastPreviewSignature = JSON.stringify(sessionPayload());
-  setBusy(busy);
+  updateSessionActionState();
 }
 
 function renderPolicyResourceChoices(family, direction, policy) {
@@ -1042,7 +1270,9 @@ function buildPolicyActionSource() {
 }
 
 function openPolicyActionDialog(family, direction) {
-  policyActionContext = { family, direction };
+  const context = currentSessionContext();
+  if (!context) return;
+  policyActionContext = { ...context, family, direction, id: ++policyActionContextId };
   $("#policyActionName").value = "";
   $("#policyActionLabel").value = "";
   delete $("#policyActionName").dataset.edited;
@@ -1065,34 +1295,75 @@ async function savePolicyAction(event) {
   event.preventDefault();
   syncPolicyActionDialog();
   if (!event.currentTarget.reportValidity()) return;
-  const node = currentNode();
-  if (!node || !policyActionContext) return;
+  const context = policyActionContext;
+  if (!context || !sameSessionContext(context)) return;
   const saveButton = $("#savePolicyActionButton");
-  const originalLabel = saveButton.textContent;
+  const form = event.currentTarget;
   try {
     const source = buildPolicyActionSource();
-    saveButton.disabled = true;
-    saveButton.textContent = "正在预检";
+    const payload = {
+      nodeId: context.nodeId,
+      label: value("policyActionLabel"),
+      name: value("policyActionName"),
+      source,
+      enabled: true,
+    };
+    setButtonLoading(saveButton, true, "正在预检");
+    setFormPending(form, true);
     const result = await api("/api/functions", {
       method: "POST",
-      body: JSON.stringify({ nodeId: node.id, label: value("policyActionLabel"), name: value("policyActionName"), source, enabled: true }),
+      body: JSON.stringify(payload),
     });
-    const { family, direction } = policyActionContext;
-    const peerId = currentPeer()?.id;
-    elements.policyActionDialog.close();
-    await loadDashboard(node.id, peerId);
-    const key = policyPrefix(family, direction);
-    const addSelect = $(`#${key}FunctionPicker [data-add-function-select]`);
-    if (addSelect) {
-      addSelect.value = result.resource.id;
-      addFunctionStep(family, direction);
+    const canInsert = policyActionContext?.id === context.id && sameSessionContext(context);
+    if (canInsert && elements.policyActionDialog.open) {
+      elements.policyActionDialog.close();
+      policyActionContext = null;
     }
-    toast(`已生成 Function ${result.resource.name} 并加入${direction === "import" ? "导入" : "导出"}策略`, "success");
+
+    // A full dashboard reload would overwrite the rest of the unsaved session
+    // draft. Fold the mutation snapshot into the current dashboard instead.
+    const inventory = result.inventory ?? {
+      ...state.inventory,
+      functions: [...state.inventory.functions, result.resource],
+    };
+    state.inventory = inventory;
+    if (Array.isArray(result.events)) state.events = result.events;
+    const visibleResources = (collection) => (inventory[collection] ?? []).filter((resource) =>
+      resource.enabled && (resource.nodeId === null || resource.nodeId === context.nodeId),
+    );
+    state.defines = visibleResources("defines");
+    state.functions = visibleResources("functions");
+    state.filters = visibleResources("filters");
+    state.rpki = visibleResources("rpki");
+    state.cidrDefines = {
+      ipv4: state.defines.filter((resource) => resource.type === "cidr4"),
+      ipv6: state.defines.filter((resource) => resource.type === "cidr6"),
+    };
+    renderEvents();
+    renderResourceManagement();
+
+    let inserted = false;
+    if (canInsert && policyActionContext === null && sameSessionContext(context)) {
+      const key = policyPrefix(context.family, context.direction);
+      const policy = policyPayload(context.family, context.direction);
+      renderPolicyResourceChoices(context.family, context.direction, policy);
+      syncPolicyControls(context.family, context.direction);
+      const addSelect = $(`#${key}FunctionPicker [data-add-function-select]`);
+      if ([...(addSelect?.options ?? [])].some((option) => option.value === result.resource.id)) {
+        addSelect.value = result.resource.id;
+        addFunctionStep(context.family, context.direction);
+        inserted = true;
+      }
+    }
+    toast(inserted
+      ? `已生成 Function ${result.resource.name} 并加入${context.direction === "import" ? "导入" : "导出"}策略`
+      : `已生成 Function ${result.resource.name}`,
+    "success");
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    saveButton.disabled = false;
-    saveButton.textContent = originalLabel;
+    setButtonLoading(saveButton, false);
+    setFormPending(form, false);
   }
 }
 
@@ -1260,6 +1531,7 @@ function activateChannelTab(family) {
     const active = tab.dataset.channelTab === family;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
   });
   $$(".afi-channel-panel").forEach((panel) => {
     const active = panel.dataset.family === family;
@@ -1309,6 +1581,7 @@ function renderEvents() {
 
 function renderResourceManagement() {
   const nodes = state.inventory.nodes;
+  $("#manageAddPeerButton").disabled = nodes.length === 0;
   const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
 
   $("#managementNodeRows").innerHTML = nodes.map((node) => `
@@ -1415,7 +1688,7 @@ function renderResourceManagement() {
     openRPKIDialog(state.inventory.rpki.find((item) => item.id === button.dataset.editRpki));
   }));
   $$('[data-move-resource]').forEach((button) => button.addEventListener("click", () => {
-    movePolicyResource(button.dataset.moveCollection, button.dataset.moveResource, button.dataset.moveDirection);
+    movePolicyResource(button.dataset.moveCollection, button.dataset.moveResource, button.dataset.moveDirection, button);
   }));
 }
 
@@ -1436,30 +1709,62 @@ function renderDashboard() {
 }
 
 async function loadDashboard(nodeId = null, peerId = null) {
+  const requestId = ++dashboardRequestId;
+  dashboardAbortController?.abort();
+  cancelPendingPreview();
+  const controller = new AbortController();
+  dashboardAbortController = controller;
+  dashboardLoading = true;
   elements.refresh.classList.add("loading");
+  elements.refresh.setAttribute("aria-busy", "true");
+  setSelectionLoading(true);
   try {
     const params = new URLSearchParams();
     if (nodeId) params.set("nodeId", nodeId);
     if (peerId) params.set("peerId", peerId);
-    state = await api(`/api/dashboard?${params}`);
+    const dashboard = await api(`/api/dashboard?${params}`, { signal: controller.signal });
+    if (requestId !== dashboardRequestId) return;
+    state = dashboard;
     renderDashboard();
   } catch (error) {
+    if (error.name === "AbortError" || requestId !== dashboardRequestId) return;
     elements.globalState.className = "global-state error";
     elements.globalState.innerHTML = "<i></i>控制器异常";
     elements.globalState.title = "控制器异常";
     elements.globalState.setAttribute("aria-label", "控制器异常");
     toast(error.message, "error");
+    // The native select has already moved to the requested value. Restore the
+    // last committed selection when its replacement dashboard cannot load.
+    if (state && requestId === dashboardRequestId) renderSelectors();
   } finally {
-    elements.refresh.classList.remove("loading");
+    if (requestId === dashboardRequestId) {
+      dashboardAbortController = null;
+      dashboardLoading = false;
+      elements.refresh.classList.remove("loading");
+      elements.refresh.removeAttribute("aria-busy");
+      setSelectionLoading(false);
+    }
   }
 }
 
 async function previewSession({ silent = false, signature = null } = {}) {
   const valid = sessionFormValid(!silent);
   if (!valid) return false;
+  const context = currentSessionContext();
+  if (!context) return false;
+  const requestId = ++previewRequestId;
+  previewAbortController?.abort();
+  const controller = new AbortController();
+  previewAbortController = controller;
+  previewInFlight = true;
   setBusy(true, "正在预检", elements.preview);
   try {
-    const result = await api("/api/sessions/preview", { method: "POST", body: JSON.stringify(sessionPayload()) });
+    const result = await api("/api/sessions/preview", {
+      method: "POST",
+      body: JSON.stringify(sessionPayload()),
+      signal: controller.signal,
+    });
+    if (requestId !== previewRequestId || !sameSessionContext(context)) return false;
     $("#localConfig").textContent = result.config;
     state.events = result.events;
     renderEvents();
@@ -1467,12 +1772,17 @@ async function previewSession({ silent = false, signature = null } = {}) {
     if (!silent) toast("节点候选配置检查通过", "success");
     return true;
   } catch (error) {
+    if (error.name === "AbortError" || requestId !== previewRequestId || !sameSessionContext(context)) return false;
     if (error.data?.config) $("#localConfig").textContent = error.data.config;
     if (error.data?.events) { state.events = error.data.events; renderEvents(); }
     toast(error.message, "error");
     return false;
   } finally {
-    setBusy(false);
+    if (requestId === previewRequestId) {
+      previewAbortController = null;
+      previewInFlight = false;
+      setBusy(false);
+    }
   }
 }
 
@@ -1492,7 +1802,7 @@ function scheduleAutoPreview() {
   clearTimeout(autoPreviewTimer);
   autoPreviewTimer = setTimeout(async () => {
     autoPreviewTimer = null;
-    if (busy) {
+    if (busy || dashboardLoading) {
       scheduleAutoPreview();
       return;
     }
@@ -1504,6 +1814,11 @@ function scheduleAutoPreview() {
 }
 
 async function applySession() {
+  if (sessionApplyInFlight || busy) return;
+  sessionApplyInFlight = true;
+  cancelPendingPreview();
+  const confirmButton = $("#confirmApplyButton");
+  setButtonLoading(confirmButton, true, "正在应用");
   setBusy(true, "正在应用会话变更");
   elements.applyDialog.close();
   const nodeId = currentNode().id;
@@ -1519,6 +1834,8 @@ async function applySession() {
     await loadDashboard(nodeId, peerId);
   } finally {
     setBusy(false);
+    setButtonLoading(confirmButton, false);
+    sessionApplyInFlight = false;
   }
 }
 
@@ -1585,9 +1902,26 @@ function openNodeDialog(node = null) {
   } else {
     resetNodeOnboardingVerification();
   }
-  $("#deleteNodeButton").hidden = !node;
+  $("#nodeRetireActions").hidden = !node;
+  $("#nodeRetireActions details").open = false;
+  [
+    "nodeEditorTransport", "nodeEditorDeploymentMode", "nodeEditorSshIdentity",
+    "nodeEditorSshHost", "nodeEditorSshUser", "nodeEditorSshPort",
+    "nodeEditorMainConfigPath", "nodeEditorGeneratedConfigPath", "nodeEditorSocketPath",
+  ].forEach((fieldId) => { $(`#${fieldId}`).disabled = Boolean(node); });
   toggleSshField();
   elements.nodeDialog.showModal();
+}
+
+function showNodeCleanupDialog(node, forced) {
+  $("#nodeCleanupDialogTitle").textContent = forced ? "节点已强制遗忘" : "节点已安全退役，仍需人工清理";
+  $("#nodeCleanupTarget").textContent = [
+    `SSH ${node.sshUser ? `${node.sshUser}@` : ""}${node.sshHost}:${node.sshPort}`,
+    `主配置 ${node.mainConfigPath}`,
+    `生成配置 ${node.generatedConfigPath}`,
+    `Socket ${node.socketPath}`,
+  ].join(" · ");
+  elements.nodeCleanupDialog.showModal();
 }
 
 async function saveNode(event) {
@@ -1599,18 +1933,28 @@ async function saveNode(event) {
     return;
   }
   const body = nodeEditorPayload();
+  const button = $("#saveNodeButton");
+  setButtonLoading(button, true, id ? "正在更新节点" : "正在添加节点");
+  setFormPending(event.currentTarget, true);
   try {
     const result = await api(id ? `/api/nodes/${id}` : "/api/nodes", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    await loadDashboard(result.node.id);
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
     elements.nodeDialog.close();
     toast(id ? `节点已更新，${deploymentSummary(result.deployment)}` : "节点已添加", "success");
-    await loadDashboard(result.node.id);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
+  }
 }
 
 async function generateNodeSetupScript() {
   if (!$("#nodeForm").reportValidity()) return;
   const button = $("#generateNodeSetupButton");
-  button.disabled = true;
+  setButtonLoading(button, true, "正在生成");
+  setFormPending($("#nodeForm"), true);
   setNodeOnboardingStatus("正在生成");
   try {
     const result = await api("/api/nodes/setup-script", { method: "POST", body: JSON.stringify(nodeEditorPayload()) });
@@ -1622,14 +1966,16 @@ async function generateNodeSetupScript() {
     setNodeOnboardingStatus("生成失败", "error");
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
   }
 }
 
 async function testNodeConnection() {
   if (!$("#nodeForm").reportValidity()) return;
   const button = $("#testNodeConnectionButton");
-  button.disabled = true;
+  setButtonLoading(button, true, "正在检查");
+  setFormPending($("#nodeForm"), true);
   setNodeOnboardingStatus("正在检查 SSH、Include 与 BIRD");
   try {
     const result = await api("/api/nodes/test", { method: "POST", body: JSON.stringify(nodeEditorPayload()) });
@@ -1643,7 +1989,8 @@ async function testNodeConnection() {
     setNodeOnboardingStatus("检查失败", "error");
     toast(error.message, "error");
   } finally {
-    button.disabled = false;
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
   }
 }
 
@@ -1672,12 +2019,21 @@ async function savePeer(event) {
     asn: Number(value("peerEditorAsn")),
     port: Number(value("peerEditorPort")),
   };
+  const button = event.submitter ?? event.currentTarget.querySelector('button[type="submit"]');
+  setButtonLoading(button, true, id ? "正在更新 Peer" : "正在添加 Peer");
+  setFormPending(event.currentTarget, true);
   try {
     const result = await api(id ? `/api/peers/${id}` : `/api/nodes/${nodeId}/peers`, { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
+    await loadDashboard(nodeId, result.peer.id);
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
     elements.peerDialog.close();
     toast(id ? `Peer 已更新，${deploymentSummary(result.deployment)}` : "Peer 已添加", "success");
-    await loadDashboard(nodeId, result.peer.id);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
+  }
 }
 
 function syncRPKIFields() {
@@ -1795,13 +2151,22 @@ async function saveRPKI(event) {
           user: value("rpkiUser") || null,
         }),
   };
+  const button = event.submitter ?? event.currentTarget.querySelector('button[type="submit"]');
+  setButtonLoading(button, true, "正在预检");
+  setFormPending(event.currentTarget, true);
   try {
     const result = await api(id ? `/api/rpki/${id}` : "/api/rpki", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
-    elements.rpkiDialog.close();
-    toast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
     await loadDashboard(currentNode()?.id, currentPeer()?.id);
     activateResourceTab("rpki");
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
+    elements.rpkiDialog.close();
+    toast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
+  }
 }
 
 function policyKindLabel(collection) {
@@ -1970,12 +2335,27 @@ function openPolicyResourceDialog(collection, resource = null) {
   elements.policyResourceDialog.showModal();
 }
 
-async function movePolicyResource(collection, resourceId, direction) {
+async function movePolicyResource(collection, resourceId, direction, button) {
+  if (resourceMutationBusy) return;
+  resourceMutationBusy = true;
+  const controls = $$('[data-move-resource]');
+  const disabledStates = new Map(controls.map((control) => [control, control.disabled]));
+  setButtonLoading(button, true, "正在调整");
+  controls.forEach((control) => {
+    if (control !== button) control.disabled = true;
+  });
   try {
     await api(`/api/${collection}/${resourceId}/move`, { method: "POST", body: JSON.stringify({ direction }) });
-    await loadDashboard(currentNode().id, currentPeer()?.id);
+    await loadDashboard(currentNode()?.id, currentPeer()?.id);
     activateResourceTab(collection);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    resourceMutationBusy = false;
+    setButtonLoading(button, false);
+    controls.forEach((control) => {
+      if (control.isConnected) control.disabled = disabledStates.get(control);
+    });
+  }
 }
 
 async function savePolicyResource(event) {
@@ -1999,23 +2379,24 @@ async function savePolicyResource(event) {
       : { source: $("#policyResourceSource").value }),
   };
   const saveButton = $("#savePolicyResourceButton");
-  const originalLabel = saveButton.textContent;
-  saveButton.disabled = true;
-  saveButton.textContent = "正在预检";
+  setButtonLoading(saveButton, true, "正在预检");
+  setFormPending(event.currentTarget, true);
   try {
     const result = await api(id ? `/api/${collection}/${id}` : `/api/${collection}`, {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(body),
     });
+    await loadDashboard(body.nodeId ?? currentNode()?.id, currentPeer()?.id);
+    activateResourceTab(collection);
+    setButtonLoading(saveButton, false);
+    setFormPending(event.currentTarget, false);
     elements.policyResourceDialog.close();
     toast(`${kind} 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
-    await loadDashboard(body.nodeId ?? currentNode().id, currentPeer()?.id);
-    activateResourceTab(collection);
   } catch (error) {
     toast(error.message, "error");
   } finally {
-    saveButton.disabled = false;
-    saveButton.textContent = originalLabel;
+    setButtonLoading(saveButton, false);
+    setFormPending(event.currentTarget, false);
   }
 }
 
@@ -2024,7 +2405,8 @@ $("#authForm").addEventListener("submit", async (event) => {
   if (!event.currentTarget.reportValidity()) return;
   const setup = event.currentTarget.dataset.mode === "setup";
   const button = $("#authSubmitButton");
-  button.disabled = true;
+  setButtonLoading(button, true, setup ? "正在设置" : "正在登录");
+  setFormPending(event.currentTarget, true);
   setAuthError($("#authError"));
   try {
     await api(setup ? "/api/auth/setup" : "/api/auth/login", {
@@ -2038,7 +2420,8 @@ $("#authForm").addEventListener("submit", async (event) => {
   } catch (error) {
     setAuthError($("#authError"), error.message);
   } finally {
-    button.disabled = false;
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
   }
 });
 
@@ -2050,11 +2433,14 @@ $("#accountButton").addEventListener("click", () => {
 });
 
 $("#logoutButton").addEventListener("click", async () => {
+  const button = $("#logoutButton");
+  setButtonLoading(button, true, "正在退出");
   try {
     await api("/api/auth/logout", { method: "POST", body: "{}" });
   } catch (error) {
     toast(error.message, "error");
   } finally {
+    setButtonLoading(button, false);
     state = null;
     showAuthentication({ configured: true, authenticated: false, username: "admin" });
   }
@@ -2064,7 +2450,8 @@ $("#passwordForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!event.currentTarget.reportValidity()) return;
   const button = $("#savePasswordButton");
-  button.disabled = true;
+  setButtonLoading(button, true, "正在更新密码");
+  setFormPending(event.currentTarget, true);
   setAuthError($("#passwordError"));
   try {
     await api("/api/auth/password", {
@@ -2081,7 +2468,8 @@ $("#passwordForm").addEventListener("submit", async (event) => {
   } catch (error) {
     setAuthError($("#passwordError"), error.message);
   } finally {
-    button.disabled = false;
+    setButtonLoading(button, false);
+    setFormPending(event.currentTarget, false);
   }
 });
 
@@ -2113,7 +2501,11 @@ resourceTabs.forEach((tab) => {
   tab.addEventListener("click", () => activateResourceTab(tab.dataset.resourceTab));
   tab.addEventListener("keydown", (event) => moveTabFocus(event, resourceTabs, (target) => activateResourceTab(target.dataset.resourceTab)));
 });
-$$('.afi-tab').forEach((tab) => tab.addEventListener("click", () => activateChannelTab(tab.dataset.channelTab)));
+const channelTabs = $$('.afi-tab');
+channelTabs.forEach((tab) => {
+  tab.addEventListener("click", () => activateChannelTab(tab.dataset.channelTab));
+  tab.addEventListener("keydown", (event) => moveTabFocus(event, channelTabs, (target) => activateChannelTab(target.dataset.channelTab)));
+});
 $$('[data-resource-target]').forEach((button) => button.addEventListener("click", () => {
   activateWorkspace("resourceWorkspace", button.dataset.resourceTarget);
 }));
@@ -2246,64 +2638,136 @@ $("#policyActionDefineSelect").addEventListener("change", () => {
 });
 
 $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
+$$('dialog').forEach((dialog) => dialog.addEventListener("cancel", (event) => {
+  if (dialog.querySelector('form[aria-busy="true"]')) event.preventDefault();
+}));
+elements.policyActionDialog.addEventListener("close", () => { policyActionContext = null; });
 
 $("#deleteNodeButton").addEventListener("click", async () => {
   const node = inventoryNode(value("nodeId"));
   if (!node) return;
-  if (!window.confirm(`删除节点 ${node.name}？`)) return;
+  if (!window.confirm(`安全退役节点 ${node.name}？Birdbox 将先清空远端受管 include；控制器公钥和主配置 include 行仍需手动删除。`)) return;
+  const button = $("#deleteNodeButton");
+  setButtonLoading(button, true, "正在删除");
+  setFormPending($("#nodeForm"), true);
   try {
     await api(`/api/nodes/${node.id}`, { method: "DELETE" });
-    elements.nodeDialog.close();
-    toast("节点已删除", "success");
     await loadDashboard();
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
+    elements.nodeDialog.close();
+    showNodeCleanupDialog(node, false);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
+  }
+});
+
+$("#forceDeleteNodeButton").addEventListener("click", async () => {
+  const node = inventoryNode(value("nodeId"));
+  if (!node) return;
+  const confirmation = `遗忘 ${node.id}`;
+  const counts = [
+    ["sessions", state.inventory.sessions.filter((item) => item.nodeId === node.id).length],
+    ["Peers", state.inventory.peers.filter((item) => item.nodeId === node.id).length],
+    ["Defines", state.inventory.defines.filter((item) => item.nodeId === node.id).length],
+    ["Functions", state.inventory.functions.filter((item) => item.nodeId === node.id).length],
+    ["Filters", state.inventory.filters.filter((item) => item.nodeId === node.id).length],
+    ["RPKI", state.inventory.rpki.filter((item) => item.nodeId === node.id).length],
+  ].map(([label, count]) => `${label} ${count}`).join("、");
+  if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将级联删除 ${counts}，且不会清理远端配置。`)) return;
+  if (window.prompt(`请输入“${confirmation}”以确认：`) !== confirmation) return;
+  const button = $("#forceDeleteNodeButton");
+  setButtonLoading(button, true, "正在遗忘");
+  setFormPending($("#nodeForm"), true);
+  try {
+    await api(`/api/nodes/${node.id}?force=true`, { method: "DELETE" });
+    await loadDashboard();
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
+    elements.nodeDialog.close();
+    showNodeCleanupDialog(node, true);
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#nodeForm"), false);
+  }
 });
 
 $("#deletePeerButton").addEventListener("click", async () => {
   const peer = state.inventory.peers.find((item) => item.id === value("peerId"));
   if (!peer) return;
   if (!window.confirm(`删除 Peer ${peer.name}？`)) return;
+  const button = $("#deletePeerButton");
+  setButtonLoading(button, true, "正在删除");
+  setFormPending($("#peerForm"), true);
   try {
     await api(`/api/peers/${peer.id}`, { method: "DELETE" });
+    await loadDashboard(peer.nodeId);
+    setButtonLoading(button, false);
+    setFormPending($("#peerForm"), false);
     elements.peerDialog.close();
     toast("Peer 已删除", "success");
-    await loadDashboard(peer.nodeId);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#peerForm"), false);
+  }
 });
 
 $("#deletePolicyResourceButton").addEventListener("click", async () => {
   const collection = value("policyResourceKind");
   const resource = state.inventory[collection].find((item) => item.id === value("policyResourceId"));
   if (!resource || !window.confirm(`删除 ${policyKindLabel(collection)} ${resource.name}？`)) return;
+  const button = $("#deletePolicyResourceButton");
+  setButtonLoading(button, true, "正在删除");
+  setFormPending($("#policyResourceForm"), true);
   try {
     await api(`/api/${collection}/${resource.id}`, { method: "DELETE" });
+    await loadDashboard(resource.nodeId ?? currentNode()?.id, currentPeer()?.id);
+    activateResourceTab(collection);
+    setButtonLoading(button, false);
+    setFormPending($("#policyResourceForm"), false);
     elements.policyResourceDialog.close();
     toast(`${policyKindLabel(collection)} 已删除`, "success");
-    await loadDashboard(resource.nodeId ?? currentNode().id, currentPeer()?.id);
-    activateResourceTab(collection);
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#policyResourceForm"), false);
+  }
 });
 
 $("#deleteRPKIButton").addEventListener("click", async () => {
   const resource = state.inventory.rpki.find((item) => item.id === value("rpkiId"));
   if (!resource || !window.confirm(`删除 RPKI ${resource.name}？`)) return;
+  const button = $("#deleteRPKIButton");
+  setButtonLoading(button, true, "正在删除");
+  setFormPending($("#rpkiForm"), true);
   try {
     await api(`/api/rpki/${resource.id}`, { method: "DELETE" });
-    elements.rpkiDialog.close();
-    toast("RPKI 已删除", "success");
     await loadDashboard(currentNode()?.id, currentPeer()?.id);
     activateResourceTab("rpki");
+    setButtonLoading(button, false);
+    setFormPending($("#rpkiForm"), false);
+    elements.rpkiDialog.close();
+    toast("RPKI 已删除", "success");
   } catch (error) { toast(error.message, "error"); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#rpkiForm"), false);
+  }
 });
 
 elements.sessionForm.addEventListener("submit", async (event) => { event.preventDefault(); await previewSession(); });
 elements.apply.addEventListener("click", () => {
   if (!sessionFormValid(true)) return;
+  cancelPendingPreview();
   $("#dialogLocal").textContent = `${value("sessionLocalAddress")} · AS${value("sessionLocalAsn")}`;
   $("#dialogRemote").textContent = `${currentPeer().name} · AS${currentPeer().asn}`;
   elements.applyDialog.showModal();
 });
-$("#confirmApplyButton").addEventListener("click", (event) => { event.preventDefault(); applySession(); });
+$("#confirmApplyButton").addEventListener("click", (event) => { event.preventDefault(); void applySession(); });
 
 elements.removeSession.addEventListener("click", async () => {
   const session = currentPeer()?.session;
@@ -2349,4 +2813,5 @@ $$('.tab').forEach((tab) => tab.addEventListener("click", () => {
 const configTabs = $$(".tab");
 configTabs.forEach((tab) => tab.addEventListener("keydown", (event) => moveTabFocus(event, configTabs, (target) => target.click())));
 
+initializeTheme();
 initializeAuthentication();

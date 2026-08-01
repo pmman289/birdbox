@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
+  checkIncludeNodeAccess,
+  configureManagedSsh,
   normalizeNode,
   normalizeDefine,
   normalizePeer,
@@ -127,6 +132,11 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
     /必须选择 CIDR Define/,
   );
   assert.equal(normalizeSession({ ...sessions[0], enabled: false }).enabled, false);
+  assert.throws(() => normalizePeer({ ...peers[0], name: "Bad\npeer" }), /控制字符/);
+  assert.throws(
+    () => normalizeSession({ ...sessions[0], bgp: { description: "Bad\rdescription" } }),
+    /控制字符/,
+  );
 });
 
 test("normalizes SSH Include onboarding nodes without daemon-owned declarations", () => {
@@ -151,6 +161,10 @@ test("normalizes SSH Include onboarding nodes without daemon-owned declarations"
   assert.throws(
     () => normalizeNode({ ...includeNode, transport: "local" }),
     /Include 节点必须使用 SSH/,
+  );
+  assert.throws(
+    () => normalizeNode({ ...includeNode, sshHost: "-oProxyCommand=unexpected" }),
+    /SSH 目标不合法/,
   );
 });
 
@@ -178,6 +192,20 @@ test("validates inventory ownership and eBGP constraints", () => {
   assert.throws(
     () => validateInventory({ nodes: [node], peers: [peers[0]], defines: [{ ...expressionDefines[0], id: "prefix_transit" }], sessions: [sessions[0]] }),
     /CIDR Define 对所选节点不可用/,
+  );
+  const sshNode = {
+    ...node,
+    id: "ssh_one",
+    name: "SSH one",
+    transport: "ssh",
+    sshHost: "router.example",
+  };
+  assert.throws(
+    () => validateInventory({
+      nodes: [sshNode, { ...sshNode, id: "ssh_two", name: "SSH two", sshHost: "ROUTER.EXAMPLE" }],
+      peers: [], defines: [], sessions: [],
+    }),
+    /同一个 SSH 配置部署目标/,
   );
 });
 
@@ -813,6 +841,67 @@ test("rejects command execution for an external Peer object", async () => {
   );
 });
 
+test("streams node command input without embedding it in the command", async () => {
+  const result = await runOnNode(
+    node,
+    "IFS= read -r payload; test \"$payload\" = 'sensitive-routing-config'; printf 'received'",
+    { input: "sensitive-routing-config\n" },
+  );
+  assert.deepEqual(result, { ok: true, stdout: "received", stderr: "" });
+});
+
+test("requires an active BIRD include instead of accepting commented directives", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-include-check-"));
+  const binDir = path.join(root, "bin");
+  const configDir = path.join(root, "config");
+  const versionsDir = path.join(configDir, "versions");
+  const mainConfigPath = path.join(root, "bird.conf");
+  const generatedConfigPath = path.join(configDir, "generated.conf");
+  const originalPath = process.env.PATH;
+  context.after(async () => {
+    process.env.PATH = originalPath;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.mkdir(versionsDir, { recursive: true });
+  await fs.writeFile(path.join(versionsDir, "initial.conf"), "# initial\n");
+  await fs.symlink("versions/initial.conf", generatedConfigPath);
+  await fs.writeFile(path.join(binDir, "ssh"), `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const command = process.argv.at(-1)
+  .replace(/^test -S .*$/m, "true")
+  .replace(/^birdc .*$/m, "true");
+const result = spawnSync("/bin/sh", ["-c", command], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
+  process.env.PATH = `${binDir}:${originalPath}`;
+  configureManagedSsh({
+    identityFile: path.join(root, "unused-identity"),
+    knownHostsFile: path.join(root, "unused-known-hosts"),
+  });
+  const includeLine = `include "${generatedConfigPath}";`;
+  const includeNode = normalizeNode({
+    id: "include_check",
+    name: "Include check",
+    transport: "ssh",
+    sshHost: "router.example",
+    sshUser: "birdbox",
+    sshIdentity: "managed",
+    deploymentMode: "include",
+    mainConfigPath,
+    generatedConfigPath,
+    socketPath: path.join(root, "bird.ctl"),
+    routerId: "192.0.2.1",
+  });
+
+  await fs.writeFile(mainConfigPath, `/*\n${includeLine}\n*/\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
+  await fs.writeFile(mainConfigPath, `// ${includeLine}\n# ${includeLine}\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
+  await fs.writeFile(mainConfigPath, `/* managed include */ ${includeLine} # active\n`);
+  assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
+});
+
 test("parses multiple BGP protocol states independently", () => {
   const result = parseProtocolStatuses(`
 1002-transit_bgp BGP --- up 10:00:00 Established
@@ -830,6 +919,7 @@ test("parses multiple BGP protocol states independently", () => {
   assert.deepEqual(result[0], {
     name: "transit_bgp",
     configured: true,
+    disabled: false,
     state: "Established",
     established: true,
     neighbor: "192.0.2.2",
@@ -840,4 +930,13 @@ test("parses multiple BGP protocol states independently", () => {
   assert.equal(result[1].name, "ix_bgp");
   assert.equal(result[1].state, "Active");
   assert.equal(result[1].established, false);
+
+  const [disabled] = parseProtocolStatuses(`
+1002-paused_bgp BGP --- down 10:00:02 Admin down
+1006-  BGP state:          Idle
+         Neighbor address: 192.0.2.4
+         Neighbor AS:      65004
+  `);
+  assert.equal(disabled.disabled, true);
+  assert.equal(disabled.established, false);
 });

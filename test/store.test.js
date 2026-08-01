@@ -5,6 +5,71 @@ import os from "node:os";
 import path from "node:path";
 
 import { InventoryStore } from "../src/store.js";
+import { MemoryDatabase } from "../src/database.js";
+
+test("confirms an inventory CAS that committed before its response was lost", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-confirm-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  class AmbiguousCommitDatabase extends MemoryDatabase {
+    failAfterCommit = false;
+
+    async replaceState(...args) {
+      const result = await super.replaceState(...args);
+      if (this.failAfterCommit) {
+        this.failAfterCommit = false;
+        const error = new Error("connection lost after commit");
+        error.code = "ECONNRESET";
+        throw error;
+      }
+      return result;
+    }
+  }
+  const database = new AmbiguousCommitDatabase();
+  const initial = { version: 17, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
+  await database.createState("inventory", initial);
+  const store = new InventoryStore({
+    database,
+    dataDir: root,
+    nodesPath: path.join(root, "nodes.json"),
+    legacySessionPath: path.join(root, "session.json"),
+  });
+  const current = await store.read();
+  const target = { ...current, defines: [{
+    id: "define_confirmed", nodeId: null, label: "Confirmed", name: "CONFIRMED", type: "expression", value: "1", enabled: true,
+  }] };
+  database.failAfterCommit = true;
+
+  const replaced = await store.replace(current, target);
+  assert.deepEqual(replaced, target);
+  assert.equal((await database.readState("inventory")).revision, 2);
+});
+
+test("refuses a newer inventory format without changing the stored document", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-newer-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  const database = new MemoryDatabase();
+  const futureInventory = {
+    version: 18,
+    futureOnly: { preserve: true },
+    nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [],
+  };
+  await database.createState("inventory", futureInventory);
+  const store = new InventoryStore({
+    database,
+    dataDir,
+    nodesPath: path.join(root, "nodes.json"),
+    legacySessionPath: path.join(dataDir, "session.json"),
+  });
+
+  await assert.rejects(
+    () => store.initialize(),
+    (error) => error.code === "INVENTORY_VERSION_TOO_NEW" && error.status === 409,
+  );
+  const persisted = await database.readState("inventory");
+  assert.equal(persisted.revision, 1);
+  assert.deepEqual(persisted.value, futureInventory);
+});
 
 test("migrates node-level BGP settings and advertised prefixes to schema v17", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-"));
@@ -35,12 +100,12 @@ test("migrates node-level BGP settings and advertised prefixes to schema v17", a
   }));
 
   const store = new InventoryStore({
+    database: new MemoryDatabase(),
     dataDir,
     nodesPath: path.join(root, "unused-nodes.json"),
     legacySessionPath: path.join(dataDir, "session.json"),
   });
   const state = await store.read();
-  const persisted = JSON.parse(await fs.readFile(path.join(dataDir, "inventory.json"), "utf8"));
 
   assert.equal(state.version, 17);
   assert.equal(state.nodes[0].address, undefined);
@@ -65,7 +130,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v17", a
   assert.equal(state.prefixLists, undefined);
   assert.deepEqual(state.sessions[0].channels.ipv4.importPolicy, { mode: "form", steps: [], filterId: null, formAction: "all" });
   assert.deepEqual(state.sessions[0].channels.ipv4.exportPolicy, { mode: "form", steps: [], filterId: null, formAction: "cidr" });
-  assert.deepEqual(persisted, state);
+  assert.deepEqual(await store.read(), state);
 });
 
 test("migrates v8 Function order and combined policies to ordered v17 channel steps", async (context) => {
@@ -93,6 +158,7 @@ test("migrates v8 Function order and combined policies to ordered v17 channel st
   }));
 
   const store = new InventoryStore({
+    database: new MemoryDatabase(),
     dataDir,
     nodesPath: path.join(root, "unused-nodes.json"),
     legacySessionPath: path.join(dataDir, "session.json"),
@@ -136,6 +202,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v17 session 
   }));
 
   const store = new InventoryStore({
+    database: new MemoryDatabase(),
     dataDir,
     nodesPath: path.join(root, "unused-nodes.json"),
     legacySessionPath: path.join(dataDir, "session.json"),
@@ -178,7 +245,7 @@ test("migrates v14 export policy and Static settings to the matching v17 IPv4 ch
     }],
   };
   await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
-  const store = new InventoryStore({ dataDir, nodesPath: "", legacySessionPath: "" });
+  const store = new InventoryStore({ database: new MemoryDatabase(), dataDir, nodesPath: "", legacySessionPath: "" });
   const state = await store.read();
   assert.equal(state.version, 17);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");

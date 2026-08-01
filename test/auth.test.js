@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -26,6 +27,7 @@ async function waitForHealth(port) {
 }
 
 function stopProcess(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => {
     child.once("exit", resolve);
     child.kill("SIGTERM");
@@ -34,6 +36,29 @@ function stopProcess(child) {
 
 function responseCookie(response) {
   return response.headers.get("set-cookie").split(";", 1)[0];
+}
+
+function openSlowLogin(port, body) {
+  let request;
+  const response = new Promise((resolve, reject) => {
+    request = http.request({
+      host: "127.0.0.1",
+      port,
+      path: "/api/auth/login",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+      },
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on("data", (chunk) => chunks.push(chunk));
+      incoming.on("end", () => resolve({ status: incoming.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }));
+    });
+    request.on("error", reject);
+    request.flushHeaders();
+  });
+  return { request, response };
 }
 
 test("supports password setup and enforces one active admin session", async (context) => {
@@ -45,6 +70,8 @@ test("supports password setup and enforces one active admin session", async (con
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,
+      NODE_ENV: "test",
+      BIRDBOX_DATABASE_URL: "memory:",
       BIRDBOX_PORT: String(port),
       BIRDBOX_DATA_DIR: dataDir,
       BIRDBOX_NODES_FILE: path.join(root, "nodes.json"),
@@ -55,8 +82,18 @@ test("supports password setup and enforces one active admin session", async (con
   context.after(() => stopProcess(child));
   await waitForHealth(port);
 
+  const documentResponse = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(documentResponse.status, 200);
+  assert.match(documentResponse.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  assert.equal(documentResponse.headers.get("x-frame-options"), "DENY");
+  assert.match(documentResponse.headers.get("permissions-policy"), /camera=\(\)/);
+
   const initial = await requestJson(port, "/api/auth/status");
   assert.deepEqual(initial.body, { configured: false, authenticated: false, username: "admin", singleSession: true });
+
+  const invalidJsonShape = await requestJson(port, "/api/auth/login", { method: "POST", body: "null" });
+  assert.equal(invalidJsonShape.status, 400);
+  assert.match(invalidJsonShape.body.error, /合法对象/);
 
   const unauthorized = await requestJson(port, "/api/dashboard");
   assert.equal(unauthorized.status, 401);
@@ -77,10 +114,34 @@ test("supports password setup and enforces one active admin session", async (con
   assert.match(setup.headers.get("set-cookie"), /birdbox_session=.*HttpOnly; SameSite=Strict/);
   const firstCookie = responseCookie(setup);
   assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: firstCookie } })).body.authenticated, true);
+  const emptyDashboard = await requestJson(port, "/api/dashboard", { headers: { cookie: firstCookie } });
+  assert.equal(emptyDashboard.status, 200);
+  assert.equal(emptyDashboard.body.node, null);
+  assert.deepEqual(emptyDashboard.body.peers, []);
 
-  const authFile = await fs.readFile(path.join(dataDir, "auth.json"), "utf8");
-  assert.doesNotMatch(authFile, new RegExp(firstPassword));
-  assert.equal((await fs.stat(path.join(dataDir, "auth.json"))).mode & 0o777, 0o600);
+  const setupScript = await requestJson(port, "/api/nodes/setup-script", {
+    method: "POST",
+    headers: { cookie: firstCookie },
+    body: JSON.stringify({
+      name: "Test SSH node",
+      sshHost: "router.example",
+      sshUser: "birdbox",
+      routerId: "192.0.2.1",
+    }),
+  });
+  assert.equal(setupScript.status, 200);
+  assert.match(setupScript.body.script, /不能是符号链接/);
+  assert.match(setupScript.body.script, /grep -Fx -- "\$KEY_LINE"/);
+  const shellCheck = spawn("sh", ["-n"], { stdio: ["pipe", "ignore", "pipe"] });
+  let shellError = "";
+  shellCheck.stderr.setEncoding("utf8");
+  shellCheck.stderr.on("data", (chunk) => { shellError += chunk; });
+  shellCheck.stdin.end(setupScript.body.script);
+  const shellExitCode = await new Promise((resolve, reject) => {
+    shellCheck.once("error", reject);
+    shellCheck.once("exit", resolve);
+  });
+  assert.equal(shellExitCode, 0, shellError);
 
   const wrongLogin = await requestJson(port, "/api/auth/login", {
     method: "POST",
@@ -143,4 +204,86 @@ test("supports password setup and enforces one active admin session", async (con
   assert.equal(logout.status, 200);
   assert.match(logout.headers.get("set-cookie"), /Max-Age=0/);
   assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: finalCookie } })).body.authenticated, false);
+
+  const loginBody = JSON.stringify({ password: "incorrect-password" });
+  const slowFailures = Array.from({ length: 5 }, () => openSlowLogin(port, loginBody));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const limitedFailures = await Promise.all(Array.from({ length: 3 }, () => requestJson(port, "/api/auth/login", {
+    method: "POST",
+    body: loginBody,
+  })));
+  assert.ok(limitedFailures.every((result) => result.status === 429));
+  for (const slow of slowFailures) slow.request.end(loginBody);
+  const completedFailures = await Promise.all(slowFailures.map((item) => item.response));
+  assert.ok(completedFailures.every((result) => result.status === 401));
+});
+
+test("rejects an invalid listen port before startup", async () => {
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      BIRDBOX_DATABASE_URL: "memory:",
+      BIRDBOX_PORT: "70000",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+  assert.notEqual(exitCode, 0);
+  assert.match(stderr, /BIRDBOX_PORT 必须是 1 到 65535 之间的整数/);
+});
+
+test("refuses to rotate a missing controller SSH identity for an existing managed node", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ssh-identity-required-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  await fs.mkdir(dataDir, { recursive: true });
+  await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify({
+    version: 17,
+    nodes: [{
+      id: "node_existing",
+      name: "Existing managed node",
+      transport: "ssh",
+      sshHost: "router.example",
+      sshPort: 22,
+      sshUser: "birdbox",
+      sshIdentity: "managed",
+      deploymentMode: "include",
+      mainConfigPath: "/etc/bird/bird.conf",
+      generatedConfigPath: "/var/lib/birdbox/generated.conf",
+      socketPath: "/run/bird/bird.ctl",
+      routerId: "192.0.2.1",
+      listenPort: 179,
+    }],
+    peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [],
+  }));
+  const child = spawn(process.execPath, ["src/server.js"], {
+    cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      BIRDBOX_DATABASE_URL: "memory:",
+      BIRDBOX_PORT: "39998",
+      BIRDBOX_DATA_DIR: dataDir,
+      BIRDBOX_NODES_FILE: path.join(root, "nodes.json"),
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const exitCode = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", resolve);
+  });
+  assert.notEqual(exitCode, 0);
+  assert.match(stderr, /SSH 私钥缺失.*拒绝静默轮换身份/);
+  await assert.rejects(() => fs.access(path.join(dataDir, "ssh", "id_ed25519")), (error) => error.code === "ENOENT");
 });

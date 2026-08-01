@@ -69,6 +69,7 @@ function normalizeId(value, label) {
 function normalizeLabel(value, label) {
   const text = String(value ?? "").trim();
   assert(text.length >= 1 && text.length <= 80, `${label}长度应为 1 到 80 个字符`);
+  assert(!/[\u0000-\u001f\u007f]/.test(text), `${label}不能包含控制字符`);
   return text;
 }
 
@@ -95,7 +96,7 @@ function normalizeOptionalString(value, label, maximum = 255) {
   if (value === null || value === undefined || value === "") return null;
   const text = String(value).replaceAll("\r\n", "\n").trim();
   assert(text.length >= 1 && text.length <= maximum, `${label}长度应为 1 到 ${maximum} 个字符`);
-  assert(!text.includes("\0") && !text.includes("\n"), `${label}不能包含换行或空字符`);
+  assert(!/[\u0000-\u001f\u007f]/.test(text), `${label}不能包含控制字符`);
   return text;
 }
 
@@ -345,7 +346,7 @@ export function normalizeNode(input) {
   const transport = input.transport ?? "ssh";
   assert(transport === "local" || transport === "ssh", "节点管理方式不合法");
   const sshHost = transport === "ssh" ? String(input.sshHost ?? "").trim() : null;
-  if (transport === "ssh") assert(HOST_RE.test(sshHost), "SSH 目标不合法");
+  if (transport === "ssh") assert(HOST_RE.test(sshHost) && !sshHost.startsWith("-"), "SSH 目标不合法");
   const deploymentMode = normalizeEnum(input.deploymentMode, DEPLOYMENT_MODES, "legacy", "节点部署模式");
   const sshIdentity = normalizeEnum(input.sshIdentity, SSH_IDENTITY_MODES, deploymentMode === "include" ? "managed" : "default", "SSH 凭据模式");
   const sshUser = transport === "ssh" && input.sshUser !== null && input.sshUser !== undefined && input.sshUser !== ""
@@ -963,9 +964,12 @@ export function validateInventory(input) {
   const filters = (input.filters ?? []).map(normalizePolicyFilter);
   const rpki = (input.rpki ?? []).map(normalizeRPKISource);
   const sessions = (input.sessions ?? []).map(normalizeSession);
-  assert(nodes.length >= 1, "至少需要一个受管节点");
   assert(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
   assert(nodes.filter((item) => item.transport === "local").length <= 1, "只能配置一个本机节点");
+  const deploymentTargets = nodes.filter((item) => item.transport === "ssh").map((item) =>
+    `${item.sshHost.toLowerCase()}:${item.sshPort}:${item.generatedConfigPath}`,
+  );
+  assert(new Set(deploymentTargets).size === deploymentTargets.length, "多个节点不能使用同一个 SSH 配置部署目标");
   assert(new Set(peers.map((item) => item.id)).size === peers.length, "Peer ID 重复");
   assert(new Set(defines.map((item) => item.id)).size === defines.length, "Define ID 重复");
   assert(new Set(functions.map((item) => item.id)).size === functions.length, "Function ID 重复");
@@ -1447,6 +1451,8 @@ function sshArgs(node, remoteCommand) {
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=8",
     "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "HashKnownHosts=yes",
+    "-o", "UpdateHostKeys=yes",
   ];
   if (node.sshPort !== 22) args.push("-p", String(node.sshPort));
   if (node.sshIdentity === "managed") {
@@ -1461,8 +1467,26 @@ function sshArgs(node, remoteCommand) {
   // though BIRD is installed there. Keep command execution independent of a
   // user's login shell profile while retaining the node's normal PATH.
   const commandWithSystemPath = `PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH; export PATH; ${remoteCommand}`;
-  args.push(node.sshUser ? `${node.sshUser}@${node.sshHost}` : node.sshHost, commandWithSystemPath);
+  args.push("--", node.sshUser ? `${node.sshUser}@${node.sshHost}` : node.sshHost, commandWithSystemPath);
   return args;
+}
+
+function execFileWithInput(executable, args, options, input) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(executable, args, options, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    // A remote command can reject input before SSH has consumed it. Its exit
+    // status is the useful error in that case, not the resulting EPIPE.
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  });
 }
 
 export async function runOnNode(nodeInput, command, options = {}) {
@@ -1473,7 +1497,9 @@ export async function runOnNode(nodeInput, command, options = {}) {
   try {
     const executable = node.transport === "local" ? "bash" : "ssh";
     const args = node.transport === "local" ? ["-lc", command] : sshArgs(node, command);
-    const result = await execFileAsync(executable, args, { timeout, maxBuffer });
+    const result = options.input === undefined
+      ? await execFileAsync(executable, args, { timeout, maxBuffer })
+      : await execFileWithInput(executable, args, { timeout, maxBuffer }, options.input);
     return { ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
   } catch (error) {
     return {
@@ -1522,7 +1548,34 @@ export async function checkIncludeNodeAccess(nodeInput) {
     `test -d '${directory}'`,
     `test -w '${directory}'`,
     `test -L '${node.generatedConfigPath}'`,
-    `grep -F '${includeLine}' '${node.mainConfigPath}' >/dev/null`,
+    `awk -v expected='${includeLine}' '
+      {
+        source = $0
+        line = ""
+        for (cursor = 1; cursor <= length(source);) {
+          pair = substr(source, cursor, 2)
+          if (in_block_comment) {
+            ending = index(substr(source, cursor), "*/")
+            if (!ending) break
+            cursor += ending + 1
+            in_block_comment = 0
+            continue
+          }
+          if (pair == "/*") {
+            in_block_comment = 1
+            cursor += 2
+            continue
+          }
+          if (pair == "//" || substr(source, cursor, 1) == "#") break
+          line = line substr(source, cursor, 1)
+          cursor += 1
+        }
+        sub(/^[[:space:]]*/, "", line)
+        sub(/[[:space:]]*$/, "", line)
+        if (line == expected) found = 1
+      }
+      END { exit found ? 0 : 1 }
+    ' '${node.mainConfigPath}'`,
     `birdc -s '${node.socketPath}' 'show status'`,
     "printf '\n---BIRDBOX-ACCESS---\n'",
     "id -un",
@@ -1533,6 +1586,7 @@ export async function checkIncludeNodeAccess(nodeInput) {
 
 export function parseProtocolStatus(raw) {
   const text = String(raw ?? "");
+  const header = text.match(/^1002-[^\s]+\s+BGP\b[^\r\n]*$/m)?.[0] ?? "";
   const state = text.match(/BGP state:\s+([^\r\n]+)/i)?.[1]?.trim() ?? null;
   const bgpSection = state ? text.slice(text.search(/BGP state:/i)) : text;
   const neighbor = text.match(/Neighbor address:\s+([^\s]+)/i)?.[1] ?? null;
@@ -1540,6 +1594,7 @@ export function parseProtocolStatus(raw) {
   const routes = bgpSection.match(/Routes:\s+(\d+) imported,\s+(\d+) exported/i);
   return {
     configured: text.length > 0 && !/Unable to connect/i.test(text),
+    disabled: /\b(?:Admin down|Disabled)\b/i.test(header),
     state,
     established: state?.toLowerCase() === "established",
     neighbor,
@@ -1560,7 +1615,6 @@ export function parseProtocolStatuses(raw) {
 
 export async function stageAndValidate(node, config) {
   const normalizedNode = normalizeNode(node);
-  const encoded = Buffer.from(config, "utf8").toString("base64");
   if (normalizedNode.deploymentMode === "include") {
     const activePath = normalizedNode.generatedConfigPath;
     const directory = path.posix.dirname(activePath);
@@ -1572,39 +1626,50 @@ export async function stageAndValidate(node, config) {
     const switchLink = `${activePath}.switch`;
     const command = [
       "set -eu",
+      "umask 0077",
       `test -S '${normalizedNode.socketPath}'`,
       `test -L '${activePath}'`,
       `test -w '${directory}'`,
       `install -d -m 0750 '${directory}/versions'`,
-      `printf '%s' '${encoded}' | base64 -d > '${versionPath}.tmp'`,
+      `chgrp bird '${directory}/versions'`,
+      `chmod 0750 '${directory}/versions'`,
+      `current_target=$(readlink '${activePath}')`,
+      `current_file=$(readlink -f '${activePath}')`,
+      "test -n \"$current_target\"",
+      "test -n \"$current_file\"",
+      `cleanup_staged_versions() { for file in '${directory}/versions/'${basename}.*.conf '${directory}/versions/'${basename}.*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file"); if [ "$file_target" != "$current_file" ]; then rm -f -- "$file"; fi; done; }`,
+      "cleanup_staged_versions",
+      `cat > '${versionPath}.tmp'`,
       `chgrp bird '${versionPath}.tmp'`,
       `chmod 0640 '${versionPath}.tmp'`,
       `mv -f '${versionPath}.tmp' '${versionPath}'`,
       `ln -sfn '${candidateTarget}' '${candidateLink}'`,
-      `current_target=$(readlink '${activePath}')`,
-      "test -n \"$current_target\"",
       `restore_active() { ln -sfn "$current_target" '${switchLink}'; mv -f '${switchLink}' '${activePath}'; }`,
       "trap restore_active EXIT HUP INT TERM",
       `ln -sfn '${candidateTarget}' '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
       `birdc -s '${normalizedNode.socketPath}' 'configure check'`,
     ].join("\n");
-    return runOnNode(normalizedNode, command, { timeout: 15000 });
+    return runOnNode(normalizedNode, command, { timeout: 15000, input: config });
   }
   const command = [
+    "set -eu",
+    "umask 0077",
     `install -d -o bird -g bird -m 0750 '${RUNTIME.baseDir}'`,
-    `printf '%s' '${encoded}' | base64 -d > '${RUNTIME.configPath}.candidate'`,
+    `cat > '${RUNTIME.configPath}.candidate'`,
     `chown bird:bird '${RUNTIME.configPath}.candidate'`,
     `chmod 0640 '${RUNTIME.configPath}.candidate'`,
     `bird -p -c '${RUNTIME.configPath}.candidate'`,
-  ].join(" && ");
-  return runOnNode(node, command, { timeout: 15000 });
+  ].join("\n");
+  return runOnNode(node, command, { timeout: 15000, input: config });
 }
 
 export async function applyStagedConfig(node) {
   const normalizedNode = normalizeNode(node);
   if (normalizedNode.deploymentMode === "include") {
     const activePath = normalizedNode.generatedConfigPath;
+    const directory = path.posix.dirname(activePath);
+    const basename = path.posix.basename(activePath);
     const candidateLink = `${activePath}.candidate`;
     const rollbackLink = `${activePath}.rollback`;
     const switchLink = `${activePath}.switch`;
@@ -1614,12 +1679,17 @@ export async function applyStagedConfig(node) {
       `test -L '${candidateLink}'`,
       `current_target=$(readlink '${activePath}')`,
       `candidate_target=$(readlink '${candidateLink}')`,
+      `current_file=$(readlink -f '${activePath}')`,
+      `candidate_file=$(readlink -f '${candidateLink}')`,
       "test -n \"$current_target\"",
       "test -n \"$candidate_target\"",
+      "test -n \"$current_file\"",
+      "test -n \"$candidate_file\"",
       `ln -sfn "$current_target" '${rollbackLink}'`,
       `ln -sfn "$candidate_target" '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
-      `if birdc -s '${normalizedNode.socketPath}' 'configure check' && birdc -s '${normalizedNode.socketPath}' configure; then exit 0; fi`,
+      `cleanup_versions() { for file in '${directory}/versions/'${basename}.*.conf '${directory}/versions/'${basename}.*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file"); if [ "$file_target" != "$candidate_file" ] && [ "$file_target" != "$current_file" ]; then rm -f -- "$file"; fi; done; }`,
+      `if birdc -s '${normalizedNode.socketPath}' 'configure check' && birdc -s '${normalizedNode.socketPath}' configure; then cleanup_versions || true; exit 0; fi`,
       `ln -sfn "$current_target" '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
       `birdc -s '${normalizedNode.socketPath}' configure >/dev/null 2>&1 || true`,
