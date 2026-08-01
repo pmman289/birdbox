@@ -1,4 +1,5 @@
 import { pinyin } from "/vendor/pinyin-pro.mjs";
+import { resetFormPending, setFormPending } from "/interaction-state.js";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -424,7 +425,7 @@ function setButtonLoading(button, next, label = "处理中") {
     $("#operationStatus").textContent = label;
     return;
   }
-  if (!Object.hasOwn(button.dataset, "loadingLabel")) return;
+  if (!Object.prototype.hasOwnProperty.call(button.dataset, "loadingLabel")) return;
   if (button.dataset.loadingLabel) button.textContent = button.dataset.loadingLabel;
   delete button.dataset.loadingLabel;
   const wasDisabled = button.dataset.loadingDisabled === "true";
@@ -433,21 +434,6 @@ function setButtonLoading(button, next, label = "处理中") {
   button.removeAttribute("aria-busy");
   button.disabled = wasDisabled;
   $("#operationStatus").textContent = "";
-}
-
-function setFormPending(form, next) {
-  if (!form) return;
-  if (next) {
-    if (!form.dataset.pendingInert) form.dataset.pendingInert = String(form.inert === true);
-    form.inert = true;
-    form.setAttribute("aria-busy", "true");
-    return;
-  }
-  if (!Object.hasOwn(form.dataset, "pendingInert")) return;
-  const wasInert = form.dataset.pendingInert === "true";
-  delete form.dataset.pendingInert;
-  form.inert = wasInert;
-  form.removeAttribute("aria-busy");
 }
 
 function currentSessionContext() {
@@ -2336,6 +2322,9 @@ function handlePolicySourceKeydown(event) {
 }
 
 function openPolicyResourceDialog(collection, resource = null) {
+  resetFormPending($("#policyResourceForm"));
+  setButtonLoading($("#savePolicyResourceButton"), false);
+  setButtonLoading($("#deletePolicyResourceButton"), false);
   const kind = policyKindLabel(collection);
   $("#policyResourceDialogTitle").textContent = `${resource ? "编辑" : "添加"} ${kind}`;
   $("#policyResourceIcon").textContent = collection === "functions" ? "ƒ" : collection === "filters" ? "F" : "D";
@@ -2387,6 +2376,7 @@ async function movePolicyResource(collection, resourceId, direction, button) {
 async function savePolicyResource(event) {
   event.preventDefault();
   if (!event.currentTarget.reportValidity()) return;
+  const form = event.currentTarget;
   const id = value("policyResourceId");
   const collection = value("policyResourceKind");
   const kind = policyKindLabel(collection);
@@ -2406,7 +2396,7 @@ async function savePolicyResource(event) {
   };
   const saveButton = $("#savePolicyResourceButton");
   setButtonLoading(saveButton, true, "正在预检");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   try {
     const result = await api(id ? `/api/${collection}/${id}` : `/api/${collection}`, {
       method: id ? "PUT" : "POST",
@@ -2414,15 +2404,13 @@ async function savePolicyResource(event) {
     });
     await loadDashboard(body.nodeId ?? currentNode()?.id, currentPeer()?.id);
     activateResourceTab(collection);
-    setButtonLoading(saveButton, false);
-    setFormPending(event.currentTarget, false);
     elements.policyResourceDialog.close();
     toast(`${kind} 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
   } catch (error) {
     toast(error.message, "error");
   } finally {
+    setFormPending(form, false);
     setButtonLoading(saveButton, false);
-    setFormPending(event.currentTarget, false);
   }
 }
 
