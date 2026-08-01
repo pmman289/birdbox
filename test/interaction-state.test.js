@@ -46,3 +46,14 @@ test("force-resets state left by an interrupted resource edit", () => {
   assert.equal(form.hasAttribute("inert"), false);
   assert.equal(form.hasAttribute("aria-busy"), false);
 });
+
+test("can start a new operation after a pending form is reset for reopening", () => {
+  const form = fakeForm();
+  setFormPending(form, true);
+  resetFormPending(form);
+  setFormPending(form, true);
+  setFormPending(form, false);
+  assert.equal(form.inert, false);
+  assert.equal(form.hasAttribute("inert"), false);
+  assert.equal(form.hasAttribute("aria-busy"), false);
+});

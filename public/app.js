@@ -2142,7 +2142,16 @@ async function testNodeConnection() {
 }
 
 function openPeerDialog(peer = null) {
-  const selectedNodeId = peer?.nodeId ?? currentNode().id;
+  const selectedNodeId = peer?.nodeId ?? currentNode()?.id;
+  if (!selectedNodeId) {
+    toast("请先添加受管节点", "error");
+    return;
+  }
+  if (elements.peerDialog.open) elements.peerDialog.close();
+  resetFormPending($("#peerForm"));
+  clearFormValidation($("#peerForm"));
+  setButtonLoading($("#savePeerButton"), false);
+  setButtonLoading($("#deletePeerButton"), false);
   $("#peerDialogTitle").textContent = peer ? "编辑外部 Peer" : "添加外部 Peer";
   $("#peerId").value = peer?.id ?? "";
   $("#peerEditorNodeId").innerHTML = nodeOptions(selectedNodeId);
@@ -2970,7 +2979,15 @@ $$('form[id]').forEach((form) => {
   form.addEventListener("reset", () => requestAnimationFrame(() => clearFormValidation(form)));
 });
 $$('dialog').forEach((dialog) => dialog.addEventListener("close", () => {
-  dialog.querySelectorAll("form").forEach(clearFormValidation);
+  dialog.querySelectorAll("form").forEach((form) => {
+    resetFormPending(form);
+    clearFormValidation(form);
+  });
+}));
+$$('dialog').forEach((dialog) => dialog.addEventListener("cancel", (event) => {
+  if (!dialog.querySelector('form[aria-busy="true"]')) return;
+  event.preventDefault();
+  toast("操作正在进行，请稍候", "error");
 }));
 
 initializeTheme();

@@ -967,13 +967,7 @@ function prepareSession(state, payload) {
 
 async function stageSession(state, payload) {
   const prepared = prepareSession(state, payload);
-  event("info", `正在检查 ${prepared.node.name} 的候选配置`, prepared.node.id);
   const validation = await stageAndValidate(prepared.node, prepared.config);
-  event(
-    validation.ok ? "success" : "error",
-    validation.ok ? "候选配置检查通过" : (validation.stderr || "候选配置检查失败"),
-    prepared.node.id,
-  );
   return { ...prepared, validation, valid: validation.ok };
 }
 
@@ -1575,7 +1569,6 @@ async function handleApi(request, response, url) {
         staged = await stageSession(currentInventory, body);
         if (!staged.valid) return sendJson(response, 422, { error: "候选配置检查失败", ...staged, events });
         journal = await beginDeploymentJournal(currentInventory, staged.inventory, [staged.node.id], [staged.node]);
-        event("info", `正在向 ${staged.node.name} 应用配置`, staged.node.id);
         applied = true;
         const result = await applyStagedConfig(staged.node);
         if (!result.ok) fail(500, result.stderr || result.stdout || "BIRD 配置应用失败");
@@ -1583,7 +1576,6 @@ async function handleApi(request, response, url) {
         committed = true;
         await clearDeploymentJournal(journal);
         journal = null;
-        event("success", `${staged.node.name} 的 BIRD 2 实例已接受配置`, staged.node.id);
         if (!staged.session.enabled) {
           event("success", `会话 ${staged.session.protocolName} 已停用`, staged.node.id);
           return sendJson(response, 200, {

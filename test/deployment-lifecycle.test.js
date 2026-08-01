@@ -214,6 +214,10 @@ exit 0
   const previewResult = await preview;
   assert.equal(previewResult.status, 200);
   assert.equal(previewResult.body.valid, true);
+  assert.doesNotMatch(
+    previewResult.body.events.map((entry) => entry.message).join("\n"),
+    /正在检查 .*候选配置|候选配置检查通过/,
+  );
   await fs.rm(holdValidation, { force: true });
   await fs.rm(validationEntered, { force: true });
   await fs.rm(releaseValidation, { force: true });
@@ -278,6 +282,9 @@ exit 0
     }),
   });
   assert.equal(appliedSession.status, 200);
+  const appliedMessages = appliedSession.body.events.map((entry) => entry.message).join("\n");
+  assert.doesNotMatch(appliedMessages, /正在检查 .*候选配置|候选配置检查通过|正在向 .*应用配置|BIRD 2 实例已接受配置/);
+  assert.match(appliedMessages, /会话 preview_bgp 已停用/);
 
   const sshLogBeforeForce = await fs.readFile(fakeLog, "utf8");
   const forgotten = await authenticatedRequest(`/api/nodes/${nodeId}?force=true`, { method: "DELETE" });
