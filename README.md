@@ -6,8 +6,8 @@ Birdbox 适合希望通过浏览器完成以下工作的网络管理员：
 
 - 查看节点和 BGP 会话状态；
 - 创建、预检和部署 IPv4/IPv6 eBGP 会话；
-- 管理 CIDR Define、Function、Filter 和 RPKI 资源；
-- 为每个会话独立设置导入、导出、静态路由和高级 BGP 参数；
+- 管理 CIDR Define、节点级 Static Protocol、Function、Filter 和 RPKI 资源；
+- 为每个会话独立设置导入、导出和高级 BGP 参数；
 - 在配置失败时保留原库存并回滚已完成的节点部署。
 
 ## 工作方式
@@ -117,7 +117,7 @@ sudo sh birdbox-node-setup.sh
 1. 在当前节点下添加外部 Peer，填写邻居地址、ASN 和 BGP 端口。
 2. 在“会话与拓扑”中选择节点和 Peer。
 3. 填写本地地址、本地 ASN、协议名称和启用的 Address Family。
-4. 选择导入/导出策略，必要时添加 CIDR Define、静态路由或高级 BGP 参数。
+4. 选择导入/导出策略，必要时添加 CIDR Define 或高级 BGP 参数。
 5. 点击“预检”，确认生成的完整 BIRD 配置通过校验。
 6. 点击“应用”，等待节点接受配置并查看 Established 状态。
 
@@ -128,6 +128,12 @@ sudo sh birdbox-node-setup.sh
 ### Define
 
 Define 可以是全局资源，也可以只属于某个节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
+
+### Static Protocol
+
+Static 是节点级资源，不属于任何 BGP 会话。一个节点可以创建多个 IPv4 或 IPv6 Static Protocol；每个资源可选择匹配地址族的 CIDR Define 和标准路由动作，也可以填写自定义 Static 指令。Import、Export 均可独立选择 `all` 或 `none`，默认值为 `import all`、`export none`。
+
+同一前缀可以出现在多个 Static Protocol 中，但标准路由动作必须一致；Import、Export 策略可以不同。BGP 会话是否启用、编辑或删除不会修改节点 Static 资源，路由是否向某个 Peer 发布仍由该会话自己的 Export 策略决定。
 
 ### Function 和 Filter
 

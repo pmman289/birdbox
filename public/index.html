@@ -289,6 +289,7 @@
           <button id="resourceNodesTab" class="resource-tab active" type="button" role="tab" aria-selected="true" aria-controls="resource-nodes" data-resource-tab="nodes">受管节点</button>
           <button id="resourcePeersTab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-peers" data-resource-tab="peers" tabindex="-1">eBGP 远端</button>
           <button id="resourceDefinesTab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-defines" data-resource-tab="defines" tabindex="-1">Defines</button>
+          <button id="resourceStaticsTab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-statics" data-resource-tab="statics" tabindex="-1">Static</button>
           <button id="resourceFunctionsTab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-functions" data-resource-tab="functions" tabindex="-1">Functions</button>
           <button id="resourceFiltersTab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-filters" data-resource-tab="filters" tabindex="-1">Filters</button>
           <button id="resourceRPKITab" class="resource-tab" type="button" role="tab" aria-selected="false" aria-controls="resource-rpki" data-resource-tab="rpki" tabindex="-1">RPKI</button>
@@ -329,6 +330,19 @@
             <table class="ordered-resource-table">
               <thead><tr><th>Define</th><th>类型</th><th>可用范围</th><th>顺序</th><th>值</th><th>状态</th><th>引用</th><th>操作</th></tr></thead>
               <tbody id="managementDefineRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="resource-statics" class="resource-section resource-panel" role="tabpanel" aria-labelledby="resourceStaticsTitle" hidden>
+          <div class="section-heading compact">
+            <div><p class="eyebrow">Node routes</p><h3 id="resourceStaticsTitle">Static Protocols</h3></div>
+            <button id="manageAddStaticButton" class="primary-button compact-command" type="button">+ 添加 Static</button>
+          </div>
+          <div class="resource-table-wrap">
+            <table>
+              <thead><tr><th>Static</th><th>所属节点</th><th>地址族</th><th>标准路由</th><th>Import / Export</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="managementStaticRows"></tbody>
             </table>
           </div>
         </section>
@@ -463,6 +477,34 @@
           <span></span>
           <button class="secondary-button" type="button" data-close="peerDialog">取消</button>
           <button id="savePeerButton" class="primary-button" type="submit">保存 Peer</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="staticDialog" class="editor-dialog" aria-labelledby="staticDialogTitle">
+      <form id="staticForm">
+        <div class="dialog-head">
+          <span class="dialog-icon">S</span>
+          <div><p class="eyebrow">BIRD Static</p><h2 id="staticDialogTitle">添加 Static 资源</h2></div>
+        </div>
+        <input id="staticId" type="hidden">
+        <div class="dialog-grid">
+          <div class="field full-width"><label for="staticNodeId">所属节点</label><select id="staticNodeId" required></select></div>
+          <div class="field"><label for="staticLabel">显示名称</label><input id="staticLabel" maxlength="80" required></div>
+          <div class="field"><label for="staticName">BIRD 名称（自动，可编辑）</label><input id="staticName" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required></div>
+          <div class="field"><label for="staticFamily">地址族</label><select id="staticFamily"><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></select></div>
+          <div class="field"><label for="staticDefineId">CIDR Define</label><select id="staticDefineId"><option value="">不创建标准路由</option></select></div>
+          <div class="field"><label for="staticAction">标准动作</label><select id="staticAction"><option value="">不创建标准路由</option><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option></select></div>
+          <div class="field"><label for="staticImport">Static Import</label><select id="staticImport"><option value="all">all</option><option value="none">none</option></select></div>
+          <div class="field"><label for="staticExport">Static Export</label><select id="staticExport"><option value="none">none</option><option value="all">all</option></select></div>
+          <div class="field full-width"><label for="staticRaw">自定义 Static 指令</label><textarea id="staticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
+          <label class="toggle-row full-width" for="staticEnabled"><span><strong>启用资源</strong></span><input id="staticEnabled" type="checkbox" checked><i aria-hidden="true"></i></label>
+        </div>
+        <div class="dialog-actions split-actions">
+          <button id="deleteStaticButton" class="text-danger-button" type="button" hidden>删除 Static</button>
+          <span></span>
+          <button class="secondary-button" type="button" data-close="staticDialog">取消</button>
+          <button id="saveStaticButton" class="primary-button" type="submit">预检、保存并应用</button>
         </div>
       </form>
     </dialog>

@@ -59,12 +59,15 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
     defines: [{
       id: "define_test", nodeId: null, label: "Test exports", name: "TEST_EXPORTS",
       type: "cidr4", entries: ["198.51.100.0/24"], enabled: true,
+    }, {
+      id: "define_static", nodeId: "local", label: "Static routes", name: "STATIC_ROUTES",
+      type: "cidr4", entries: ["192.0.2.0/24"], enabled: true,
     }],
-    functions: [], filters: [], rpki: [],
+    functions: [], filters: [], rpki: [], staticProtocols: [],
     sessions: [{
       id: "session_test", nodeId: "local", peerId: "peer", protocolName: "test_bgp",
       localAddress: "192.0.2.1", localAsn: 65001, localPort: 11790,
-      exportDefineId: "define_test", routeAction: "blackhole", enabled: true,
+      exportDefineId: "define_test", enabled: true,
     }],
   });
   await fs.writeFile(path.join(dataDir, "inventory.json"), `${JSON.stringify(state)}\n`);
@@ -129,6 +132,49 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.deepEqual(updated.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
   assert.match(await fs.readFile(fakeLog, "utf8"), /bird .* -c .*bird\.conf/);
 
+  const createdStatic = await authenticatedRequest("/api/statics", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeId: "local", label: "Test Static", name: "test_static", family: "ipv4",
+      defineId: "define_static", action: "blackhole", import: "none", export: "all", raw: "", enabled: true,
+    }),
+  });
+  assert.equal(createdStatic.status, 201);
+  assert.equal(createdStatic.body.deployment.applied, true);
+  assert.equal(createdStatic.body.resource.import, "none");
+  const staticId = createdStatic.body.resource.id;
+
+  const updatedStatic = await authenticatedRequest(`/api/statics/${staticId}`, {
+    method: "PUT",
+    body: JSON.stringify({ action: "reject", import: "all", export: "none" }),
+  });
+  assert.equal(updatedStatic.status, 200);
+  assert.equal(updatedStatic.body.resource.action, "reject");
+  assert.equal(updatedStatic.body.resource.import, "all");
+
+  const rejectedStaticMove = await authenticatedRequest(`/api/statics/${staticId}`, {
+    method: "PUT",
+    body: JSON.stringify({ nodeId: "other" }),
+  });
+  assert.equal(rejectedStaticMove.status, 409);
+  assert.match(rejectedStaticMove.body.error, /不可直接移动/);
+
+  const conflictingStatic = await authenticatedRequest("/api/statics", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeId: "local", label: "Conflict", name: "conflicting_static", family: "ipv4",
+      defineId: "define_static", action: "blackhole", import: "all", export: "none", raw: "", enabled: true,
+    }),
+  });
+  assert.equal(conflictingStatic.status, 400);
+  assert.match(conflictingStatic.body.error, /冲突的静态路由动作/);
+  const afterStaticConflict = await authenticatedRequest("/api/dashboard");
+  assert.deepEqual(afterStaticConflict.body.inventory.staticProtocols.map((resource) => resource.id), [staticId]);
+
+  const referencedDefineDelete = await authenticatedRequest("/api/defines/define_static", { method: "DELETE" });
+  assert.equal(referencedDefineDelete.status, 409);
+  assert.match(referencedDefineDelete.body.error, /Static 资源/);
+
   const stopped = await authenticatedRequest("/api/sessions/session_test/control", {
     method: "POST",
     body: JSON.stringify({ action: "disable" }),
@@ -161,6 +207,10 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.match(rejected.body.error, /重复/);
   const afterRejected = await authenticatedRequest("/api/dashboard");
   assert.deepEqual(afterRejected.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
+
+  const deletedStatic = await authenticatedRequest(`/api/statics/${staticId}`, { method: "DELETE" });
+  assert.equal(deletedStatic.status, 200);
+  assert.deepEqual(deletedStatic.body.inventory.staticProtocols, []);
 
   await fs.writeFile(failApply, "1\n");
   const failedApply = await authenticatedRequest("/api/defines/define_test", {

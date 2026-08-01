@@ -20,6 +20,7 @@ import {
   normalizePolicyFunction,
   normalizeRPKI,
   normalizeSession,
+  normalizeStaticProtocol,
   renderBirdConfig,
   rollbackNode,
   stageAndValidate,
@@ -284,16 +285,23 @@ function nodeRPKIResources(state, nodeId, enabledOnly = false) {
   );
 }
 
+function nodeStaticProtocols(state, nodeId, enabledOnly = false) {
+  return (state.staticProtocols ?? []).filter((item) =>
+    item.nodeId === nodeId && (!enabledOnly || item.enabled),
+  );
+}
+
 function ownedNodePolicyResources(state, nodeId) {
-  return [...state.defines, ...state.functions, ...state.filters, ...(state.rpki ?? [])].filter((item) => item.nodeId === nodeId);
+  return [...state.defines, ...state.functions, ...state.filters, ...(state.rpki ?? []), ...(state.staticProtocols ?? [])]
+    .filter((item) => item.nodeId === nodeId);
 }
 
 function resourceReferencesSymbol(state, symbol, excludedId = null) {
   return [...state.defines, ...state.functions, ...state.filters].some((resource) =>
     resource.id !== excludedId && birdSourceReferencesSymbol(resource.value ?? resource.source ?? "", symbol),
-  ) || state.sessions.some((session) => Object.values(session.channels).some((channel) =>
-    birdSourceReferencesSymbol(channel.static?.raw ?? "", symbol),
-  ));
+  ) || (state.staticProtocols ?? []).some((resource) =>
+    resource.id !== excludedId && birdSourceReferencesSymbol(resource.raw, symbol),
+  );
 }
 
 function configForNode(state, node) {
@@ -305,6 +313,7 @@ function configForNode(state, node) {
     nodePolicyResources(state, "filters", node.id),
     nodePolicyResources(state, "defines", node.id),
     nodeRPKIResources(state, node.id),
+    nodeStaticProtocols(state, node.id),
   );
 }
 
@@ -318,7 +327,7 @@ function deploymentTargets(inventory, nodeIds, fallbackNodes = []) {
       node,
       config: inventoryNode
         ? configForNode(inventory, inventoryNode)
-        : renderBirdConfig(node, [], [], [], [], [], []),
+        : renderBirdConfig(node, [], [], [], [], [], [], []),
     };
   });
 }
@@ -528,6 +537,17 @@ async function preflightRPKIResource(stateInput, resourceId) {
     const validation = await stageAndValidate(node, configForNode(state, node));
     if (!validation.ok) fail(422, validation.stderr || `${resource.name} 的 BIRD 语法检查失败`);
   }
+}
+
+async function preflightStaticProtocol(stateInput, resourceId) {
+  const probe = structuredClone(stateInput);
+  const resource = probe.staticProtocols.find((item) => item.id === resourceId);
+  if (!resource) fail(404, "Static 资源不存在");
+  resource.enabled = true;
+  const state = validateInventory(probe);
+  const node = findNode(state, resource.nodeId);
+  const validation = await stageAndValidate(node, configForNode(state, node));
+  if (!validation.ok) fail(422, validation.stderr || `${resource.name} 的 BIRD 语法检查失败`);
 }
 
 function protocolFor(runtime, protocolName) {
@@ -861,6 +881,7 @@ async function decommissionNode(nodeId, force = false) {
           functions: current.functions.filter((item) => item.nodeId !== node.id),
           filters: current.filters.filter((item) => item.nodeId !== node.id),
           rpki: current.rpki.filter((item) => item.nodeId !== node.id),
+          staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== node.id),
         });
         const state = await store.replace(current, inventory);
         committed = true;
@@ -920,7 +941,6 @@ function prepareSession(state, payload) {
       ...(payload.ipv4 ?? {}),
       enabled: true,
       exportDefineId: payload.exportDefineId ?? payload.prefixListId ?? null,
-      routeAction: payload.routeAction,
       importPolicy: payload.importPolicy,
       exportPolicy: payload.exportPolicy,
     },
@@ -1005,6 +1025,7 @@ async function dashboard(state, requestedNodeId, requestedPeerId) {
       functions: [],
       filters: [],
       rpki: [],
+      staticProtocols: [],
       selectedPeer: null,
       runtime: { nodeId: null, reachable: false, bird2: false, version: null, protocols: [], error: "尚未添加受管节点" },
       health: summarizeInventoryHealth(state, []),
@@ -1043,6 +1064,7 @@ async function dashboard(state, requestedNodeId, requestedPeerId) {
     functions: nodePolicyResources(state, "functions", selection.node.id, true),
     filters: nodePolicyResources(state, "filters", selection.node.id, true),
     rpki: nodeRPKIResources(state, selection.node.id, true),
+    staticProtocols: nodeStaticProtocols(state, selection.node.id, true),
     selectedPeer: selected,
     runtime,
     health: summarizeInventoryHealth(state, runtimes),
@@ -1355,6 +1377,56 @@ async function handleApi(request, response, url) {
     return sendJson(response, 200, { inventory: state, events });
   }
 
+  const staticMatch = pathname.match(/^\/api\/statics\/([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (request.method === "POST" && pathname === "/api/statics") {
+    const body = await readJson(request);
+    const resource = normalizeStaticProtocol({ ...body, id: makeId("static") });
+    const { state, deployment } = await mutateAndApply(async (draft) => {
+      findNode(draft, resource.nodeId);
+      draft.staticProtocols.push(resource);
+      const candidate = validateInventory(draft);
+      if (!resource.enabled) await preflightStaticProtocol(candidate, resource.id);
+      return resource;
+    }, () => [resource.nodeId]);
+    event("success", `已添加 Static 资源 ${resource.name}`, resource.nodeId);
+    return sendJson(response, 201, { resource, inventory: state, deployment, events });
+  }
+  if (staticMatch && request.method === "PUT") {
+    const resourceId = staticMatch[1];
+    const body = await readJson(request);
+    let nodeId;
+    const { state, result: resource, deployment } = await mutateAndApply(async (draft) => {
+      const index = draft.staticProtocols.findIndex((item) => item.id === resourceId);
+      if (index < 0) fail(404, "Static 资源不存在");
+      const previous = draft.staticProtocols[index];
+      nodeId = previous.nodeId;
+      if (Object.hasOwn(body, "nodeId") && body.nodeId !== previous.nodeId) {
+        fail(409, "Static 资源不可直接移动到其他节点；请删除后重新添加");
+      }
+      const updated = normalizeStaticProtocol({ ...previous, ...body, id: resourceId, nodeId });
+      draft.staticProtocols[index] = updated;
+      const candidate = validateInventory(draft);
+      if (!updated.enabled) await preflightStaticProtocol(candidate, resourceId);
+      return updated;
+    }, () => [nodeId]);
+    event("success", `已更新 Static 资源 ${resource.name}`, resource.nodeId);
+    return sendJson(response, 200, { resource, inventory: state, deployment, events });
+  }
+  if (staticMatch && request.method === "DELETE") {
+    const resourceId = staticMatch[1];
+    let nodeId;
+    const { state, result: resource, deployment } = await mutateAndApply((draft) => {
+      const index = draft.staticProtocols.findIndex((item) => item.id === resourceId);
+      if (index < 0) fail(404, "Static 资源不存在");
+      const resource = draft.staticProtocols[index];
+      nodeId = resource.nodeId;
+      draft.staticProtocols.splice(index, 1);
+      return resource;
+    }, () => [nodeId]);
+    event("success", `已删除 Static 资源 ${resource.name}`, resource.nodeId);
+    return sendJson(response, 200, { inventory: state, deployment, events });
+  }
+
   const rpkiMatch = pathname.match(/^\/api\/rpki\/([A-Za-z_][A-Za-z0-9_]*)$/);
   if (request.method === "POST" && pathname === "/api/rpki") {
     const body = await readJson(request);
@@ -1502,9 +1574,12 @@ async function handleApi(request, response, url) {
           ? policies.some((policy) => policy.steps.some((step) => step.type === "function" && step.functionId === resource.id))
           : collection === "filters"
             ? policies.some((policy) => policy.filterId === resource.id)
-            : channels.some((channel) => channel.exportDefineId === resource.id || channel.static?.defineId === resource.id);
+            : channels.some((channel) => channel.exportDefineId === resource.id);
       });
       if (referencedBySession) fail(409, `请先从会话中移除该 ${kind}`);
+      if (collection === "defines" && draft.staticProtocols.some((item) => item.defineId === resource.id)) {
+        fail(409, "请先从 Static 资源中移除该 Define");
+      }
       if (collection === "defines" && resourceReferencesSymbol(draft, resource.name, resource.id)) {
         fail(409, `请先更新引用 Define ${resource.name} 的资源`);
       }

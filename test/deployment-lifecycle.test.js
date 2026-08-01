@@ -100,6 +100,7 @@ exit 0
     functions: [],
     filters: [],
     rpki: [],
+    staticProtocols: [],
     sessions: [],
   });
   await fs.writeFile(path.join(dataDir, "inventory.json"), `${JSON.stringify(inventory)}\n`);
@@ -269,6 +270,23 @@ exit 0
     }),
   });
   assert.equal(scopedRpki.status, 201);
+  const scopedStatic = await authenticatedRequest("/api/statics", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeId,
+      label: "Node-only Static",
+      name: "node_only_static",
+      family: "ipv4",
+      defineId: null,
+      action: null,
+      import: "all",
+      export: "none",
+      raw: "route 198.51.100.0/24 blackhole;",
+      enabled: true,
+    }),
+  });
+  assert.equal(scopedStatic.status, 201);
+  assert.match(await fs.readFile(capturedConfig, "utf8"), /protocol static node_only_static/);
   const appliedSession = await authenticatedRequest("/api/sessions/apply", {
     method: "POST",
     body: JSON.stringify({
@@ -298,6 +316,7 @@ exit 0
   assert.deepEqual(forgotten.body.inventory.functions, []);
   assert.deepEqual(forgotten.body.inventory.filters, []);
   assert.deepEqual(forgotten.body.inventory.rpki, []);
+  assert.deepEqual(forgotten.body.inventory.staticProtocols, []);
   assert.equal(forgotten.body.events.at(-1).level, "warning");
   assert.equal(await fs.readFile(fakeLog, "utf8"), sshLogBeforeForce, "force forget must not contact the offline node");
 

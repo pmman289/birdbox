@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   checkIncludeNodeAccess,
   configureManagedSsh,
+  makeStaticProtocolName,
   normalizeNode,
   normalizeDefine,
   normalizePeer,
@@ -16,6 +17,7 @@ import {
   normalizePolicyFunction,
   normalizeRPKI,
   normalizeSession,
+  normalizeStaticProtocol,
   parseBirdPrefixEntries,
   parseProtocolStatuses,
   renderBirdConfig,
@@ -74,7 +76,6 @@ const sessions = [
     protocolName: "transit_bgp",
     localAddress: "192.0.2.1",
     localAsn: 65001,
-    routeAction: "blackhole",
     multihop: true,
     enabled: true,
   },
@@ -86,9 +87,19 @@ const sessions = [
     protocolName: "ix_bgp",
     localAddress: "192.0.2.10",
     localAsn: 65100,
-    routeAction: "reject",
     multihop: false,
     enabled: true,
+  },
+];
+
+const staticProtocols = [
+  {
+    id: "static_transit", nodeId: "local", label: "Transit static", name: "birdbox_static4_transit_bgp",
+    family: "ipv4", defineId: "prefix_transit", action: "blackhole", import: "all", export: "none", raw: "", enabled: true,
+  },
+  {
+    id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp",
+    family: "ipv4", defineId: "prefix_ix", action: "reject", import: "all", export: "none", raw: "", enabled: true,
   },
 ];
 
@@ -128,24 +139,21 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.equal(normalizeSession(sessions[1]).localAsn, 65100);
   assert.equal(normalizeSession(sessions[1]).localPort, 179);
   assert.equal(normalizeSession(sessions[1]).bgp.connectionMode, "direct");
-  assert.deepEqual(normalizeSession(sessions[1]).channels.ipv4.static, {
+  assert.equal(normalizeSession(sessions[1]).channels.ipv4.static, undefined);
+  assert.deepEqual(normalizeStaticProtocol(staticProtocols[1]), {
+    id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp", family: "ipv4",
     defineId: "prefix_ix", action: "reject", import: "all", export: "none", raw: "",
-  });
-  assert.deepEqual(normalizeSession({ ...sessions[0], routeAction: undefined }).channels.ipv4.static, {
-    defineId: null, action: null, import: "all", export: "none", raw: "",
+    enabled: true,
   });
   assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
   assert.throws(
-    () => normalizeSession({
-      ...sessions[0],
-      channels: { ipv4: { enabled: true, static: { import: "invalid" } }, ipv6: { enabled: false } },
-    }),
+    () => normalizeStaticProtocol({ ...staticProtocols[0], import: "invalid" }),
     /Static Import 设置不合法/,
   );
-  assert.throws(() => normalizeSession({ ...sessions[0], routeAction: "discard" }), /静态路由动作不合法/);
+  assert.throws(() => normalizeStaticProtocol({ ...staticProtocols[0], action: "discard" }), /静态路由动作不合法/);
   assert.throws(
-    () => normalizeSession({ ...sessions[0], exportDefineId: null, routeAction: "blackhole" }),
-    /必须选择 CIDR Define/,
+    () => normalizeStaticProtocol({ ...staticProtocols[0], defineId: null }),
+    /必须同时设置/,
   );
   assert.equal(normalizeSession({ ...sessions[0], enabled: false }).enabled, false);
   assert.throws(() => normalizePeer({ ...peers[0], name: "Bad\npeer" }), /控制字符/);
@@ -293,11 +301,14 @@ test("renders IPv6-only and dual-stack BGP channels independently", () => {
         importPolicy: { mode: "form", formAction: "all" },
         exportPolicy: { mode: "form", formAction: "cidr" },
         exportDefineId: "prefix_v6",
-        routeAction: "blackhole",
       },
     },
   };
-  const ipv6Only = renderBirdConfig(node, [peerV6], [sessionV6], [], [], [defineV6]);
+  const staticV6 = {
+    id: "static_v6", nodeId: "local", label: "IPv6 static", name: "birdbox_static6_peer_v6_bgp",
+    family: "ipv6", defineId: "prefix_v6", action: "blackhole", import: "all", export: "none", raw: "", enabled: true,
+  };
+  const ipv6Only = renderBirdConfig(node, [peerV6], [sessionV6], [], [], [defineV6], [], [staticV6]);
   assert.match(ipv6Only, /protocol static birdbox_static6_peer_v6_bgp \{\s+ipv6 \{\s+import all;\s+export none;\s+\};/);
   assert.match(ipv6Only, /protocol bgp peer_v6_bgp[\s\S]*?ipv6 \{/);
   assert.doesNotMatch(ipv6Only.match(/protocol bgp peer_v6_bgp[\s\S]*?\n\}/)?.[0] ?? "", /ipv4 \{/);
@@ -398,12 +409,21 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
   assert.throws(
     () => validateInventory({
       nodes: [node],
-      peers,
+      peers: [],
       defines: [cidrDefines[0]],
-      sessions: [sessions[0], { ...sessions[1], exportDefineId: "prefix_transit", routeAction: "reject" }],
+      sessions: [],
+      staticProtocols: [staticProtocols[0], { ...staticProtocols[1], defineId: "prefix_transit" }],
     }),
     /冲突的静态路由动作/,
   );
+  const matchingActions = validateInventory({
+    nodes: [node], peers: [], defines: [cidrDefines[0]], sessions: [],
+    staticProtocols: [
+      staticProtocols[0],
+      { ...staticProtocols[0], id: "static_transit_filtered", name: "static_transit_filtered", import: "none", export: "all" },
+    ],
+  });
+  assert.equal(matchingActions.staticProtocols.length, 2);
   assert.throws(
     () => validateInventory({
       nodes: [node],
@@ -412,6 +432,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
         ...expressionDefines[0], id: "static_name_collision", name: "birdbox_static4_transit_bgp",
       }],
       sessions: [sessions[0]],
+      staticProtocols: [staticProtocols[0]],
     }),
     /全局标识符冲突/,
   );
@@ -419,7 +440,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
 
 test("renders reusable defines and session-specific local endpoints", () => {
   const unusedDefine = { ...cidrDefines[1], id: "prefix_unused", name: "UNUSED_EXPORTS", label: "Unused exports" };
-  const config = renderBirdConfig(node, peers, sessions, [], [], [cidrDefines[0], unusedDefine, cidrDefines[1]]);
+  const config = renderBirdConfig(node, peers, sessions, [], [], [cidrDefines[0], unusedDefine, cidrDefines[1]], [], staticProtocols);
   assert.match(config, /define TRANSIT_EXPORTS = \[ 10\.1\.0\.0\/24, 10\.0\.0\.0\/8\+, 10\.0\.0\.0\/8-, 198\.51\.100\.0\/24\{24,28\} \];/);
   assert.match(config, /define IX_EXPORTS = \[ 10\.2\.0\.0\/24 \];/);
   assert.match(config, /define UNUSED_EXPORTS = \[ 10\.2\.0\.0\/24 \];/);
@@ -439,11 +460,11 @@ test("renders reusable defines and session-specific local endpoints", () => {
   assert.equal((config.match(/multihop 10;/g) ?? []).length, 1);
 });
 
-test("does not render a disabled session into the node configuration", () => {
+test("does not render a disabled session but keeps independent node Static resources", () => {
   const disabled = normalizeSession({ ...sessions[0], enabled: false });
-  const config = renderBirdConfig(node, [peers[0]], [disabled], [], [], [cidrDefines[0]]);
+  const config = renderBirdConfig(node, [peers[0]], [disabled], [], [], [cidrDefines[0]], [], [staticProtocols[0]]);
   assert.doesNotMatch(config, /protocol bgp transit_bgp/);
-  assert.doesNotMatch(config, /protocol static birdbox_static4/);
+  assert.match(config, /protocol static birdbox_static4_transit_bgp/);
 });
 
 test("renders custom Defines before Functions and validates managed dependencies", () => {
@@ -489,7 +510,6 @@ test("composes form policy with Functions and delegates complete policy to Filte
   assert.ok(config.indexOf("filter custom_import") < config.indexOf("protocol bgp transit_bgp"));
   assert.match(config, /import filter custom_import;/);
   assert.match(config, /if allow_export\(\) then reject;\s+if net ~ TRANSIT_EXPORTS then accept;\s+reject;/);
-  assert.match(config, /route 10\.1\.0\.0\/24 blackhole;/);
 
   const customExport = {
     ...combinedSession,
@@ -507,8 +527,6 @@ test("composes form policy with Functions and delegates complete policy to Filte
   assert.match(customConfig, /import filter \{\s+accept;\s+allow_export\(\);\s+\};/);
   assert.doesNotMatch(customConfig, /allow_export\(\);\s+reject;/);
   assert.match(customConfig, /export filter custom_import;/);
-  assert.match(customConfig, /protocol static birdbox_static4/);
-  assert.match(customConfig, /route 10\.1\.0\.0\/24 blackhole;/);
 
   const acceptConfig = renderBirdConfig(node, [peers[0]], [{
     ...sessions[0],
@@ -540,7 +558,6 @@ test("composes form policy with Functions and delegates complete policy to Filte
 test("supports export form actions and combined policies without Function steps", () => {
   const exportAll = {
     ...sessions[0],
-    routeAction: null,
     exportPolicy: { mode: "form", steps: [], filterId: null, formAction: "all" },
   };
   const allConfig = renderBirdConfig(node, [peers[0]], [exportAll], [], [], [cidrDefines[0]]);
@@ -550,7 +567,6 @@ test("supports export form actions and combined policies without Function steps"
   const exportNone = {
     ...sessions[0],
     exportDefineId: null,
-    routeAction: null,
     exportPolicy: { mode: "form", steps: [], filterId: null, formAction: "none" },
   };
   const noneConfig = renderBirdConfig(node, [peers[0]], [exportNone]);
@@ -572,7 +588,6 @@ test("supports export form actions and combined policies without Function steps"
 
   const combinedExport = {
     ...sessions[0],
-    routeAction: null,
     exportPolicy: { mode: "combined", steps: [{ type: "form" }], filterId: null, formAction: "all" },
   };
   const combinedExportConfig = renderBirdConfig(node, [peers[0]], [combinedExport], [], [], [cidrDefines[0]]);
@@ -584,7 +599,7 @@ test("supports export form actions and combined policies without Function steps"
   const combinedNoneBlock = combinedNoneConfig.match(/export filter \{([\s\S]*?)\n    \};/)?.[1] ?? "";
   assert.equal((combinedNoneBlock.match(/reject;/g) ?? []).length, 1);
 
-  const exportAllWithStatic = renderBirdConfig(node, [peers[0]], [{ ...exportAll, routeAction: "blackhole" }], [], [], [cidrDefines[0]]);
+  const exportAllWithStatic = renderBirdConfig(node, [peers[0]], [exportAll], [], [], [cidrDefines[0]], [], [staticProtocols[0]]);
   assert.match(exportAllWithStatic, /export all;/);
   assert.match(exportAllWithStatic, /route 10\.1\.0\.0\/24 blackhole;/);
   assert.throws(
@@ -610,7 +625,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 18);
+  assert.equal(state.version, 19);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({
@@ -774,49 +789,34 @@ test("normalizes and renders BIRD 2.19.1 eBGP protocol and IPv4 channel options"
   assert.throws(() => normalizeSession({ ...sessions[0], ipv4: { extendedNextHop: false, requireExtendedNextHop: true } }), /需要启用 Extended Next Hop/);
 });
 
-test("supports all BIRD 2 static route actions and an empty action", () => {
+test("supports all BIRD 2 Static route actions and custom-only resources", () => {
   for (const action of ["blackhole", "reject", "unreachable", "prohibit"]) {
-    const config = renderBirdConfig(node, [peers[0]], [{ ...sessions[0], routeAction: action }], [], [], [cidrDefines[0]]);
+    const resource = { ...staticProtocols[0], action };
+    const config = renderBirdConfig(node, [peers[0]], [sessions[0]], [], [], [cidrDefines[0]], [], [resource]);
     assert.match(config, new RegExp(`route 10\\.1\\.0\\.0/24 ${action};`));
   }
-  const config = renderBirdConfig(node, [peers[0]], [{ ...sessions[0], routeAction: null }], [], [], [cidrDefines[0]]);
-  assert.doesNotMatch(config, /protocol static birdbox_static/);
-  assert.match(config, /if net ~ TRANSIT_EXPORTS then accept;/);
+  const customOnly = { ...staticProtocols[0], defineId: null, action: null, raw: "route 203.0.113.0/24 via 192.0.2.254;" };
+  const config = renderBirdConfig(node, [], [], [], [], [cidrDefines[0]], [], [customOnly]);
+  assert.match(config, /route 203\.0\.113\.0\/24 via 192\.0\.2\.254;/);
 });
 
-test("supports independent form and custom Static routes per session channel", () => {
-  const customStaticSession = {
-    ...sessions[0],
-    routeAction: undefined,
-    exportPolicy: { mode: "custom", filterId: "filter_custom_import" },
-    channels: {
-      ipv4: {
-        enabled: true,
-        exportPolicy: { mode: "custom", filterId: "filter_custom_import" },
-        static: {
-          defineId: "prefix_transit",
-          action: "reject",
-          import: "none",
-          export: "all",
-          raw: "route 203.0.113.0/24 via 192.0.2.254;",
-        },
-      },
-      ipv6: { enabled: true },
-    },
-  };
-  const normalized = normalizeSession(customStaticSession);
-  assert.deepEqual(normalized.channels.ipv4.static, {
-    defineId: "prefix_transit", action: "reject", import: "none", export: "all",
+test("supports independent standard and custom node Static resources", () => {
+  const customStatic = {
+    ...staticProtocols[0],
+    action: "reject",
+    import: "none",
+    export: "all",
     raw: "route 203.0.113.0/24 via 192.0.2.254;",
-  });
-  const config = renderBirdConfig(node, [peers[0]], [customStaticSession], [], policyFilters, cidrDefines);
+  };
+  const normalized = normalizeStaticProtocol(customStatic);
+  assert.equal(normalized.import, "none");
+  assert.equal(normalized.export, "all");
+  const customStaticSession = { ...sessions[0], exportPolicy: { mode: "custom", filterId: "filter_custom_import" } };
+  const config = renderBirdConfig(node, [peers[0]], [customStaticSession], [], policyFilters, cidrDefines, [], [customStatic]);
   assert.match(config, /protocol static birdbox_static4_transit_bgp[\s\S]*ipv4 \{\s+import none;\s+export all;\s+\};[\s\S]*route 10\.1\.0\.0\/24 reject;/);
   assert.match(config, /route 203\.0\.113\.0\/24 via 192\.0\.2\.254;/);
   assert.match(config, /export filter custom_import;/);
-  assert.throws(() => normalizeSession({
-    ...customStaticSession,
-    channels: { ...customStaticSession.channels, ipv4: { ...customStaticSession.channels.ipv4, static: { raw: "}; protocol static injected {" } } },
-  }), /不能结束外层配置块/);
+  assert.throws(() => normalizeStaticProtocol({ ...customStatic, raw: "}; protocol static injected {" }), /不能结束外层配置块/);
 });
 
 test("lets BIRD select the local address and bounds generated Static protocol names", () => {
@@ -824,10 +824,11 @@ test("lets BIRD select the local address and bounds generated Static protocol na
   const session = {
     ...sessions[0], protocolName, localAddress: null, localPort: 179,
   };
-  const config = renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]]);
+  const staticName = makeStaticProtocolName("ipv4", protocolName);
+  const resource = { ...staticProtocols[0], name: staticName };
+  const config = renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]], [], [resource]);
   assert.match(config, new RegExp(`protocol bgp ${protocolName} \\{\\s+local port 179 as 65001;`));
-  const staticName = config.match(/protocol static ([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
-  assert.ok(staticName);
+  assert.match(config, new RegExp(`protocol static ${staticName}`));
   assert.ok(staticName.length <= 64);
   assert.match(staticName, /^birdbox_static4_bgp_a+_[a-f0-9]{10}$/);
 });
@@ -851,16 +852,15 @@ test("native BIRD 2 parses automatic local binding and configurable Static chann
     ...sessions[0],
     localAddress: null,
     localPort: 179,
-    routeAction: undefined,
     channels: {
       ipv4: {
         enabled: true,
-        static: { defineId: "prefix_transit", action: "blackhole", import: "none", export: "all", raw: "" },
       },
       ipv6: { enabled: false },
     },
   };
-  await fs.writeFile(configPath, renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]]));
+  const configurableStatic = { ...staticProtocols[0], import: "none", export: "all" };
+  await fs.writeFile(configPath, renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]], [], [configurableStatic]));
   await execFileAsync(available[0], ["-p", "-c", configPath]);
 });
 
@@ -896,7 +896,7 @@ test("renders local ROA files and RPKI-RTR sources for roa_check filters", () =>
 });
 
 test("allows a BGP session without an export CIDR Define", () => {
-  const session = { ...sessions[0], exportDefineId: null, routeAction: null };
+  const session = { ...sessions[0], exportDefineId: null };
   const state = validateInventory({ nodes: [node], peers: [peers[0]], defines: [], sessions: [session] });
   assert.equal(state.sessions[0].channels.ipv4.exportDefineId, null);
   const config = renderBirdConfig(node, [peers[0]], [session]);

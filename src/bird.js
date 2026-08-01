@@ -53,7 +53,7 @@ const MAX_POLICY_SOURCE_LENGTH = 32 * 1024;
 const MAX_GRACEFUL_RESTART_TIME = 4095;
 const MAX_LONG_LIVED_STALE_TIME = 16777215;
 
-function staticProtocolName(family, protocolName) {
+export function makeStaticProtocolName(family, protocolName) {
   const fullName = `birdbox_static${family === "ipv4" ? "4" : "6"}_${protocolName}`;
   if (fullName.length <= 64) return fullName;
   const digest = createHash("sha256").update(fullName).digest("hex").slice(0, 10);
@@ -528,6 +528,36 @@ export function normalizeDefine(input) {
   };
 }
 
+export function normalizeStaticProtocol(input) {
+  assert(input && typeof input === "object", "Static 资源参数不能为空");
+  const family = normalizeEnum(input.family, new Set(["ipv4", "ipv6"]), "ipv4", "Static 地址族");
+  const defineId = input.defineId === null || input.defineId === undefined || input.defineId === ""
+    ? null
+    : normalizeId(input.defineId, "Static CIDR Define ID");
+  const actionValue = input.action === null || input.action === undefined || input.action === ""
+    ? null
+    : String(input.action).trim().toLowerCase();
+  assert(actionValue === null || STATIC_ROUTE_ACTIONS.has(actionValue), "静态路由动作不合法");
+  assert((defineId === null) === (actionValue === null), "Static CIDR Define 与标准动作必须同时设置");
+  const raw = normalizeBirdBlockSource(input.raw, "额外 Static 指令");
+  assert(actionValue !== null || raw, "Static 资源至少需要标准路由或自定义指令");
+  const name = normalizeId(input.name, "Static 协议名称");
+  assert(!RESERVED_PROTOCOL_NAMES.has(name), "Static 协议名称与 Birdbox 内部协议冲突");
+  return {
+    id: normalizeId(input.id, "Static 资源 ID"),
+    nodeId: normalizeId(input.nodeId, "Static 所属节点 ID"),
+    label: normalizeLabel(input.label ?? input.name, "Static 显示名称"),
+    name,
+    family,
+    defineId,
+    action: actionValue,
+    import: normalizeEnum(input.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置"),
+    export: normalizeEnum(input.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
+    raw,
+    enabled: input.enabled !== false,
+  };
+}
+
 function normalizeResourceScope(value) {
   return value === null || value === undefined || value === ""
     ? null
@@ -947,21 +977,6 @@ function normalizeChannel(family, input, defaultEnabled) {
   const exportDefineId = value.exportDefineId === null || value.exportDefineId === undefined || value.exportDefineId === ""
     ? null
     : normalizeId(value.exportDefineId, `导出 IPv${family === "ipv4" ? 4 : 6} CIDR Define ID`);
-  const staticInput = value.static && typeof value.static === "object" ? value.static : {};
-  const legacyRouteAction = value.routeAction === null || value.routeAction === undefined || value.routeAction === ""
-    ? null
-    : String(value.routeAction).trim().toLowerCase();
-  const staticDefineValue = staticInput.defineId ?? value.staticDefineId ?? (legacyRouteAction === null ? null : exportDefineId);
-  const staticDefineId = staticDefineValue === null || staticDefineValue === undefined || staticDefineValue === ""
-    ? null
-    : normalizeId(staticDefineValue, `Static IPv${family === "ipv4" ? 4 : 6} CIDR Define ID`);
-  const staticActionValue = staticInput.action ?? value.staticRouteAction ?? legacyRouteAction;
-  const staticAction = staticActionValue === null || staticActionValue === undefined || staticActionValue === ""
-    ? null
-    : String(staticActionValue).trim().toLowerCase();
-  assert(staticAction === null || STATIC_ROUTE_ACTIONS.has(staticAction), "静态路由动作不合法");
-  assert(staticAction === null || staticDefineId !== null, "Static 标准动作必须选择 CIDR Define");
-  const staticRaw = normalizeBirdBlockSource(staticInput.raw ?? value.staticRaw, `额外 IPv${family === "ipv4" ? 4 : 6} Static 指令`);
   const importPolicy = normalizePolicy(value.importPolicy, `${family === "ipv4" ? "IPv4" : "IPv6"} 导入策略`, "import");
   const exportPolicy = normalizePolicy({
     ...(value.exportPolicy ?? {}),
@@ -973,13 +988,6 @@ function normalizeChannel(family, input, defaultEnabled) {
     importPolicy,
     exportPolicy,
     exportDefineId,
-    static: {
-      defineId: staticDefineId,
-      action: staticAction,
-      import: normalizeEnum(staticInput.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置"),
-      export: normalizeEnum(staticInput.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
-      raw: staticRaw,
-    },
     ...normalizeChannelOptions(family, value),
   };
 }
@@ -993,7 +1001,6 @@ export function normalizeSession(input) {
     ...(input.ipv4 ?? {}),
     enabled: true,
     exportDefineId: input.exportDefineId,
-    routeAction: input.routeAction,
     importPolicy: input.importPolicy,
     exportPolicy: input.exportPolicy,
   };
@@ -1034,6 +1041,7 @@ export function validateInventory(input) {
   const functions = (input.functions ?? []).map(normalizePolicyFunction);
   const filters = (input.filters ?? []).map(normalizePolicyFilter);
   const rpki = (input.rpki ?? []).map(normalizeRPKISource);
+  const staticProtocols = (input.staticProtocols ?? []).map(normalizeStaticProtocol);
   const sessions = (input.sessions ?? []).map(normalizeSession);
   assert(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
   assert(nodes.filter((item) => item.transport === "local").length <= 1, "只能配置一个本机节点");
@@ -1046,6 +1054,7 @@ export function validateInventory(input) {
   assert(new Set(functions.map((item) => item.id)).size === functions.length, "Function ID 重复");
   assert(new Set(filters.map((item) => item.id)).size === filters.length, "Filter ID 重复");
   assert(new Set(rpki.map((item) => item.id)).size === rpki.length, "RPKI 资源 ID 重复");
+  assert(new Set(staticProtocols.map((item) => item.id)).size === staticProtocols.length, "Static 资源 ID 重复");
   assert(new Set(sessions.map((item) => item.id)).size === sessions.length, "会话 ID 重复");
 
   const nodeMap = new Map(nodes.map((item) => [item.id, item]));
@@ -1079,6 +1088,24 @@ export function validateInventory(input) {
   for (const resource of rpki) {
     assert(resource.nodeId === null || nodeMap.has(resource.nodeId), `RPKI 资源 ${resource.name} 引用了不存在的节点`);
   }
+  for (const resource of staticProtocols) {
+    const node = nodeMap.get(resource.nodeId);
+    const staticDefine = resource.defineId === null ? null : defineMap.get(resource.defineId);
+    const expectedDefineType = resource.family === "ipv4" ? "cidr4" : "cidr6";
+    assert(node, `Static 资源 ${resource.name} 引用了不存在的节点`);
+    assert(
+      resource.defineId === null || (
+        staticDefine?.type === expectedDefineType && staticDefine.enabled &&
+        (staticDefine.nodeId === null || staticDefine.nodeId === node.id)
+      ),
+      `Static 资源 ${resource.name} 的 CIDR Define 对所选节点或地址族不可用`,
+    );
+    const identifiers = birdIdentifiers(resource.raw);
+    for (const dependency of managedDefines.filter((item) => identifiers.has(item.name))) {
+      assert(dependency.nodeId === null || dependency.nodeId === node.id, `Static 资源 ${resource.name} 引用了作用域不兼容的 Define ${dependency.name}`);
+      assert(dependency.enabled, `Static 资源 ${resource.name} 引用了已停用的 Define ${dependency.name}`);
+    }
+  }
   for (const session of sessions) {
     const node = nodeMap.get(session.nodeId);
     const peer = peerMap.get(session.peerId);
@@ -1099,7 +1126,6 @@ export function validateInventory(input) {
     for (const [family, channel] of Object.entries(session.channels)) {
       const expectedDefineType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
-      const staticDefine = channel.static.defineId === null ? null : defineMap.get(channel.static.defineId);
       assert(
         channel.exportDefineId === null || (
           exportDefine?.type === expectedDefineType && exportDefine.enabled &&
@@ -1107,18 +1133,6 @@ export function validateInventory(input) {
         ),
         `会话 ${session.protocolName} 的 ${family.toUpperCase()} 导出 CIDR Define 对所选节点不可用`,
       );
-      assert(
-        channel.static.defineId === null || (
-          staticDefine?.type === expectedDefineType && staticDefine.enabled &&
-          (staticDefine.nodeId === null || staticDefine.nodeId === node.id)
-        ),
-        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Static CIDR Define 对所选节点不可用`,
-      );
-      const staticIdentifiers = birdIdentifiers(channel.static.raw);
-      for (const dependency of managedDefines.filter((item) => staticIdentifiers.has(item.name))) {
-        assert(dependency.nodeId === null || dependency.nodeId === node.id, `会话 ${session.protocolName} 的 Static 指令引用了作用域不兼容的 Define ${dependency.name}`);
-        assert(dependency.enabled, `会话 ${session.protocolName} 的 Static 指令引用了已停用的 Define ${dependency.name}`);
-      }
       for (const [label, policy] of [["导入", channel.importPolicy], ["导出", channel.exportPolicy]]) {
         for (const step of policy.steps.filter((item) => item.type === "function")) {
           const resource = functionMap.get(step.functionId);
@@ -1137,6 +1151,7 @@ export function validateInventory(input) {
     const nodeFunctions = functions.filter((item) => item.nodeId === null || item.nodeId === node.id);
     const nodeFilters = filters.filter((item) => item.nodeId === null || item.nodeId === node.id);
     const nodeRPKI = rpki.filter((item) => item.enabled && (item.nodeId === null || item.nodeId === node.id));
+    const nodeStaticProtocols = staticProtocols.filter((item) => item.nodeId === node.id);
     assert(new Set(nodeSessions.map((item) => item.peerId)).size === nodeSessions.length, `节点 ${node.name} 对同一 Peer 存在多个会话`);
     assert(new Set(nodeSessions.map((item) => item.protocolName)).size === nodeSessions.length, `节点 ${node.name} 的协议名称重复`);
     const symbols = [
@@ -1144,16 +1159,7 @@ export function validateInventory(input) {
       ...nodeFunctions.map((item) => item.name),
       ...nodeFilters.map((item) => item.name),
       ...nodeSessions.map((item) => item.protocolName),
-      ...nodeSessions.flatMap((session) => ["ipv4", "ipv6"].flatMap((family) => {
-        const channel = session.channels[family];
-        const staticDefine = channel.static.defineId === null ? null : defineMap.get(channel.static.defineId);
-        const hasStaticConfig = channel.static.raw || (
-          channel.static.action !== null && staticDefine?.entries.some(isExactPrefix)
-        );
-        return session.enabled && channel.enabled && hasStaticConfig
-          ? [staticProtocolName(family, session.protocolName)]
-          : [];
-      })),
+      ...nodeStaticProtocols.map((item) => item.name),
       ...nodeRPKI.flatMap((item) => [
         item.name,
         ...(item.sourceType === "file"
@@ -1166,27 +1172,27 @@ export function validateInventory(input) {
     assert(new Set(symbols).size === symbols.length, `节点 ${node.name} 的 BIRD 全局标识符冲突`);
     for (const family of ["ipv4", "ipv6"]) {
       const routeActions = new Map();
-      for (const session of nodeSessions) {
-        const channel = session.channels[family];
-        if (!session.enabled || !channel.enabled || channel.static.action === null) continue;
-        const staticDefine = defineMap.get(channel.static.defineId);
+      for (const resource of nodeStaticProtocols) {
+        if (!resource.enabled || resource.family !== family || resource.action === null) continue;
+        const staticDefine = defineMap.get(resource.defineId);
         for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
           const existing = routeActions.get(prefix);
-          assert(!existing || existing === channel.static.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-          routeActions.set(prefix, channel.static.action);
+          assert(!existing || existing === resource.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
+          routeActions.set(prefix, resource.action);
         }
       }
     }
   }
 
   return {
-    version: 18,
+    version: 19,
     nodes,
     peers,
     defines,
     functions,
     filters,
     rpki,
+    staticProtocols,
     sessions,
   };
 }
@@ -1371,13 +1377,14 @@ function renderRPKISource(source) {
   return output;
 }
 
-export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionInputs = [], filterInputs = [], defineInputs = [], rpkiInputs = []) {
+export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionInputs = [], filterInputs = [], defineInputs = [], rpkiInputs = [], staticInputs = []) {
   const node = normalizeNode(nodeInput);
   const peers = peerInputs.map(normalizePeer);
   const defines = defineInputs.map(normalizeDefine).filter((item) => item.enabled);
   const functions = functionInputs.map(normalizePolicyFunction).filter((item) => item.enabled);
   const filters = filterInputs.map(normalizePolicyFilter).filter((item) => item.enabled);
   const rpki = rpkiInputs.map(normalizeRPKISource).filter((item) => item.enabled && (item.nodeId === null || item.nodeId === node.id));
+  const staticProtocols = staticInputs.map(normalizeStaticProtocol).filter((item) => item.enabled && item.nodeId === node.id);
   const sessions = sessionInputs.map(normalizeSession).filter((item) => item.enabled);
   const peerMap = new Map(peers.map((item) => [item.id, item]));
   const defineMap = new Map(defines.map((item) => [item.id, item]));
@@ -1403,18 +1410,12 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
       assert(localScope === null || peerScope === null || localScope === peerScope, `会话 ${session.protocolName} 的 IPv6 Scope 接口必须一致`);
     }
     const exportDefines = {};
-    const staticDefines = {};
     for (const [family, channel] of Object.entries(session.channels)) {
       const expectedType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
-      const staticDefine = channel.static.defineId === null ? null : defineMap.get(channel.static.defineId);
       assert(
         channel.exportDefineId === null || (exportDefine?.type === expectedType && (exportDefine.nodeId === null || exportDefine.nodeId === node.id)),
         `会话 ${session.protocolName} 的 ${family.toUpperCase()} 导出 CIDR Define 对节点 ${node.name} 不可用`,
-      );
-      assert(
-        channel.static.defineId === null || (staticDefine?.type === expectedType && (staticDefine.nodeId === null || staticDefine.nodeId === node.id)),
-        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Static CIDR Define 对节点 ${node.name} 不可用`,
       );
       for (const policy of [channel.importPolicy, channel.exportPolicy]) {
         for (const step of policy.steps.filter((item) => item.type === "function")) {
@@ -1424,36 +1425,28 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
         if (policy.filterId !== null) assert(filterMap.has(policy.filterId), `会话 ${session.protocolName} 引用了不可用的 Filter`);
       }
       exportDefines[family] = exportDefine;
-      staticDefines[family] = staticDefine;
     }
-    return { session, peer, exportDefines, staticDefines };
+    return { session, peer, exportDefines };
   });
   const routeActions = { ipv4: new Map(), ipv6: new Map() };
-  const staticProtocols = [];
-  for (const { session, staticDefines } of active) {
-    for (const family of ["ipv4", "ipv6"]) {
-      const channel = session.channels[family];
-      if (!channel.enabled) continue;
-      const routes = [];
-      const staticDefine = staticDefines[family];
-      if (channel.static.action !== null && staticDefine !== null) {
-        for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
-          const existing = routeActions[family].get(prefix);
-          assert(!existing || existing === channel.static.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-          routeActions[family].set(prefix, channel.static.action);
-          routes.push([prefix, channel.static.action]);
-        }
+  const renderedStaticProtocols = staticProtocols.map((resource) => {
+    const expectedType = resource.family === "ipv4" ? "cidr4" : "cidr6";
+    const staticDefine = resource.defineId === null ? null : defineMap.get(resource.defineId);
+    assert(
+      resource.defineId === null || (staticDefine?.type === expectedType && (staticDefine.nodeId === null || staticDefine.nodeId === node.id)),
+      `Static 资源 ${resource.name} 的 CIDR Define 对节点 ${node.name} 不可用`,
+    );
+    const routes = [];
+    if (resource.action !== null && staticDefine !== null) {
+      for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
+        const existing = routeActions[resource.family].get(prefix);
+        assert(!existing || existing === resource.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
+        routeActions[resource.family].set(prefix, resource.action);
+        routes.push([prefix, resource.action]);
       }
-      if (routes.length || channel.static.raw) staticProtocols.push({
-        name: staticProtocolName(family, session.protocolName),
-        family,
-        routes,
-        import: channel.static.import,
-        export: channel.static.export,
-        raw: channel.static.raw,
-      });
     }
-  }
+    return { ...resource, routes };
+  }).filter((resource) => resource.routes.length || resource.raw);
 
   let config = "# Generated by Birdbox Demo. Manual changes will be replaced.\n";
   if (node.deploymentMode === "legacy") {
@@ -1478,7 +1471,7 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     config += "\nprotocol bfd birdbox_bfd {\n}\n";
   }
 
-  for (const staticProtocol of staticProtocols) {
+  for (const staticProtocol of renderedStaticProtocols) {
     config += `\nprotocol static ${staticProtocol.name} {\n` +
       `  ${staticProtocol.family} {\n` +
       `    import ${staticProtocol.import};\n` +

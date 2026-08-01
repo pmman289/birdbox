@@ -23,6 +23,7 @@ const elements = {
   peerDialog: $("#peerDialog"),
   policyResourceDialog: $("#policyResourceDialog"),
   policyActionDialog: $("#policyActionDialog"),
+  staticDialog: $("#staticDialog"),
   rpkiDialog: $("#rpkiDialog"),
   nodeCleanupDialog: $("#nodeCleanupDialog"),
 };
@@ -53,7 +54,7 @@ const API_DEPLOYMENT_TIMEOUT_MS = 1810000;
 
 function isDeploymentMutation(path, method) {
   if (method === "GET") return false;
-  if (/^\/api\/(defines|functions|filters|rpki)(?:\/|$)/.test(path)) return true;
+  if (/^\/api\/(defines|functions|filters|rpki|statics)(?:\/|$)/.test(path)) return true;
   if (/^\/api\/sessions\/(?:preview|apply)$/.test(path)) return true;
   if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
   if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
@@ -163,20 +164,6 @@ function channelEditorMarkup(family, active) {
     <div id="${family}ChannelContent" class="channel-content">
       ${policyMarkup("import")}
       ${policyMarkup("export")}
-      <section class="session-options" aria-labelledby="${family}StaticTitle">
-        <div class="option-heading"><span>${label}</span><h3 id="${family}StaticTitle">Static 路由</h3></div>
-        <div class="policy-form-fields">
-          <div class="field"><label for="${family}StaticDefineSelect">CIDR Define</label>
-            <div class="select-actions prefix-select-actions"><select id="${family}StaticDefineSelect"></select><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Define" aria-label="前往资源管理 Tab 管理 Define" data-resource-target="defines">?</button></div>
-          </div>
-          <div class="field"><label for="${family}StaticRouteAction">标准动作</label>
-            <select id="${family}StaticRouteAction"><option value="">不自动创建路由</option><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option></select>
-          </div>
-          <div class="field"><label for="${family}StaticImport">Static Import</label><select id="${family}StaticImport"><option value="all">all</option><option value="none">none</option></select></div>
-          <div class="field"><label for="${family}StaticExport">Static Export</label><select id="${family}StaticExport"><option value="none">none</option><option value="all">all</option></select></div>
-          <div class="field full-width"><label for="${family}StaticRaw">自定义 Static 指令</label><textarea id="${family}StaticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
-        </div>
-      </section>
       <section class="session-options" aria-labelledby="${family}LimitsTitle">
         <div class="option-heading"><span>${label}</span><h3 id="${family}LimitsTitle">Channel 限制</h3></div>
         <div class="limit-grid">
@@ -381,11 +368,15 @@ function formErrorField(form, message) {
     [/会话本地 ASN|两端 ASN/, ["sessionLocalAsn"]],
     [/会话本地端口/, ["sessionLocalPort"]],
     [/IPv4 与 IPv6 Channel/, ["ipv4Enabled", "ipv6Enabled"]],
-    [/Static Import/, familyErrorFields(message, "StaticImport")],
-    [/Static Export/, familyErrorFields(message, "StaticExport")],
-    [/Static.*CIDR Define/, familyErrorFields(message, "StaticDefineSelect")],
-    [/静态路由动作/, familyErrorFields(message, "StaticRouteAction")],
-    [/Static 指令/, familyErrorFields(message, "StaticRaw")],
+    [/Static 所属节点|Static 资源.*不存在的节点/, ["staticNodeId"]],
+    [/Static 显示名称/, ["staticLabel"]],
+    [/Static 协议名称/, ["staticName"]],
+    [/Static 地址族/, ["staticFamily"]],
+    [/Static.*CIDR Define/, ["staticDefineId"]],
+    [/静态路由动作/, ["staticAction"]],
+    [/Static Import/, ["staticImport"]],
+    [/Static Export/, ["staticExport"]],
+    [/Static 资源至少|Static 指令/, ["staticRaw"]],
     [/导出.*CIDR Define/, familyErrorFields(message, "ExportDefineSelect")],
     [/Hold Time/, ["holdTime"]],
     [/Keepalive/, ["keepaliveTime"]],
@@ -412,6 +403,7 @@ function formErrorField(form, message) {
     [/IPv6 ROA 文件/, ["rpkiFile6"]],
     [/RPKI TCP-MD5.*密码/, ["rpkiPassword"]],
     [/RPKI SSH/, ["rpkiBirdPrivateKey", "rpkiRemotePublicKey", "rpkiUser"]],
+    [/BIRD 全局标识符冲突/, ["staticName", "policyResourceName", "rpkiName", "protocolName"]],
     [/BIRD .*名称|Define 名称|策略名称|声明开始/, ["policyResourceName", "policyActionName"]],
     [/显示名称/, ["policyResourceLabel", "policyActionLabel"]],
     [/CIDR 列表|Define 表达式|策略源码|源码|顶层声明|花括号/, ["policyResourceSource"]],
@@ -659,6 +651,7 @@ function usedBirdNames(excluded = []) {
       resource.roa4Table,
       resource.roa6Table,
     ]),
+    ...(inventory.staticProtocols ?? []).map((resource) => resource.name),
     ...(inventory.sessions ?? []).map((session) => session.protocolName),
   ].filter((name) => name && !excludedSet.has(name)));
 }
@@ -726,13 +719,6 @@ function channelPayload(family) {
     importPolicy: policyPayload(family, "import"),
     exportPolicy: policyPayload(family, "export"),
     exportDefineId: value(`${family}ExportDefineSelect`) || null,
-    static: {
-      defineId: value(`${family}StaticDefineSelect`) || null,
-      action: value(`${family}StaticRouteAction`) || null,
-      import: value(`${family}StaticImport`),
-      export: value(`${family}StaticExport`),
-      raw: $(`#${family}StaticRaw`).value,
-    },
     table: value(`${family}ChannelTable`) || null,
     preference: optionalNumber(`${family}ChannelPreference`),
     importKeepFiltered: checked(`${family}ImportKeepFiltered`),
@@ -1146,7 +1132,6 @@ function renderSessionForm() {
       importPolicy: { mode: "form", steps: [], filterId: null, formAction: "all" },
       exportPolicy: { mode: "form", steps: [], filterId: null, formAction: "none" },
       exportDefineId: null,
-      static: { defineId: null, action: null, import: "all", export: "none", raw: "" },
     };
     const cidrDefines = state.cidrDefines?.[family] ?? [];
     const defineOptions = cidrDefines
@@ -1157,15 +1142,6 @@ function renderSessionForm() {
     defineSelect.value = channel.exportDefineId && cidrDefines.some((item) => item.id === channel.exportDefineId)
       ? channel.exportDefineId
       : "";
-    const staticDefineSelect = $(`#${family}StaticDefineSelect`);
-    staticDefineSelect.innerHTML = '<option value="">不选择 CIDR Define</option>' + defineOptions;
-    staticDefineSelect.value = channel.static?.defineId && cidrDefines.some((item) => item.id === channel.static.defineId)
-      ? channel.static.defineId
-      : "";
-    $(`#${family}StaticRouteAction`).value = channel.static?.action ?? "";
-    $(`#${family}StaticImport`).value = channel.static?.import ?? "all";
-    $(`#${family}StaticExport`).value = channel.static?.export ?? "none";
-    $(`#${family}StaticRaw`).value = channel.static?.raw ?? "";
     $(`#${family}Enabled`).checked = channel.enabled !== false;
     populateChannelOptions(family, channel);
     for (const direction of ["import", "export"]) {
@@ -1653,18 +1629,6 @@ function syncExportFormAvailability(family) {
   $(`#${family}ExportDefineSelect`).required = channelEnabled && cidrMode && !customMode;
 }
 
-function syncStaticAvailability(family) {
-  const channelEnabled = checked(`${family}Enabled`);
-  const hasDefine = Boolean(value(`${family}StaticDefineSelect`));
-  const action = $(`#${family}StaticRouteAction`);
-  action.disabled = !channelEnabled;
-  $(`#${family}StaticDefineSelect`).disabled = !channelEnabled;
-  $(`#${family}StaticImport`).disabled = !channelEnabled;
-  $(`#${family}StaticExport`).disabled = !channelEnabled;
-  $(`#${family}StaticRaw`).disabled = !channelEnabled;
-  action.setCustomValidity(channelEnabled && action.value && !hasDefine ? "Static 标准动作必须选择 CIDR Define" : "");
-}
-
 function syncChannelAvailability(family) {
   const enabled = checked(`${family}Enabled`);
   const content = $(`#${family}ChannelContent`);
@@ -1674,7 +1638,6 @@ function syncChannelAvailability(family) {
   $(`[data-channel-tab="${family}"]`).classList.toggle("disabled", !enabled);
   for (const direction of ["import", "export"]) syncPolicyControls(family, direction);
   syncChannelRequirementControls(family);
-  syncStaticAvailability(family);
   const atLeastOneChannel = CHANNEL_FAMILIES.some((item) => checked(`${item}Enabled`));
   $("#ipv4Enabled").setCustomValidity(atLeastOneChannel ? "" : "请至少启用 IPv4 或 IPv6 Channel");
 }
@@ -1735,6 +1698,7 @@ function renderEvents() {
 function renderResourceManagement() {
   const nodes = state.inventory.nodes;
   $("#manageAddPeerButton").disabled = nodes.length === 0;
+  $("#manageAddStaticButton").disabled = nodes.length === 0;
   const nodeNames = new Map(nodes.map((node) => [node.id, node.name]));
 
   $("#managementNodeRows").innerHTML = nodes.map((node) => `
@@ -1770,8 +1734,11 @@ function renderResourceManagement() {
   const defineReferenceCount = (resource) => [...state.inventory.defines, ...state.inventory.functions, ...state.inventory.filters]
     .filter((item) => item.id !== resource.id && sourceReferences(item.value ?? item.source, resource.name)).length +
     state.inventory.sessions.reduce((count, session) => count + Object.values(session.channels).filter((channel) =>
-      channel.exportDefineId === resource.id || channel.static?.defineId === resource.id || sourceReferences(channel.static?.raw, resource.name),
-    ).length, 0);
+      channel.exportDefineId === resource.id,
+    ).length, 0) +
+    (state.inventory.staticProtocols ?? []).filter((item) =>
+      item.defineId === resource.id || sourceReferences(item.raw, resource.name),
+    ).length;
 
   $("#managementDefineRows").innerHTML = state.inventory.defines.length
     ? state.inventory.defines.map((resource, index) => `<tr>
@@ -1789,6 +1756,24 @@ function renderResourceManagement() {
       </span></td>
     </tr>`).join("")
     : '<tr><td colspan="8" class="empty-cell">尚无 Define</td></tr>';
+
+  const defineNames = new Map(state.inventory.defines.map((resource) => [resource.id, resource.label ?? resource.name]));
+  $("#managementStaticRows").innerHTML = (state.inventory.staticProtocols ?? []).length
+    ? state.inventory.staticProtocols.map((resource) => {
+        const standardRoute = resource.defineId
+          ? `${defineNames.get(resource.defineId) ?? resource.defineId} · ${resource.action}`
+          : "仅自定义指令";
+        return `<tr>
+          <td><strong>${escapeHtml(resource.label)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
+          <td>${escapeHtml(nodeNames.get(resource.nodeId) ?? resource.nodeId)}</td>
+          <td>${resource.family === "ipv4" ? "IPv4" : "IPv6"}</td>
+          <td><code>${escapeHtml(standardRoute)}${resource.defineId && resource.raw ? " · + 自定义" : ""}</code></td>
+          <td><code>${escapeHtml(resource.import)} / ${escapeHtml(resource.export)}</code></td>
+          <td><span class="resource-state ${resource.enabled ? "enabled" : "disabled"}">${resource.enabled ? "已启用" : "已停用"}</span></td>
+          <td><button class="row-edit-button" type="button" title="编辑 Static" aria-label="编辑 Static ${escapeHtml(resource.name)}" data-edit-static="${escapeHtml(resource.id)}">✎</button></td>
+        </tr>`;
+      }).join("")
+    : '<tr><td colspan="7" class="empty-cell">尚无 Static 资源</td></tr>';
 
   $("#managementFunctionRows").innerHTML = state.inventory.functions.length
     ? state.inventory.functions.map((resource, index) => `<tr>
@@ -1836,6 +1821,9 @@ function renderResourceManagement() {
   $$('[data-edit-policy-id]').forEach((button) => button.addEventListener("click", () => {
     const collection = button.dataset.editPolicyKind;
     openPolicyResourceDialog(collection, state.inventory[collection].find((item) => item.id === button.dataset.editPolicyId));
+  }));
+  $$('[data-edit-static]').forEach((button) => button.addEventListener("click", () => {
+    openStaticDialog((state.inventory.staticProtocols ?? []).find((item) => item.id === button.dataset.editStatic));
   }));
   $$('[data-edit-rpki]').forEach((button) => button.addEventListener("click", () => {
     openRPKIDialog(state.inventory.rpki.find((item) => item.id === button.dataset.editRpki));
@@ -2073,27 +2061,28 @@ function showNodeCleanupDialog(node, forced) {
 
 async function saveNode(event) {
   event.preventDefault();
-  if (!validateForm(event.currentTarget)) return;
+  const form = event.currentTarget;
+  if (!validateForm(form)) return;
   const id = value("nodeId");
-  if (!id && event.currentTarget.dataset.verified !== "true") {
+  if (!id && form.dataset.verified !== "true") {
     toast("请先完成节点连接测试", "error");
     return;
   }
   const body = nodeEditorPayload();
   const button = $("#saveNodeButton");
   setButtonLoading(button, true, id ? "正在更新节点" : "正在添加节点");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   try {
     const result = await api(id ? `/api/nodes/${id}` : "/api/nodes", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
     await loadDashboard(result.node.id);
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
     elements.nodeDialog.close();
     toast(id ? `节点已更新，${deploymentSummary(result.deployment)}` : "节点已添加", "success");
-  } catch (error) { presentFormError(event.currentTarget, error); }
+  } catch (error) { presentFormError(form, error); }
   finally {
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
   }
 }
 
@@ -2166,7 +2155,8 @@ function openPeerDialog(peer = null) {
 
 async function savePeer(event) {
   event.preventDefault();
-  if (!validateForm(event.currentTarget)) return;
+  const form = event.currentTarget;
+  if (!validateForm(form)) return;
   const id = value("peerId");
   const nodeId = value("peerEditorNodeId");
   const body = {
@@ -2175,20 +2165,118 @@ async function savePeer(event) {
     asn: Number(value("peerEditorAsn")),
     port: Number(value("peerEditorPort")),
   };
-  const button = event.submitter ?? event.currentTarget.querySelector('button[type="submit"]');
+  const button = event.submitter ?? form.querySelector('button[type="submit"]');
   setButtonLoading(button, true, id ? "正在更新 Peer" : "正在添加 Peer");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   try {
     const result = await api(id ? `/api/peers/${id}` : `/api/nodes/${nodeId}/peers`, { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
     await loadDashboard(nodeId, result.peer.id);
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
     elements.peerDialog.close();
     toast(id ? `Peer 已更新，${deploymentSummary(result.deployment)}` : "Peer 已添加", "success");
-  } catch (error) { presentFormError(event.currentTarget, error); }
+  } catch (error) { presentFormError(form, error); }
   finally {
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
+  }
+}
+
+function syncStaticName() {
+  if (value("staticId") || $("#staticName").dataset.edited || !value("staticLabel")) return;
+  const prefix = value("staticFamily") === "ipv6" ? "birdbox_static6" : "birdbox_static4";
+  $("#staticName").value = uniqueBirdName(prefix, value("staticLabel"));
+}
+
+function syncStaticDefines(preferredDefineId = value("staticDefineId")) {
+  const nodeId = value("staticNodeId");
+  const type = value("staticFamily") === "ipv6" ? "cidr6" : "cidr4";
+  const compatible = (state?.inventory?.defines ?? []).filter((resource) =>
+    resource.enabled && resource.type === type && (resource.nodeId === null || resource.nodeId === nodeId),
+  );
+  $("#staticDefineId").innerHTML = '<option value="">不创建标准路由</option>' + compatible
+    .map((resource) => `<option value="${escapeHtml(resource.id)}">${escapeHtml(resource.label)} · ${escapeHtml(resource.name)}${resource.nodeId === null ? " · 所有节点" : ""}</option>`)
+    .join("");
+  $("#staticDefineId").value = compatible.some((resource) => resource.id === preferredDefineId) ? preferredDefineId : "";
+}
+
+function syncStaticEditor() {
+  const hasDefine = Boolean(value("staticDefineId"));
+  const action = $("#staticAction");
+  if (!hasDefine) action.value = "";
+  action.disabled = !hasDefine;
+  action.setCustomValidity(hasDefine && !action.value ? "请选择 Static 标准动作" : "");
+  $("#staticRaw").setCustomValidity(!hasDefine && !value("staticRaw") ? "请配置标准路由或填写自定义 Static 指令" : "");
+}
+
+function openStaticDialog(resource = null) {
+  const selectedNodeId = resource?.nodeId ?? currentNode()?.id ?? state.inventory.nodes[0]?.id;
+  if (!selectedNodeId) {
+    toast("请先添加受管节点", "error");
+    return;
+  }
+  if (elements.staticDialog.open) elements.staticDialog.close();
+  resetFormPending($("#staticForm"));
+  clearFormValidation($("#staticForm"));
+  setButtonLoading($("#saveStaticButton"), false);
+  setButtonLoading($("#deleteStaticButton"), false);
+  $("#staticDialogTitle").textContent = resource ? "编辑 Static 资源" : "添加 Static 资源";
+  $("#staticId").value = resource?.id ?? "";
+  $("#staticNodeId").innerHTML = nodeOptions(selectedNodeId);
+  $("#staticNodeId").disabled = Boolean(resource);
+  $("#staticLabel").value = resource?.label ?? "";
+  $("#staticName").value = resource?.name ?? "";
+  $("#staticFamily").value = resource?.family ?? "ipv4";
+  syncStaticDefines(resource?.defineId ?? "");
+  $("#staticAction").value = resource?.action ?? "";
+  $("#staticImport").value = resource?.import ?? "all";
+  $("#staticExport").value = resource?.export ?? "none";
+  $("#staticRaw").value = resource?.raw ?? "";
+  $("#staticEnabled").checked = resource?.enabled !== false;
+  $("#deleteStaticButton").hidden = !resource;
+  if (resource) $("#staticName").dataset.edited = "true";
+  else delete $("#staticName").dataset.edited;
+  syncStaticEditor();
+  elements.staticDialog.showModal();
+}
+
+async function saveStatic(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  syncStaticEditor();
+  if (!validateForm(form)) return;
+  const id = value("staticId");
+  const nodeId = value("staticNodeId");
+  const body = {
+    nodeId,
+    label: value("staticLabel"),
+    name: value("staticName"),
+    family: value("staticFamily"),
+    defineId: value("staticDefineId") || null,
+    action: value("staticAction") || null,
+    import: value("staticImport"),
+    export: value("staticExport"),
+    raw: $("#staticRaw").value,
+    enabled: checked("staticEnabled"),
+  };
+  const button = $("#saveStaticButton");
+  setButtonLoading(button, true, "正在预检");
+  setFormPending(form, true);
+  try {
+    const result = await api(id ? `/api/statics/${id}` : "/api/statics", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(body),
+    });
+    const peerId = currentNode()?.id === nodeId ? currentPeer()?.id : null;
+    await loadDashboard(nodeId, peerId);
+    activateResourceTab("statics");
+    elements.staticDialog.close();
+    toast(`Static 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
+  } catch (error) {
+    presentFormError(form, error);
+  } finally {
+    setFormPending(form, false);
+    setButtonLoading(button, false);
   }
 }
 
@@ -2226,6 +2314,10 @@ function syncRPKINames() {
 }
 
 function openRPKIDialog(resource = null) {
+  if (elements.rpkiDialog.open) elements.rpkiDialog.close();
+  resetFormPending($("#rpkiForm"));
+  clearFormValidation($("#rpkiForm"));
+  setButtonLoading($("#deleteRPKIButton"), false);
   $("#rpkiDialogTitle").textContent = resource ? "编辑 RPKI 资源" : "添加 RPKI 资源";
   $("#rpkiId").value = resource?.id ?? "";
   $("#rpkiNodeId").innerHTML = resourceScopeOptions(resource?.nodeId ?? null);
@@ -2267,7 +2359,8 @@ function openRPKIDialog(resource = null) {
 
 async function saveRPKI(event) {
   event.preventDefault();
-  if (!validateForm(event.currentTarget)) return;
+  const form = event.currentTarget;
+  if (!validateForm(form)) return;
   const id = value("rpkiId");
   const sourceType = value("rpkiSourceType");
   const transport = value("rpkiTransport");
@@ -2307,21 +2400,21 @@ async function saveRPKI(event) {
           user: value("rpkiUser") || null,
         }),
   };
-  const button = event.submitter ?? event.currentTarget.querySelector('button[type="submit"]');
+  const button = event.submitter ?? form.querySelector('button[type="submit"]');
   setButtonLoading(button, true, "正在预检");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   try {
     const result = await api(id ? `/api/rpki/${id}` : "/api/rpki", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
     await loadDashboard(currentNode()?.id, currentPeer()?.id);
     activateResourceTab("rpki");
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
     elements.rpkiDialog.close();
     toast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
-  } catch (error) { presentFormError(event.currentTarget, error); }
+  } catch (error) { presentFormError(form, error); }
   finally {
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
   }
 }
 
@@ -2560,11 +2653,12 @@ async function savePolicyResource(event) {
 
 $("#authForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!validateForm(event.currentTarget)) return;
-  const setup = event.currentTarget.dataset.mode === "setup";
+  const form = event.currentTarget;
+  if (!validateForm(form)) return;
+  const setup = form.dataset.mode === "setup";
   const button = $("#authSubmitButton");
   setButtonLoading(button, true, setup ? "正在设置" : "正在登录");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   setAuthError($("#authError"));
   try {
     await api(setup ? "/api/auth/setup" : "/api/auth/login", {
@@ -2579,7 +2673,7 @@ $("#authForm").addEventListener("submit", async (event) => {
     setAuthError($("#authError"), error.message);
   } finally {
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
   }
 });
 
@@ -2606,10 +2700,11 @@ $("#logoutButton").addEventListener("click", async () => {
 
 $("#passwordForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!validateForm(event.currentTarget)) return;
+  const form = event.currentTarget;
+  if (!validateForm(form)) return;
   const button = $("#savePasswordButton");
   setButtonLoading(button, true, "正在更新密码");
-  setFormPending(event.currentTarget, true);
+  setFormPending(form, true);
   setAuthError($("#passwordError"));
   try {
     await api("/api/auth/password", {
@@ -2621,13 +2716,13 @@ $("#passwordForm").addEventListener("submit", async (event) => {
       }),
     });
     $("#passwordDialog").close();
-    event.currentTarget.reset();
+    form.reset();
     toast("管理密码已更新", "success");
   } catch (error) {
     setAuthError($("#passwordError"), error.message);
   } finally {
     setButtonLoading(button, false);
-    setFormPending(event.currentTarget, false);
+    setFormPending(form, false);
   }
 });
 
@@ -2671,6 +2766,7 @@ $("#emptyAddPeerButton").addEventListener("click", () => activateWorkspace("reso
 $("#manageAddNodeButton").addEventListener("click", () => openNodeDialog());
 $("#manageAddPeerButton").addEventListener("click", () => openPeerDialog());
 $("#manageAddDefineButton").addEventListener("click", () => openPolicyResourceDialog("defines"));
+$("#manageAddStaticButton").addEventListener("click", () => openStaticDialog());
 $("#manageAddFunctionButton").addEventListener("click", () => openPolicyResourceDialog("functions"));
 $("#manageAddFilterButton").addEventListener("click", () => openPolicyResourceDialog("filters"));
 $("#manageAddRPKIButton").addEventListener("click", () => openRPKIDialog());
@@ -2693,6 +2789,21 @@ $("#copyNodeSetupButton").addEventListener("click", async () => {
 });
 $("#peerForm").addEventListener("submit", savePeer);
 $("#policyResourceForm").addEventListener("submit", savePolicyResource);
+$("#staticForm").addEventListener("submit", saveStatic);
+$("#staticLabel").addEventListener("input", syncStaticName);
+$("#staticName").addEventListener("input", () => { $("#staticName").dataset.edited = "true"; });
+$("#staticNodeId").addEventListener("change", () => {
+  syncStaticDefines();
+  syncStaticEditor();
+});
+$("#staticFamily").addEventListener("change", () => {
+  syncStaticDefines();
+  syncStaticName();
+  syncStaticEditor();
+});
+$("#staticDefineId").addEventListener("change", syncStaticEditor);
+$("#staticAction").addEventListener("change", syncStaticEditor);
+$("#staticRaw").addEventListener("input", syncStaticEditor);
 $("#rpkiForm").addEventListener("submit", saveRPKI);
 $("#rpkiLabel").addEventListener("input", syncRPKINames);
 for (const id of ["rpkiName", "rpkiRoa4Table", "rpkiRoa6Table"]) {
@@ -2719,7 +2830,6 @@ elements.sessionForm.addEventListener("change", (event) => {
   const family = CHANNEL_FAMILIES.find((item) => event.target.id.startsWith(item) || event.target.name?.startsWith(item));
   if (family && event.target.id === `${family}Enabled`) syncChannelAvailability(family);
   if (family && event.target.id === `${family}ExportDefineSelect`) syncExportFormAvailability(family);
-  if (family && [`${family}StaticDefineSelect`, `${family}StaticRouteAction`].includes(event.target.id)) syncStaticAvailability(family);
   if (family && [
     `${family}ExtendedNextHop`, `${family}AddPaths`, `${family}GatewayMode`,
     `${family}ImportLimit`, `${family}ImportLimitAction`,
@@ -2833,6 +2943,7 @@ $("#forceDeleteNodeButton").addEventListener("click", async () => {
     ["Functions", state.inventory.functions.filter((item) => item.nodeId === node.id).length],
     ["Filters", state.inventory.filters.filter((item) => item.nodeId === node.id).length],
     ["RPKI", state.inventory.rpki.filter((item) => item.nodeId === node.id).length],
+    ["Static", (state.inventory.staticProtocols ?? []).filter((item) => item.nodeId === node.id).length],
   ].map(([label, count]) => `${label} ${count}`).join("、");
   if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将级联删除 ${counts}，且不会清理远端配置。`)) return;
   if (window.prompt(`请输入“${confirmation}”以确认：`) !== confirmation) return;
@@ -2893,6 +3004,28 @@ $("#deletePolicyResourceButton").addEventListener("click", async () => {
   finally {
     setButtonLoading(button, false);
     setFormPending($("#policyResourceForm"), false);
+  }
+});
+
+$("#deleteStaticButton").addEventListener("click", async () => {
+  const resource = (state.inventory.staticProtocols ?? []).find((item) => item.id === value("staticId"));
+  if (!resource || !window.confirm(`删除 Static ${resource.name}？`)) return;
+  const button = $("#deleteStaticButton");
+  setButtonLoading(button, true, "正在删除");
+  setFormPending($("#staticForm"), true);
+  try {
+    const result = await api(`/api/statics/${resource.id}`, { method: "DELETE" });
+    const peerId = currentNode()?.id === resource.nodeId ? currentPeer()?.id : null;
+    await loadDashboard(resource.nodeId, peerId);
+    activateResourceTab("statics");
+    setButtonLoading(button, false);
+    setFormPending($("#staticForm"), false);
+    elements.staticDialog.close();
+    toast(`Static 已删除，${deploymentSummary(result.deployment)}`, "success");
+  } catch (error) { presentFormError($("#staticForm"), error); }
+  finally {
+    setButtonLoading(button, false);
+    setFormPending($("#staticForm"), false);
   }
 });
 

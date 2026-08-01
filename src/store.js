@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   loadSeedNodes,
+  makeStaticProtocolName,
   normalizeDefine,
   normalizePeer,
   normalizeSession,
@@ -11,7 +12,7 @@ import {
 } from "./bird.js";
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 18;
+const CURRENT_INVENTORY_VERSION = 19;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version) {
@@ -112,9 +113,51 @@ function upgradeSessionV15(session, nodes) {
   };
 }
 
+function migrateSessionStatics(sessions, existingStaticProtocols, sourceVersion) {
+  const staticProtocols = (existingStaticProtocols ?? []).map((item) => ({ ...item }));
+  const usedIds = new Set(staticProtocols.map((item) => item.id));
+  const uniqueStaticId = (sessionId, family) => {
+    const base = safeLegacyId("static", `${sessionId}_${family}`);
+    let candidate = base;
+    let suffix = 2;
+    while (usedIds.has(candidate)) candidate = `${base.slice(0, 60 - String(suffix).length)}_${suffix++}`;
+    usedIds.add(candidate);
+    return candidate;
+  };
+  const migratedSessions = sessions.map((session) => ({
+    ...session,
+    channels: Object.fromEntries(Object.entries(session.channels).map(([family, channel]) => {
+      const { static: legacyStatic, ...sessionChannel } = channel;
+      const shouldMigrate = Number(sourceVersion) < 19 && legacyStatic && (legacyStatic.action || String(legacyStatic.raw ?? "").trim());
+      if (shouldMigrate) {
+        staticProtocols.push({
+          id: uniqueStaticId(session.id, family),
+          nodeId: session.nodeId,
+          label: `${session.protocolName} ${family.toUpperCase()} Static`,
+          name: makeStaticProtocolName(family, session.protocolName),
+          family,
+          defineId: legacyStatic.action ? (legacyStatic.defineId ?? null) : null,
+          action: legacyStatic.action ?? null,
+          import: legacyStatic.import ?? "all",
+          export: legacyStatic.export ?? "none",
+          raw: legacyStatic.raw ?? "",
+          enabled: session.enabled !== false && channel.enabled !== false,
+        });
+      }
+      return [family, sessionChannel];
+    })),
+  }));
+  return { sessions: migratedSessions, staticProtocols };
+}
+
 function upgradeInventory(input) {
   assertSupportedInventoryVersion(input);
   if (Number(input.version) >= 11) {
+    const migrated = migrateSessionStatics(
+      (input.sessions ?? []).map((session) => upgradeSessionV15(session, input.nodes)),
+      input.staticProtocols,
+      input.version,
+    );
     return {
       ...input,
       version: CURRENT_INVENTORY_VERSION,
@@ -126,7 +169,8 @@ function upgradeInventory(input) {
       functions: upgradeResourceOrder(input.functions),
       filters: upgradeResourceOrder(input.filters),
       rpki: (input.rpki ?? []).map((item) => ({ ...item })),
-      sessions: (input.sessions ?? []).map((session) => upgradeSessionV15(session, input.nodes)),
+      staticProtocols: migrated.staticProtocols,
+      sessions: migrated.sessions,
     };
   }
   const prefixLists = (input.prefixLists ?? []).map((item) => ({
@@ -164,6 +208,10 @@ function upgradeInventory(input) {
       exportPolicy: withRouteAction.exportPolicy ?? { mode: "form", steps: [], filterId: null },
     };
   });
+  const migrated = migrateSessionStatics(sessions.map(({ prefixListId, ...session }) => upgradeSessionV15({
+    ...session,
+    exportDefineId: prefixListId ?? null,
+  }, input.nodes)), input.staticProtocols, input.version);
   return {
     ...input,
     version: CURRENT_INVENTORY_VERSION,
@@ -186,10 +234,8 @@ function upgradeInventory(input) {
     functions: upgradeResourceOrder(input.functions),
     filters: upgradeResourceOrder(input.filters),
     rpki: (input.rpki ?? []).map((item) => ({ ...item })),
-    sessions: sessions.map(({ prefixListId, ...session }) => upgradeSessionV15({
-      ...session,
-      exportDefineId: prefixListId ?? null,
-    }, input.nodes)),
+    staticProtocols: migrated.staticProtocols,
+    sessions: migrated.sessions,
   };
 }
 
@@ -260,7 +306,7 @@ export class InventoryStore {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    const state = { version: CURRENT_INVENTORY_VERSION, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
+    const state = { version: CURRENT_INVENTORY_VERSION, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [] };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));
       const local = legacy.local ?? legacy.left;
@@ -292,13 +338,25 @@ export class InventoryStore {
         localAddress: local.address,
         localAsn: local.asn,
         localPort: node.listenPort,
-        routeAction: "blackhole",
         multihop: legacy.multihop,
         enabled: true,
       });
       state.peers.push(peer);
       state.defines.push(exportDefine);
       state.sessions.push(session);
+      state.staticProtocols.push({
+        id: safeLegacyId("static", session.id),
+        nodeId: node.id,
+        label: `${session.protocolName} IPv4 Static`,
+        name: makeStaticProtocolName("ipv4", session.protocolName),
+        family: "ipv4",
+        defineId: exportDefine.id,
+        action: "blackhole",
+        import: "all",
+        export: "none",
+        raw: "",
+        enabled: true,
+      });
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -345,7 +403,7 @@ export class InventoryStore {
     await this.initialize();
     const operation = await this.database.mutateState(
       this.stateKey,
-      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] },
+      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [] },
       async (current) => {
         const draft = structuredClone(validateInventory(upgradeInventory(current)));
         const result = await mutator(draft);
