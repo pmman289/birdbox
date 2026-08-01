@@ -11,7 +11,7 @@ import {
 } from "./bird.js";
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 17;
+const CURRENT_INVENTORY_VERSION = 18;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version) {
@@ -70,6 +70,8 @@ function upgradeChannel(channel, defaults) {
     static: {
       defineId: staticConfig.defineId ?? null,
       action: staticConfig.action ?? null,
+      import: staticConfig.import ?? "all",
+      export: staticConfig.export ?? "none",
       raw: staticConfig.raw ?? "",
     },
     ...defaults,
@@ -115,7 +117,7 @@ function upgradeInventory(input) {
   if (Number(input.version) >= 11) {
     return {
       ...input,
-      version: 17,
+      version: CURRENT_INVENTORY_VERSION,
       defines: upgradeResourceOrder(input.defines).map((item) => ({
         ...item,
         label: item.label ?? item.name,
@@ -164,7 +166,7 @@ function upgradeInventory(input) {
   });
   return {
     ...input,
-    version: 17,
+    version: CURRENT_INVENTORY_VERSION,
     defines: [
       ...prefixLists.map((item) => ({
         id: item.id,
@@ -258,7 +260,7 @@ export class InventoryStore {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    const state = { version: 17, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
+    const state = { version: CURRENT_INVENTORY_VERSION, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));
       const local = legacy.local ?? legacy.left;
@@ -343,7 +345,7 @@ export class InventoryStore {
     await this.initialize();
     const operation = await this.database.mutateState(
       this.stateKey,
-      { version: 17, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] },
+      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] },
       async (current) => {
         const draft = structuredClone(validateInventory(upgradeInventory(current)));
         const result = await mutator(draft);

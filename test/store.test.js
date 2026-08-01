@@ -25,7 +25,7 @@ test("confirms an inventory CAS that committed before its response was lost", as
     }
   }
   const database = new AmbiguousCommitDatabase();
-  const initial = { version: 17, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
+  const initial = { version: 18, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [] };
   await database.createState("inventory", initial);
   const store = new InventoryStore({
     database,
@@ -50,7 +50,7 @@ test("refuses a newer inventory format without changing the stored document", as
   const dataDir = path.join(root, "data");
   const database = new MemoryDatabase();
   const futureInventory = {
-    version: 18,
+    version: 19,
     futureOnly: { preserve: true },
     nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [],
   };
@@ -71,7 +71,45 @@ test("refuses a newer inventory format without changing the stored document", as
   assert.deepEqual(persisted.value, futureInventory);
 });
 
-test("migrates node-level BGP settings and advertised prefixes to schema v17", async (context) => {
+test("preserves Static channel policies while upgrading v17 inventory", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-static-policy-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", {
+    version: 17,
+    nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1", listenPort: 179 }],
+    peers: [{ id: "peer_one", nodeId: "local", name: "Peer", address: "192.0.2.2", asn: 65002, port: 179 }],
+    defines: [{
+      id: "prefix_one", nodeId: "local", label: "Routes", name: "ROUTES", type: "cidr4",
+      entries: ["10.0.0.0/24"], enabled: true,
+    }],
+    functions: [], filters: [], rpki: [],
+    sessions: [{
+      id: "session_one", nodeId: "local", peerId: "peer_one", protocolName: "peer_bgp",
+      localAddress: null, localAsn: 65001, localPort: 179, enabled: true,
+      channels: {
+        ipv4: {
+          enabled: true,
+          static: { defineId: "prefix_one", action: "blackhole", import: "none", export: "all", raw: "" },
+        },
+        ipv6: { enabled: false },
+      },
+    }],
+  });
+  const store = new InventoryStore({
+    database,
+    dataDir: root,
+    nodesPath: path.join(root, "nodes.json"),
+    legacySessionPath: path.join(root, "session.json"),
+  });
+  const state = await store.read();
+  assert.equal(state.version, 18);
+  assert.equal(state.sessions[0].localAddress, null);
+  assert.equal(state.sessions[0].channels.ipv4.static.import, "none");
+  assert.equal(state.sessions[0].channels.ipv4.static.export, "all");
+});
+
+test("migrates node-level BGP settings and advertised prefixes to schema v18", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
@@ -107,7 +145,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v17", a
   });
   const state = await store.read();
 
-  assert.equal(state.version, 17);
+  assert.equal(state.version, 18);
   assert.equal(state.nodes[0].address, undefined);
   assert.equal(state.nodes[0].asn, undefined);
   assert.equal(state.sessions[0].localAddress, "192.0.2.10");
@@ -116,7 +154,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v17", a
   assert.equal(state.sessions[0].bgp.connectionMode, "multihop");
   assert.equal(state.sessions[0].bgp.multihopTtl, 10);
   assert.deepEqual(state.sessions[0].channels.ipv4.static, {
-    defineId: state.defines[0].id, action: "blackhole", raw: "",
+    defineId: state.defines[0].id, action: "blackhole", import: "all", export: "none", raw: "",
   });
   assert.equal(state.sessions[0].channels.ipv4.exportDefineId, state.defines[0].id);
   assert.equal(state.sessions[0].channels.ipv4.enabled, true);
@@ -133,7 +171,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v17", a
   assert.deepEqual(await store.read(), state);
 });
 
-test("migrates v8 Function order and combined policies to ordered v17 channel steps", async (context) => {
+test("migrates v8 Function order and combined policies to ordered v18 channel steps", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-policy-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
@@ -164,7 +202,7 @@ test("migrates v8 Function order and combined policies to ordered v17 channel st
     legacySessionPath: path.join(dataDir, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 17);
+  assert.equal(state.version, 18);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "none");
   assert.deepEqual(state.functions.map((resource) => resource.name), ["guard", "late"]);
   assert.equal(state.functions[0].order, undefined);
@@ -174,7 +212,7 @@ test("migrates v8 Function order and combined policies to ordered v17 channel st
   ]);
 });
 
-test("merges v10 CIDR lists before expression Defines and preserves v17 session references", async (context) => {
+test("merges v10 CIDR lists before expression Defines and preserves v18 session references", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-v11-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
@@ -209,7 +247,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v17 session 
   });
   const state = await store.read();
 
-  assert.equal(state.version, 17);
+  assert.equal(state.version, 18);
   assert.deepEqual(state.defines.map((resource) => [resource.id, resource.type]), [
     ["prefix_global", "cidr4"],
     ["define_pref", "expression"],
@@ -225,7 +263,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v17 session 
   assert.equal(state.prefixLists, undefined);
 });
 
-test("migrates v14 export policy and Static settings to the matching v17 IPv4 channel", async (context) => {
+test("migrates v14 export policy and Static settings to the matching v18 IPv4 channel", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-v13-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
@@ -247,9 +285,11 @@ test("migrates v14 export policy and Static settings to the matching v17 IPv4 ch
   await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
   const store = new InventoryStore({ database: new MemoryDatabase(), dataDir, nodesPath: "", legacySessionPath: "" });
   const state = await store.read();
-  assert.equal(state.version, 17);
+  assert.equal(state.version, 18);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
   assert.equal(state.sessions[0].channels.ipv6.exportPolicy.formAction, "none");
-  assert.deepEqual(state.sessions[0].channels.ipv4.static, { defineId: "prefix_one", action: "blackhole", raw: "" });
+  assert.deepEqual(state.sessions[0].channels.ipv4.static, {
+    defineId: "prefix_one", action: "blackhole", import: "all", export: "none", raw: "",
+  });
   assert.equal(state.defines[0].type, "cidr4");
 });

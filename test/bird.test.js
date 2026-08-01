@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import {
   checkIncludeNodeAccess,
@@ -25,6 +27,8 @@ import {
   resourceChangeSessions,
   resourceNodeIds,
 } from "../src/resource-impact.js";
+
+const execFileAsync = promisify(execFile);
 
 const node = {
   id: "local",
@@ -124,8 +128,20 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.equal(normalizeSession(sessions[1]).localAsn, 65100);
   assert.equal(normalizeSession(sessions[1]).localPort, 179);
   assert.equal(normalizeSession(sessions[1]).bgp.connectionMode, "direct");
-  assert.deepEqual(normalizeSession(sessions[1]).channels.ipv4.static, { defineId: "prefix_ix", action: "reject", raw: "" });
-  assert.deepEqual(normalizeSession({ ...sessions[0], routeAction: undefined }).channels.ipv4.static, { defineId: null, action: null, raw: "" });
+  assert.deepEqual(normalizeSession(sessions[1]).channels.ipv4.static, {
+    defineId: "prefix_ix", action: "reject", import: "all", export: "none", raw: "",
+  });
+  assert.deepEqual(normalizeSession({ ...sessions[0], routeAction: undefined }).channels.ipv4.static, {
+    defineId: null, action: null, import: "all", export: "none", raw: "",
+  });
+  assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
+  assert.throws(
+    () => normalizeSession({
+      ...sessions[0],
+      channels: { ipv4: { enabled: true, static: { import: "invalid" } }, ipv6: { enabled: false } },
+    }),
+    /Static Import 设置不合法/,
+  );
   assert.throws(() => normalizeSession({ ...sessions[0], routeAction: "discard" }), /静态路由动作不合法/);
   assert.throws(
     () => normalizeSession({ ...sessions[0], exportDefineId: null, routeAction: "blackhole" }),
@@ -282,7 +298,7 @@ test("renders IPv6-only and dual-stack BGP channels independently", () => {
     },
   };
   const ipv6Only = renderBirdConfig(node, [peerV6], [sessionV6], [], [], [defineV6]);
-  assert.match(ipv6Only, /protocol static birdbox_static6 \{\s+ipv6;/);
+  assert.match(ipv6Only, /protocol static birdbox_static6_peer_v6_bgp \{\s+ipv6 \{\s+import all;\s+export none;\s+\};/);
   assert.match(ipv6Only, /protocol bgp peer_v6_bgp[\s\S]*?ipv6 \{/);
   assert.doesNotMatch(ipv6Only.match(/protocol bgp peer_v6_bgp[\s\S]*?\n\}/)?.[0] ?? "", /ipv4 \{/);
   assert.match(ipv6Only, /route 2001:db8:100::\/48 blackhole;/);
@@ -388,6 +404,17 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
     }),
     /冲突的静态路由动作/,
   );
+  assert.throws(
+    () => validateInventory({
+      nodes: [node],
+      peers: [peers[0]],
+      defines: [cidrDefines[0], {
+        ...expressionDefines[0], id: "static_name_collision", name: "birdbox_static4_transit_bgp",
+      }],
+      sessions: [sessions[0]],
+    }),
+    /全局标识符冲突/,
+  );
 });
 
 test("renders reusable defines and session-specific local endpoints", () => {
@@ -398,6 +425,10 @@ test("renders reusable defines and session-specific local endpoints", () => {
   assert.match(config, /define UNUSED_EXPORTS = \[ 10\.2\.0\.0\/24 \];/);
   assert.match(config, /local 192\.0\.2\.1 port 179 as 65001;/);
   assert.match(config, /local 192\.0\.2\.10 port 179 as 65100;/);
+  assert.match(config, /protocol static birdbox_static4_transit_bgp/);
+  assert.match(config, /protocol static birdbox_static4_ix_bgp/);
+  assert.equal((config.match(/protocol static birdbox_static4_/g) ?? []).length, 2);
+  assert.equal((config.match(/ipv4 \{\s+import all;\s+export none;\s+\};/g) ?? []).length, 2);
   assert.match(config, /neighbor 192\.0\.2\.2 port 179 as 65002;/);
   assert.match(config, /neighbor 192\.0\.2\.3 port 11790 as 65003;/);
   assert.match(config, /route 10\.1\.0\.0\/24 blackhole;/);
@@ -579,7 +610,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 17);
+  assert.equal(state.version, 18);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({
@@ -765,6 +796,8 @@ test("supports independent form and custom Static routes per session channel", (
         static: {
           defineId: "prefix_transit",
           action: "reject",
+          import: "none",
+          export: "all",
           raw: "route 203.0.113.0/24 via 192.0.2.254;",
         },
       },
@@ -773,16 +806,62 @@ test("supports independent form and custom Static routes per session channel", (
   };
   const normalized = normalizeSession(customStaticSession);
   assert.deepEqual(normalized.channels.ipv4.static, {
-    defineId: "prefix_transit", action: "reject", raw: "route 203.0.113.0/24 via 192.0.2.254;",
+    defineId: "prefix_transit", action: "reject", import: "none", export: "all",
+    raw: "route 203.0.113.0/24 via 192.0.2.254;",
   });
   const config = renderBirdConfig(node, [peers[0]], [customStaticSession], [], policyFilters, cidrDefines);
-  assert.match(config, /protocol static birdbox_static4[\s\S]*route 10\.1\.0\.0\/24 reject;/);
+  assert.match(config, /protocol static birdbox_static4_transit_bgp[\s\S]*ipv4 \{\s+import none;\s+export all;\s+\};[\s\S]*route 10\.1\.0\.0\/24 reject;/);
   assert.match(config, /route 203\.0\.113\.0\/24 via 192\.0\.2\.254;/);
   assert.match(config, /export filter custom_import;/);
   assert.throws(() => normalizeSession({
     ...customStaticSession,
     channels: { ...customStaticSession.channels, ipv4: { ...customStaticSession.channels.ipv4, static: { raw: "}; protocol static injected {" } } },
   }), /不能结束外层配置块/);
+});
+
+test("lets BIRD select the local address and bounds generated Static protocol names", () => {
+  const protocolName = `bgp_${"a".repeat(60)}`;
+  const session = {
+    ...sessions[0], protocolName, localAddress: null, localPort: 179,
+  };
+  const config = renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]]);
+  assert.match(config, new RegExp(`protocol bgp ${protocolName} \\{\\s+local port 179 as 65001;`));
+  const staticName = config.match(/protocol static ([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+  assert.ok(staticName);
+  assert.ok(staticName.length <= 64);
+  assert.match(staticName, /^birdbox_static4_bgp_a+_[a-f0-9]{10}$/);
+});
+
+test("native BIRD 2 parses automatic local binding and configurable Static channels", async (context) => {
+  const available = [];
+  for (const candidate of ["/usr/sbin/bird", "/usr/bin/bird"]) {
+    try {
+      await fs.access(candidate);
+      available.push(candidate);
+      break;
+    } catch {}
+  }
+  if (!available.length) return context.skip("BIRD binary is unavailable");
+  const { stdout, stderr } = await execFileAsync(available[0], ["--version"]);
+  if (!/^BIRD version 2\./.test(`${stdout}${stderr}`)) return context.skip("BIRD 2 is unavailable");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-native-parse-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const configPath = path.join(root, "bird.conf");
+  const session = {
+    ...sessions[0],
+    localAddress: null,
+    localPort: 179,
+    routeAction: undefined,
+    channels: {
+      ipv4: {
+        enabled: true,
+        static: { defineId: "prefix_transit", action: "blackhole", import: "none", export: "all", raw: "" },
+      },
+      ipv6: { enabled: false },
+    },
+  };
+  await fs.writeFile(configPath, renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]]));
+  await execFileAsync(available[0], ["-p", "-c", configPath]);
 });
 
 test("renders local ROA files and RPKI-RTR sources for roa_check filters", () => {

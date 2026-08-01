@@ -24,6 +24,7 @@
   --red-border: #deb5b5;
   --red-hover: #f7dddd;
   --red-border-hover: #cf9797;
+  --error-ring: 0 0 0 3px rgba(168, 50, 50, .16);
   --code: #17231c;
   --code-text: #dbe8df;
   --input-line: #899990;
@@ -75,6 +76,7 @@ html[data-theme="dark"] {
   --red-border: #754047;
   --red-hover: #56282e;
   --red-border-hover: #94515a;
+  --error-ring: 0 0 0 3px rgba(255, 133, 133, .2);
   --code: #08110c;
   --code-text: #d8e8dc;
   --input-line: #607368;
@@ -258,6 +260,20 @@ input:hover, select:hover, textarea:hover { border-color: var(--control-hover); 
 input:focus, select:focus, textarea:focus { border-color: var(--green); border-bottom-color: var(--green-dark); box-shadow: var(--focus-ring), inset 0 -1px 0 var(--green-dark); }
 select:disabled { color: var(--muted); background: var(--surface-soft); }
 input:disabled, textarea:disabled { color: var(--muted); background: var(--surface-soft); }
+form.validation-attempted input:not([type="checkbox"]):invalid,
+form.validation-attempted select:invalid,
+form.validation-attempted textarea:invalid,
+form.validation-attempted input:not([type="checkbox"])[aria-invalid="true"],
+form.validation-attempted select[aria-invalid="true"],
+form.validation-attempted textarea[aria-invalid="true"] {
+  border-color: var(--red);
+  border-bottom-color: var(--red);
+  background: var(--red-soft);
+  box-shadow: var(--error-ring), inset 0 -1px 0 var(--red);
+}
+form.validation-attempted .field-invalid > label,
+form.validation-attempted .field-invalid > .field-label,
+form.validation-attempted .channel-enable-row.field-invalid h3 { color: var(--red); }
 
 .resource-workspace { min-width: 0; }
 .resource-header { padding: 7px 0 12px; }

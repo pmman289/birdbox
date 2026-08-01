@@ -33,6 +33,7 @@ const SSH_IDENTITY_MODES = new Set(["default", "managed"]);
 const PREFIX_PATTERN_RE = /^(.+)\/(\d{1,3})(?:(\+|-)|\{(\d{1,3}),(\d{1,3})\})?$/;
 const RESERVED_PROTOCOL_NAMES = new Set(["birdbox_device", "birdbox_static", "birdbox_static4", "birdbox_static6", "birdbox_bfd"]);
 const STATIC_ROUTE_ACTIONS = new Set(["blackhole", "reject", "unreachable", "prohibit"]);
+const STATIC_CHANNEL_POLICIES = new Set(["all", "none"]);
 const POLICY_MODES = new Set(["form", "combined", "custom"]);
 const FUNCTION_STEP_ACTIONS = new Set(["accept", "reject", "execute"]);
 const SWITCH_SETTINGS = new Set(["default", "on", "off"]);
@@ -51,6 +52,13 @@ const RPKI_SWITCH_SETTINGS = new Set(["default", "on", "off"]);
 const MAX_POLICY_SOURCE_LENGTH = 32 * 1024;
 const MAX_GRACEFUL_RESTART_TIME = 4095;
 const MAX_LONG_LIVED_STALE_TIME = 16777215;
+
+function staticProtocolName(family, protocolName) {
+  const fullName = `birdbox_static${family === "ipv4" ? "4" : "6"}_${protocolName}`;
+  if (fullName.length <= 64) return fullName;
+  const digest = createHash("sha256").update(fullName).digest("hex").slice(0, 10);
+  return `${fullName.slice(0, 64 - digest.length - 1)}_${digest}`;
+}
 
 export const ACTIVE_BIRD_INCLUDE_AWK = `
 BEGIN {
@@ -968,6 +976,8 @@ function normalizeChannel(family, input, defaultEnabled) {
     static: {
       defineId: staticDefineId,
       action: staticAction,
+      import: normalizeEnum(staticInput.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置"),
+      export: normalizeEnum(staticInput.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
       raw: staticRaw,
     },
     ...normalizeChannelOptions(family, value),
@@ -1005,7 +1015,9 @@ export function normalizeSession(input) {
     nodeId: normalizeId(input.nodeId, "节点 ID"),
     peerId: normalizeId(input.peerId, "Peer ID"),
     protocolName,
-    localAddress: normalizeIPAddress(input.localAddress, "会话本地地址"),
+    localAddress: input.localAddress === null || input.localAddress === undefined || input.localAddress === ""
+      ? null
+      : normalizeIPAddress(input.localAddress, "会话本地地址"),
     localAsn: normalizeAsn(input.localAsn, "会话本地 ASN "),
     localPort: normalizePort(input.localPort, "会话本地端口", RUNTIME.defaultBgpPort),
     bgp,
@@ -1073,11 +1085,11 @@ export function validateInventory(input) {
     assert(node, `会话 ${session.protocolName} 引用了不存在的节点`);
     assert(peer && peer.nodeId === node.id, `会话 ${session.protocolName} 的 Peer 不属于所选节点`);
     assert(session.localAsn !== peer.asn, `会话 ${session.protocolName} 的两端 ASN 必须不同`);
-    assert(session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
-    assert(ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
-    const localScope = splitScopedIPAddress(session.localAddress).zone;
+    assert(session.localAddress === null || session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
+    assert(session.localAddress === null || ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
+    const localScope = session.localAddress === null ? null : splitScopedIPAddress(session.localAddress).zone;
     const peerScope = splitScopedIPAddress(peer.address).zone;
-    if (isLinkLocalIPv6(session.localAddress) || isLinkLocalIPv6(peer.address)) {
+    if ((session.localAddress !== null && isLinkLocalIPv6(session.localAddress)) || isLinkLocalIPv6(peer.address)) {
       assert(session.bgp.connectionMode === "direct", `会话 ${session.protocolName} 的 IPv6 Link-local 地址只能用于 Direct 会话`);
       assert(session.bgp.interface !== null || localScope !== null || peerScope !== null, `会话 ${session.protocolName} 的 IPv6 Link-local 地址必须指定接口`);
       assert(localScope === null || peerScope === null || localScope === peerScope, `会话 ${session.protocolName} 的 IPv6 Scope 接口必须一致`);
@@ -1132,6 +1144,16 @@ export function validateInventory(input) {
       ...nodeFunctions.map((item) => item.name),
       ...nodeFilters.map((item) => item.name),
       ...nodeSessions.map((item) => item.protocolName),
+      ...nodeSessions.flatMap((session) => ["ipv4", "ipv6"].flatMap((family) => {
+        const channel = session.channels[family];
+        const staticDefine = channel.static.defineId === null ? null : defineMap.get(channel.static.defineId);
+        const hasStaticConfig = channel.static.raw || (
+          channel.static.action !== null && staticDefine?.entries.some(isExactPrefix)
+        );
+        return session.enabled && channel.enabled && hasStaticConfig
+          ? [staticProtocolName(family, session.protocolName)]
+          : [];
+      })),
       ...nodeRPKI.flatMap((item) => [
         item.name,
         ...(item.sourceType === "file"
@@ -1158,7 +1180,7 @@ export function validateInventory(input) {
   }
 
   return {
-    version: 17,
+    version: 18,
     nodes,
     peers,
     defines,
@@ -1371,11 +1393,11 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     assert(session.nodeId === node.id, `会话 ${session.protocolName} 不属于节点 ${node.name}`);
     assert(peer && peer.nodeId === node.id, `会话 ${session.protocolName} 的 Peer 不属于节点 ${node.name}`);
     assert(session.localAsn !== peer.asn, `会话 ${session.protocolName} 的两端 ASN 必须不同`);
-    assert(session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
-    assert(ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
-    const localScope = splitScopedIPAddress(session.localAddress).zone;
+    assert(session.localAddress === null || session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
+    assert(session.localAddress === null || ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
+    const localScope = session.localAddress === null ? null : splitScopedIPAddress(session.localAddress).zone;
     const peerScope = splitScopedIPAddress(peer.address).zone;
-    if (isLinkLocalIPv6(session.localAddress) || isLinkLocalIPv6(peer.address)) {
+    if ((session.localAddress !== null && isLinkLocalIPv6(session.localAddress)) || isLinkLocalIPv6(peer.address)) {
       assert(session.bgp.connectionMode === "direct", `会话 ${session.protocolName} 的 IPv6 Link-local 地址只能用于 Direct 会话`);
       assert(session.bgp.interface !== null || localScope !== null || peerScope !== null, `会话 ${session.protocolName} 的 IPv6 Link-local 地址必须指定接口`);
       assert(localScope === null || peerScope === null || localScope === peerScope, `会话 ${session.protocolName} 的 IPv6 Scope 接口必须一致`);
@@ -1406,20 +1428,30 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     }
     return { session, peer, exportDefines, staticDefines };
   });
-  const exactRoutes = { ipv4: new Map(), ipv6: new Map() };
-  const customStatic = { ipv4: [], ipv6: [] };
+  const routeActions = { ipv4: new Map(), ipv6: new Map() };
+  const staticProtocols = [];
   for (const { session, staticDefines } of active) {
     for (const family of ["ipv4", "ipv6"]) {
       const channel = session.channels[family];
       if (!channel.enabled) continue;
-      if (channel.static.raw) customStatic[family].push(channel.static.raw);
+      const routes = [];
       const staticDefine = staticDefines[family];
-      if (channel.static.action === null || staticDefine === null) continue;
-      for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
-        const existing = exactRoutes[family].get(prefix);
-        assert(!existing || existing === channel.static.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-        exactRoutes[family].set(prefix, channel.static.action);
+      if (channel.static.action !== null && staticDefine !== null) {
+        for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
+          const existing = routeActions[family].get(prefix);
+          assert(!existing || existing === channel.static.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
+          routeActions[family].set(prefix, channel.static.action);
+          routes.push([prefix, channel.static.action]);
+        }
       }
+      if (routes.length || channel.static.raw) staticProtocols.push({
+        name: staticProtocolName(family, session.protocolName),
+        family,
+        routes,
+        import: channel.static.import,
+        export: channel.static.export,
+        raw: channel.static.raw,
+      });
     }
   }
 
@@ -1446,11 +1478,14 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     config += "\nprotocol bfd birdbox_bfd {\n}\n";
   }
 
-  for (const family of ["ipv4", "ipv6"]) {
-    if (!exactRoutes[family].size && !customStatic[family].length) continue;
-    config += `\nprotocol static birdbox_static${family === "ipv4" ? "4" : "6"} {\n  ${family};\n`;
-    for (const [prefix, action] of exactRoutes[family]) config += `  route ${prefix} ${action};\n`;
-    for (const source of customStatic[family]) config += indentBirdBlock(source, 2);
+  for (const staticProtocol of staticProtocols) {
+    config += `\nprotocol static ${staticProtocol.name} {\n` +
+      `  ${staticProtocol.family} {\n` +
+      `    import ${staticProtocol.import};\n` +
+      `    export ${staticProtocol.export};\n` +
+      "  };\n";
+    for (const [prefix, action] of staticProtocol.routes) config += `  route ${prefix} ${action};\n`;
+    if (staticProtocol.raw) config += indentBirdBlock(staticProtocol.raw, 2);
     config += `}\n`;
   }
 
@@ -1488,7 +1523,7 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
       return `    export filter {\n${renderedSteps}      reject;\n    };\n`;
     };
     config += `\nprotocol bgp ${session.protocolName} {\n` +
-      `  local ${session.localAddress} port ${session.localPort} as ${session.localAsn};\n` +
+      `  local${session.localAddress ? ` ${session.localAddress}` : ""} port ${session.localPort} as ${session.localAsn};\n` +
       `  neighbor ${peer.address} port ${peer.port} as ${peer.asn};\n` +
       renderBgpOptions(session);
     for (const family of ["ipv4", "ipv6"]) {

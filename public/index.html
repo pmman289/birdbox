@@ -119,7 +119,7 @@
             </div>
             <div class="field">
               <label for="protocolName">BIRD 协议名称（自动，可编辑）</label>
-              <input id="protocolName" required pattern="[A-Za-z_][A-Za-z0-9_]*" autocomplete="off">
+              <input id="protocolName" required pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" autocomplete="off">
             </div>
             <label class="toggle-row full-width session-enabled-row" for="sessionEnabled">
               <span><strong>启用会话</strong><small>关闭后不生成该会话的 BGP 和 Static 配置</small></span>
@@ -127,8 +127,8 @@
               <i aria-hidden="true"></i>
             </label>
             <div class="field">
-              <label for="sessionLocalAddress">本地地址</label>
-              <input id="sessionLocalAddress" required autocomplete="off">
+              <label for="sessionLocalAddress">本地地址（可选）</label>
+              <input id="sessionLocalAddress" placeholder="自动选择" autocomplete="off">
             </div>
             <div class="field">
               <label for="sessionLocalAsn">本地 ASN</label>

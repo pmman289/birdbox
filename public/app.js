@@ -172,6 +172,8 @@ function channelEditorMarkup(family, active) {
           <div class="field"><label for="${family}StaticRouteAction">标准动作</label>
             <select id="${family}StaticRouteAction"><option value="">不自动创建路由</option><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option></select>
           </div>
+          <div class="field"><label for="${family}StaticImport">Static Import</label><select id="${family}StaticImport"><option value="all">all</option><option value="none">none</option></select></div>
+          <div class="field"><label for="${family}StaticExport">Static Export</label><select id="${family}StaticExport"><option value="none">none</option><option value="all">all</option></select></div>
           <div class="field full-width"><label for="${family}StaticRaw">自定义 Static 指令</label><textarea id="${family}StaticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
         </div>
       </section>
@@ -306,6 +308,136 @@ function toast(message, type = "") {
   item.textContent = message;
   $("#toastRegion").append(item);
   setTimeout(() => item.remove(), 4300);
+}
+
+function clearFormValidation(form) {
+  form.classList.remove("validation-attempted");
+  form.querySelectorAll(".field-invalid").forEach((field) => field.classList.remove("field-invalid"));
+  form.querySelectorAll('[aria-invalid="true"]').forEach((field) => field.removeAttribute("aria-invalid"));
+}
+
+function markInvalidControls(form) {
+  form.querySelectorAll(".field-invalid").forEach((field) => field.classList.remove("field-invalid"));
+  form.querySelectorAll('[aria-invalid="true"]').forEach((field) => field.removeAttribute("aria-invalid"));
+  const invalidControls = [...form.querySelectorAll(":invalid")];
+  for (const control of invalidControls) {
+    control.setAttribute("aria-invalid", "true");
+    control.closest(".field, .channel-enable-row, .toggle-row")?.classList.add("field-invalid");
+  }
+  return invalidControls;
+}
+
+function revealInvalidControl(control) {
+  const channelPanel = control.closest(".afi-channel-panel");
+  if (channelPanel?.dataset.family) activateChannelTab(channelPanel.dataset.family);
+  for (let details = control.closest("details"); details; details = details.parentElement?.closest("details")) {
+    details.open = true;
+  }
+}
+
+function invalidControlLabel(control) {
+  const label = [...(control.labels ?? [])]
+    .map((item) => item.textContent.replace(/\s+/g, " ").trim())
+    .find(Boolean);
+  return label || control.getAttribute("aria-label") || control.name || control.id || "输入项";
+}
+
+function validateForm(form) {
+  if (form.checkValidity()) {
+    clearFormValidation(form);
+    return true;
+  }
+  form.classList.add("validation-attempted");
+  const invalidControls = markInvalidControls(form);
+  const firstInvalid = invalidControls[0];
+  if (!firstInvalid) return false;
+  revealInvalidControl(firstInvalid);
+  toast(`请检查“${invalidControlLabel(firstInvalid)}”：${firstInvalid.validationMessage}`, "error");
+  requestAnimationFrame(() => {
+    firstInvalid.scrollIntoView({ behavior: "smooth", block: "center" });
+    firstInvalid.focus({ preventScroll: true });
+    firstInvalid.reportValidity();
+  });
+  return false;
+}
+
+function refreshControlValidation(control) {
+  const form = control.form;
+  if (!form?.classList.contains("validation-attempted") || !control.validity) return;
+  if (form.checkValidity()) clearFormValidation(form);
+  else markInvalidControls(form);
+}
+
+function familyErrorFields(message, suffix) {
+  if (/IPv6/i.test(message)) return [`ipv6${suffix}`];
+  if (/IPv4/i.test(message)) return [`ipv4${suffix}`];
+  return [`ipv4${suffix}`, `ipv6${suffix}`];
+}
+
+function formErrorField(form, message) {
+  const mappings = [
+    [/协议名称只能|协议名称与 Birdbox/, ["protocolName"]],
+    [/会话本地地址|本地与 Peer 地址|两端地址不能相同|地址族/, ["sessionLocalAddress"]],
+    [/会话本地 ASN|两端 ASN/, ["sessionLocalAsn"]],
+    [/会话本地端口/, ["sessionLocalPort"]],
+    [/IPv4 与 IPv6 Channel/, ["ipv4Enabled", "ipv6Enabled"]],
+    [/Static Import/, familyErrorFields(message, "StaticImport")],
+    [/Static Export/, familyErrorFields(message, "StaticExport")],
+    [/Static.*CIDR Define/, familyErrorFields(message, "StaticDefineSelect")],
+    [/静态路由动作/, familyErrorFields(message, "StaticRouteAction")],
+    [/Static 指令/, familyErrorFields(message, "StaticRaw")],
+    [/导出.*CIDR Define/, familyErrorFields(message, "ExportDefineSelect")],
+    [/Hold Time/, ["holdTime"]],
+    [/Keepalive/, ["keepaliveTime"]],
+    [/Multihop|连接方式/, ["connectionMode"]],
+    [/接口|Interface/, ["bgpInterface"]],
+    [/TCP MD5.*密码/, ["bgpPassword"]],
+    [/TCP-AO/, ["bgpAoKeys"]],
+    [/节点名称/, ["nodeEditorName"]],
+    [/SSH 目标|节点地址/, ["nodeEditorSshHost"]],
+    [/SSH 用户/, ["nodeEditorSshUser"]],
+    [/SSH 端口/, ["nodeEditorSshPort"]],
+    [/Router ID/, ["nodeEditorRouterId"]],
+    [/主配置/, ["nodeEditorMainConfigPath"]],
+    [/生成配置/, ["nodeEditorGeneratedConfigPath"]],
+    [/Socket/, ["nodeEditorSocketPath"]],
+    [/Peer.*地址/, ["peerEditorAddress"]],
+    [/Peer.*ASN/, ["peerEditorAsn"]],
+    [/Peer.*名称/, ["peerEditorName"]],
+    [/RPKI 协议名称|本地 ROA 资源名称/, ["rpkiName"]],
+    [/RPKI 资源名称/, ["rpkiLabel"]],
+    [/ROA Table/, ["rpkiRoa4Table", "rpkiRoa6Table"]],
+    [/RPKI 服务器/, ["rpkiRemote"]],
+    [/IPv4 ROA 文件/, ["rpkiFile4"]],
+    [/IPv6 ROA 文件/, ["rpkiFile6"]],
+    [/RPKI TCP-MD5.*密码/, ["rpkiPassword"]],
+    [/RPKI SSH/, ["rpkiBirdPrivateKey", "rpkiRemotePublicKey", "rpkiUser"]],
+    [/BIRD .*名称|Define 名称|策略名称|声明开始/, ["policyResourceName", "policyActionName"]],
+    [/显示名称/, ["policyResourceLabel", "policyActionLabel"]],
+    [/CIDR 列表|Define 表达式|策略源码|源码|顶层声明|花括号/, ["policyResourceSource"]],
+  ];
+  for (const [pattern, ids] of mappings) {
+    if (!pattern.test(message)) continue;
+    const control = ids.map((id) => $(`#${id}`)).find((item) => item && form.contains(item) && !item.disabled);
+    if (control) return control;
+  }
+  return null;
+}
+
+function presentFormError(form, error) {
+  const message = error?.message || "表单提交失败";
+  const control = formErrorField(form, message);
+  if (control) {
+    form.classList.add("validation-attempted");
+    control.setAttribute("aria-invalid", "true");
+    control.closest(".field, .channel-enable-row, .toggle-row")?.classList.add("field-invalid");
+    revealInvalidControl(control);
+    requestAnimationFrame(() => {
+      control.scrollIntoView({ behavior: "smooth", block: "center" });
+      control.focus({ preventScroll: true });
+    });
+  }
+  toast(message, "error");
 }
 
 function setAuthError(element, message = "") {
@@ -597,6 +729,8 @@ function channelPayload(family) {
     static: {
       defineId: value(`${family}StaticDefineSelect`) || null,
       action: value(`${family}StaticRouteAction`) || null,
+      import: value(`${family}StaticImport`),
+      export: value(`${family}StaticExport`),
       raw: $(`#${family}StaticRaw`).value,
     },
     table: value(`${family}ChannelTable`) || null,
@@ -668,7 +802,7 @@ function sessionPayload() {
     peerId: currentPeer().id,
     protocolName: value("protocolName"),
     enabled: checked("sessionEnabled"),
-    localAddress: value("sessionLocalAddress"),
+    localAddress: value("sessionLocalAddress") || null,
     localAsn: Number(value("sessionLocalAsn")),
     localPort: Number(value("sessionLocalPort")),
     bgp: {
@@ -983,6 +1117,7 @@ function populateChannelOptions(family, channel) {
 }
 
 function renderSessionForm() {
+  clearFormValidation(elements.sessionForm);
   const peer = currentPeer();
   const hasPeer = Boolean(peer);
   $("#sessionEmpty").hidden = hasPeer;
@@ -1001,9 +1136,9 @@ function renderSessionForm() {
   $("#pairRemote").textContent = `${peer.address} · AS${peer.asn}`;
   $("#protocolName").value = peer.session?.protocolName ?? defaultProtocolName(peer);
   $("#sessionEnabled").checked = peer.session?.enabled !== false;
-  $("#sessionLocalAddress").value = peer.session?.localAddress ?? currentNode().routerId;
+  $("#sessionLocalAddress").value = peer.session?.localAddress ?? "";
   $("#sessionLocalAsn").value = peer.session?.localAsn ?? "";
-  $("#sessionLocalPort").value = peer.session?.localPort ?? currentNode().listenPort;
+  $("#sessionLocalPort").value = peer.session?.localPort ?? 179;
   populateSessionOptions(peer.session);
   for (const family of CHANNEL_FAMILIES) {
     const channel = peer.session?.channels?.[family] ?? {
@@ -1011,7 +1146,7 @@ function renderSessionForm() {
       importPolicy: { mode: "form", steps: [], filterId: null, formAction: "all" },
       exportPolicy: { mode: "form", steps: [], filterId: null, formAction: "none" },
       exportDefineId: null,
-      static: { defineId: null, action: null, raw: "" },
+      static: { defineId: null, action: null, import: "all", export: "none", raw: "" },
     };
     const cidrDefines = state.cidrDefines?.[family] ?? [];
     const defineOptions = cidrDefines
@@ -1028,6 +1163,8 @@ function renderSessionForm() {
       ? channel.static.defineId
       : "";
     $(`#${family}StaticRouteAction`).value = channel.static?.action ?? "";
+    $(`#${family}StaticImport`).value = channel.static?.import ?? "all";
+    $(`#${family}StaticExport`).value = channel.static?.export ?? "none";
     $(`#${family}StaticRaw`).value = channel.static?.raw ?? "";
     $(`#${family}Enabled`).checked = channel.enabled !== false;
     populateChannelOptions(family, channel);
@@ -1306,7 +1443,7 @@ function openPolicyActionDialog(family, direction) {
 async function savePolicyAction(event) {
   event.preventDefault();
   syncPolicyActionDialog();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const context = policyActionContext;
   if (!context || !sameSessionContext(context)) return;
   const saveButton = $("#savePolicyActionButton");
@@ -1372,7 +1509,7 @@ async function savePolicyAction(event) {
       : `已生成 Function ${result.resource.name}`,
     "success");
   } catch (error) {
-    toast(error.message, "error");
+    presentFormError(form, error);
   } finally {
     setButtonLoading(saveButton, false);
     setFormPending(form, false);
@@ -1522,6 +1659,8 @@ function syncStaticAvailability(family) {
   const action = $(`#${family}StaticRouteAction`);
   action.disabled = !channelEnabled;
   $(`#${family}StaticDefineSelect`).disabled = !channelEnabled;
+  $(`#${family}StaticImport`).disabled = !channelEnabled;
+  $(`#${family}StaticExport`).disabled = !channelEnabled;
   $(`#${family}StaticRaw`).disabled = !channelEnabled;
   action.setCustomValidity(channelEnabled && action.value && !hasDefine ? "Static 标准动作必须选择 CIDR Define" : "");
 }
@@ -1536,6 +1675,8 @@ function syncChannelAvailability(family) {
   for (const direction of ["import", "export"]) syncPolicyControls(family, direction);
   syncChannelRequirementControls(family);
   syncStaticAvailability(family);
+  const atLeastOneChannel = CHANNEL_FAMILIES.some((item) => checked(`${item}Enabled`));
+  $("#ipv4Enabled").setCustomValidity(atLeastOneChannel ? "" : "请至少启用 IPv4 或 IPv6 Channel");
 }
 
 function activateChannelTab(family) {
@@ -1553,7 +1694,7 @@ function activateChannelTab(family) {
 }
 
 function updatePairSummary() {
-  const localAddress = value("sessionLocalAddress") || "Local IP";
+  const localAddress = value("sessionLocalAddress") || "自动选择";
   const localAsn = value("sessionLocalAsn");
   $("#pairLocal").textContent = `${localAddress} · ${localAsn ? `AS${localAsn}` : "ASN 未设置"}`;
 }
@@ -1787,7 +1928,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
     if (error.name === "AbortError" || requestId !== previewRequestId || !sameSessionContext(context)) return false;
     if (error.data?.config) $("#localConfig").textContent = error.data.config;
     if (error.data?.events) { state.events = error.data.events; renderEvents(); }
-    toast(error.message, "error");
+    presentFormError(elements.sessionForm, error);
     return false;
   } finally {
     if (requestId === previewRequestId) {
@@ -1799,15 +1940,9 @@ async function previewSession({ silent = false, signature = null } = {}) {
 }
 
 function sessionFormValid(report = false) {
-  if (!CHANNEL_FAMILIES.some((family) => checked(`${family}Enabled`))) {
-    if (report) {
-      activateChannelTab("ipv4");
-      toast("IPv4 与 IPv6 Channel 至少启用一个", "error");
-    }
-    return false;
-  }
-  const nativeValid = report ? elements.sessionForm.reportValidity() : elements.sessionForm.checkValidity();
-  return nativeValid;
+  const atLeastOneChannel = CHANNEL_FAMILIES.some((family) => checked(`${family}Enabled`));
+  $("#ipv4Enabled").setCustomValidity(atLeastOneChannel ? "" : "请至少启用 IPv4 或 IPv6 Channel");
+  return report ? validateForm(elements.sessionForm) : elements.sessionForm.checkValidity();
 }
 
 function scheduleAutoPreview() {
@@ -1842,8 +1977,8 @@ async function applySession() {
       : result.established ? "BGP 会话已建立" : "配置已应用，正在等待远端 Peer", result.enabled === false || result.established ? "success" : "");
     await loadDashboard(nodeId, peerId);
   } catch (error) {
-    toast(error.message, "error");
     await loadDashboard(nodeId, peerId);
+    presentFormError(elements.sessionForm, error);
   } finally {
     setBusy(false);
     setButtonLoading(confirmButton, false);
@@ -1938,7 +2073,7 @@ function showNodeCleanupDialog(node, forced) {
 
 async function saveNode(event) {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const id = value("nodeId");
   if (!id && event.currentTarget.dataset.verified !== "true") {
     toast("请先完成节点连接测试", "error");
@@ -1955,7 +2090,7 @@ async function saveNode(event) {
     setFormPending(event.currentTarget, false);
     elements.nodeDialog.close();
     toast(id ? `节点已更新，${deploymentSummary(result.deployment)}` : "节点已添加", "success");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) { presentFormError(event.currentTarget, error); }
   finally {
     setButtonLoading(button, false);
     setFormPending(event.currentTarget, false);
@@ -1963,7 +2098,7 @@ async function saveNode(event) {
 }
 
 async function generateNodeSetupScript() {
-  if (!$("#nodeForm").reportValidity()) return;
+  if (!validateForm($("#nodeForm"))) return;
   const button = $("#generateNodeSetupButton");
   setButtonLoading(button, true, "正在生成");
   setFormPending($("#nodeForm"), true);
@@ -1976,7 +2111,7 @@ async function generateNodeSetupScript() {
     setNodeOnboardingStatus("脚本已生成");
   } catch (error) {
     setNodeOnboardingStatus("生成失败", "error");
-    toast(error.message, "error");
+    presentFormError($("#nodeForm"), error);
   } finally {
     setButtonLoading(button, false);
     setFormPending($("#nodeForm"), false);
@@ -1984,7 +2119,7 @@ async function generateNodeSetupScript() {
 }
 
 async function testNodeConnection() {
-  if (!$("#nodeForm").reportValidity()) return;
+  if (!validateForm($("#nodeForm"))) return;
   const button = $("#testNodeConnectionButton");
   setButtonLoading(button, true, "正在检查");
   setFormPending($("#nodeForm"), true);
@@ -1999,7 +2134,7 @@ async function testNodeConnection() {
     delete $("#nodeForm").dataset.verified;
     $("#saveNodeButton").disabled = true;
     setNodeOnboardingStatus("检查失败", "error");
-    toast(error.message, "error");
+    presentFormError($("#nodeForm"), error);
   } finally {
     setButtonLoading(button, false);
     setFormPending($("#nodeForm"), false);
@@ -2022,7 +2157,7 @@ function openPeerDialog(peer = null) {
 
 async function savePeer(event) {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const id = value("peerId");
   const nodeId = value("peerEditorNodeId");
   const body = {
@@ -2041,7 +2176,7 @@ async function savePeer(event) {
     setFormPending(event.currentTarget, false);
     elements.peerDialog.close();
     toast(id ? `Peer 已更新，${deploymentSummary(result.deployment)}` : "Peer 已添加", "success");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) { presentFormError(event.currentTarget, error); }
   finally {
     setButtonLoading(button, false);
     setFormPending(event.currentTarget, false);
@@ -2123,7 +2258,7 @@ function openRPKIDialog(resource = null) {
 
 async function saveRPKI(event) {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const id = value("rpkiId");
   const sourceType = value("rpkiSourceType");
   const transport = value("rpkiTransport");
@@ -2174,7 +2309,7 @@ async function saveRPKI(event) {
     setFormPending(event.currentTarget, false);
     elements.rpkiDialog.close();
     toast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
-  } catch (error) { toast(error.message, "error"); }
+  } catch (error) { presentFormError(event.currentTarget, error); }
   finally {
     setButtonLoading(button, false);
     setFormPending(event.currentTarget, false);
@@ -2375,7 +2510,7 @@ async function movePolicyResource(collection, resourceId, direction, button) {
 
 async function savePolicyResource(event) {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const form = event.currentTarget;
   const id = value("policyResourceId");
   const collection = value("policyResourceKind");
@@ -2407,7 +2542,7 @@ async function savePolicyResource(event) {
     elements.policyResourceDialog.close();
     toast(`${kind} 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
   } catch (error) {
-    toast(error.message, "error");
+    presentFormError(form, error);
   } finally {
     setFormPending(form, false);
     setButtonLoading(saveButton, false);
@@ -2416,7 +2551,7 @@ async function savePolicyResource(event) {
 
 $("#authForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const setup = event.currentTarget.dataset.mode === "setup";
   const button = $("#authSubmitButton");
   setButtonLoading(button, true, setup ? "正在设置" : "正在登录");
@@ -2462,7 +2597,7 @@ $("#logoutButton").addEventListener("click", async () => {
 
 $("#passwordForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
+  if (!validateForm(event.currentTarget)) return;
   const button = $("#savePasswordButton");
   setButtonLoading(button, true, "正在更新密码");
   setFormPending(event.currentTarget, true);
@@ -2777,7 +2912,7 @@ elements.sessionForm.addEventListener("submit", async (event) => { event.prevent
 elements.apply.addEventListener("click", () => {
   if (!sessionFormValid(true)) return;
   cancelPendingPreview();
-  $("#dialogLocal").textContent = `${value("sessionLocalAddress")} · AS${value("sessionLocalAsn")}`;
+  $("#dialogLocal").textContent = `${value("sessionLocalAddress") || "自动选择"} · AS${value("sessionLocalAsn")}`;
   $("#dialogRemote").textContent = `${currentPeer().name} · AS${currentPeer().asn}`;
   elements.applyDialog.showModal();
 });
@@ -2826,6 +2961,17 @@ $$('.tab').forEach((tab) => tab.addEventListener("click", () => {
 }));
 const configTabs = $$(".tab");
 configTabs.forEach((tab) => tab.addEventListener("keydown", (event) => moveTabFocus(event, configTabs, (target) => target.click())));
+
+$$('form[id]').forEach((form) => {
+  form.noValidate = true;
+  const refreshValidation = (event) => refreshControlValidation(event.target);
+  form.addEventListener("input", refreshValidation);
+  form.addEventListener("change", refreshValidation);
+  form.addEventListener("reset", () => requestAnimationFrame(() => clearFormValidation(form)));
+});
+$$('dialog').forEach((dialog) => dialog.addEventListener("close", () => {
+  dialog.querySelectorAll("form").forEach(clearFormValidation);
+}));
 
 initializeTheme();
 initializeAuthentication();
