@@ -348,6 +348,35 @@ test("renders IPv6-only and dual-stack BGP channels independently", () => {
   assert.throws(() => validateInventory({ nodes: [node], peers: [peerV6], defines: [], sessions: [{ ...sessionV6, localAddress: "192.0.2.1" }] }), /同一地址族/);
 });
 
+test("automatically enables Extended Next Hop for cross-family BGP transport", () => {
+  const peerV6 = { id: "peer_transport_v6", nodeId: "local", name: "IPv6 transport", address: "2001:db8::2", asn: 65002, port: 179 };
+  const ipv4OverV6 = {
+    id: "session_ipv4_over_v6", nodeId: "local", peerId: peerV6.id, protocolName: "ipv4_over_v6",
+    localAddress: "2001:db8::1", localAsn: 65001, localPort: 179, enabled: true,
+    bgp: { connectionMode: "multihop" },
+    channels: { ipv4: { enabled: true, extendedNextHop: false }, ipv6: { enabled: false } },
+  };
+  const ipv4OverV6Config = renderBirdConfig(node, [peerV6], [ipv4OverV6]);
+  assert.match(ipv4OverV6Config, /ipv4 \{[\s\S]*?extended next hop on;[\s\S]*?\};/);
+
+  const peerV4 = { id: "peer_transport_v4", nodeId: "local", name: "IPv4 transport", address: "192.0.2.2", asn: 65002, port: 179 };
+  const ipv6OverV4 = {
+    id: "session_ipv6_over_v4", nodeId: "local", peerId: peerV4.id, protocolName: "ipv6_over_v4",
+    localAddress: "192.0.2.1", localAsn: 65001, localPort: 179, enabled: true,
+    bgp: { connectionMode: "multihop" },
+    channels: { ipv4: { enabled: false }, ipv6: { enabled: true, extendedNextHop: false } },
+  };
+  const ipv6OverV4Config = renderBirdConfig(node, [peerV4], [ipv6OverV4]);
+  assert.match(ipv6OverV4Config, /ipv6 \{[\s\S]*?extended next hop on;[\s\S]*?\};/);
+
+  const sameFamilyConfig = renderBirdConfig(node, [peerV4], [{ ...ipv4OverV6, peerId: peerV4.id, localAddress: "192.0.2.1" }]);
+  assert.doesNotMatch(sameFamilyConfig, /extended next hop on;/);
+  assert.throws(() => validateInventory({
+    nodes: [node], peers: [peerV6], defines: [],
+    sessions: [{ ...ipv4OverV6, bgp: { connectionMode: "multihop", capabilities: "off" } }],
+  }), /不能关闭 BGP Capabilities/);
+});
+
 test("supports scoped IPv6 link-local eBGP sessions with latest next-hop controls", () => {
   const peer = { id: "peer_ll", nodeId: "local", name: "Link-local peer", address: "fe80::2%eth0", asn: 65002, port: 179 };
   const session = {
@@ -926,6 +955,37 @@ test("native BIRD 2 parses automatic local binding and configurable Static chann
   };
   await fs.writeFile(configPath, renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]], [], [configurableStatic]));
   await execFileAsync(available[0], ["-p", "-c", configPath]);
+});
+
+test("native BIRD 2 parses automatic Extended Next Hop in both transport directions", async (context) => {
+  let binary = null;
+  for (const candidate of ["/usr/sbin/bird", "/usr/bin/bird"]) {
+    try { await fs.access(candidate); binary = candidate; break; } catch {}
+  }
+  if (!binary) return context.skip("BIRD binary is unavailable");
+  const { stdout, stderr } = await execFileAsync(binary, ["--version"]);
+  if (!/^BIRD version 2\./.test(`${stdout}${stderr}`)) return context.skip("BIRD 2 is unavailable");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-native-enh-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const configPath = path.join(root, "bird.conf");
+  const peerV6 = { id: "peer_native_v6", nodeId: "local", name: "IPv6 transport", address: "2001:db8::2", asn: 65002, port: 179 };
+  const peerV4 = { id: "peer_native_v4", nodeId: "local", name: "IPv4 transport", address: "192.0.2.2", asn: 65003, port: 179 };
+  const crossFamilySessions = [
+    {
+      id: "session_native_v4_via_v6", nodeId: "local", peerId: peerV6.id, protocolName: "native_v4_via_v6",
+      localAddress: "2001:db8::1", localAsn: 65001, localPort: 179, enabled: true,
+      bgp: { connectionMode: "multihop" },
+      channels: { ipv4: { enabled: true }, ipv6: { enabled: false } },
+    },
+    {
+      id: "session_native_v6_via_v4", nodeId: "local", peerId: peerV4.id, protocolName: "native_v6_via_v4",
+      localAddress: "192.0.2.1", localAsn: 65001, localPort: 179, enabled: true,
+      bgp: { connectionMode: "multihop" },
+      channels: { ipv4: { enabled: false }, ipv6: { enabled: true } },
+    },
+  ];
+  await fs.writeFile(configPath, renderBirdConfig(node, [peerV6, peerV4], crossFamilySessions));
+  await execFileAsync(binary, ["-p", "-c", configPath]);
 });
 
 test("renders local ROA files and RPKI-RTR sources for roa_check filters", () => {

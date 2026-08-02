@@ -525,6 +525,8 @@ form.validation-attempted .channel-enable-row.field-invalid h3 { color: var(--re
 .compact-toggle input:checked + i { background: var(--green); }
 .compact-toggle input:checked + i::after { transform: translateX(12px); }
 .compact-toggle:focus-within { border-color: var(--green); box-shadow: var(--focus-ring); }
+.compact-toggle.automatic { background: var(--green-soft); border-color: var(--green-border); cursor: default; }
+.compact-toggle.automatic span { color: var(--green-dark); }
 .advanced-settings { min-width: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .advanced-settings summary {
   min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px;

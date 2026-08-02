@@ -342,6 +342,10 @@ function ipFamily(value) {
   return net.isIP(splitScopedIPAddress(value).base);
 }
 
+function channelUsesCrossFamilyTransport(peerAddress, family) {
+  return ipFamily(peerAddress) !== (family === "ipv4" ? 4 : 6);
+}
+
 function isLinkLocalIPv6(value) {
   const { base } = splitScopedIPAddress(value);
   if (!net.isIPv6(base)) return false;
@@ -1159,6 +1163,10 @@ export function validateInventory(input) {
       assert(session.bgp.interface === null || peerScope === null || session.bgp.interface === peerScope, `会话 ${session.protocolName} 的 Peer Scope 与 Interface 不一致`);
     }
     for (const [family, channel] of Object.entries(session.channels)) {
+      assert(
+        !channel.enabled || !channelUsesCrossFamilyTransport(peer.address, family) || session.bgp.capabilities !== "off",
+        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Channel 使用跨地址族邻居时不能关闭 BGP Capabilities`,
+      );
       const expectedDefineType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
       assert(
@@ -1448,6 +1456,10 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     }
     const exportDefines = {};
     for (const [family, channel] of Object.entries(session.channels)) {
+      assert(
+        !channel.enabled || !channelUsesCrossFamilyTransport(peer.address, family) || session.bgp.capabilities !== "off",
+        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Channel 使用跨地址族邻居时不能关闭 BGP Capabilities`,
+      );
       const expectedType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
       assert(
@@ -1561,8 +1573,11 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     for (const family of ["ipv4", "ipv6"]) {
       const channel = session.channels[family];
       if (!channel.enabled) continue;
+      const effectiveChannel = channelUsesCrossFamilyTransport(peer.address, family)
+        ? { ...channel, extendedNextHop: true }
+        : channel;
       config += `  ${family} {\n` +
-        renderChannelOptions(channel) +
+        renderChannelOptions(effectiveChannel) +
         renderPolicy(channel.importPolicy, "import", exportDefines[family]) +
         renderPolicy(channel.exportPolicy, "export", exportDefines[family]) +
         `  };\n`;

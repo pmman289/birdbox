@@ -193,6 +193,7 @@ Next Hop Keep 和 Next Hop Self 不能同时以非默认、非关闭模式启用
 
 - Add Paths 支持关闭、RX+TX、仅 RX、仅 TX；Require Add Paths 需要先启用 Add Paths；
 - Extended Next Hop 可在 IPv4 Channel 启用和 Require；Require 需要先启用；
+- Channel 地址族与邻居传输地址族不同时，Extended Next Hop 会自动启用且不能手动关闭；
 - AIGP 支持默认、启用、Originate 和关闭；
 - Cost 必须是大于等于 1 的整数；
 - Channel 级 GR、LLGR 和 Stale Time 可覆盖对应 Address Family 行为。

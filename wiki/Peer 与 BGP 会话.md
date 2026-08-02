@@ -34,6 +34,8 @@ Peer 是节点下的远端邻居定义；BGP 会话把节点、Peer、本地参�
 
 IPv4 和 IPv6 Channel 独立配置，至少启用一个。Peer 传输地址的地址族不限制可交换的 NLRI 地址族，例如 IPv6 传输上仍可按双方能力启用 IPv4 Channel。
 
+当 Channel 地址族与邻居传输地址族不同时，Birdbox 会自动为该 Channel 生成 `extended next hop on;`：IPv6 邻居承载 IPv4 Channel 时自动启用 IPv4 Extended Next Hop，IPv4 邻居承载 IPv6 Channel 时反向启用。自动状态在高级 Channel 设置中可见且不能关闭。跨地址族传输依赖能力协商，因此不能同时把 BGP Capabilities 设为关闭。
+
 每个 Channel 都有独立的：
 
 - 导入策略；

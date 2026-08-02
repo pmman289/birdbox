@@ -429,6 +429,7 @@ function formErrorField(form, message) {
     [/接口|Interface/, ["bgpInterface"]],
     [/TCP MD5.*密码/, ["bgpPassword"]],
     [/TCP-AO/, ["bgpAoKeys"]],
+    [/跨地址族邻居|BGP Capabilities/, ["capabilities"]],
     [/节点名称/, ["nodeEditorName"]],
     [/SSH 目标|节点地址/, ["nodeEditorSshHost"]],
     [/SSH 用户/, ["nodeEditorSshUser"]],
@@ -776,6 +777,12 @@ function defaultProtocolName(peer) {
 
 function currentNode() { return state?.node ?? null; }
 function currentPeer() { return state?.selectedPeer ?? null; }
+
+function channelUsesCrossFamilyTransport(family) {
+  const peerAddress = currentPeer()?.address ?? "";
+  if (!peerAddress) return false;
+  return (peerAddress.includes(":") ? "ipv6" : "ipv4") !== family;
+}
 function inventoryNode(nodeId) {
   return state?.inventory?.nodes.find((item) => item.id === nodeId) ?? null;
 }
@@ -1684,6 +1691,18 @@ function syncChannelRequirementControls(family) {
   const directOption = gateway.querySelector('option[value="direct"]');
   directOption.disabled = multihop;
   if (multihop && gateway.value === "direct") gateway.value = "default";
+  const extendedNextHop = $(`#${family}ExtendedNextHop`);
+  const automaticExtendedNextHop = enabled && channelUsesCrossFamilyTransport(family);
+  const extendedNextHopLabel = extendedNextHop.closest(".compact-toggle");
+  if (automaticExtendedNextHop) extendedNextHop.checked = true;
+  extendedNextHop.disabled = !enabled || automaticExtendedNextHop;
+  extendedNextHopLabel.classList.toggle("automatic", automaticExtendedNextHop);
+  extendedNextHopLabel.querySelector("span").textContent = automaticExtendedNextHop
+    ? "Extended Next Hop · 自动"
+    : "Extended Next Hop";
+  extendedNextHopLabel.title = automaticExtendedNextHop
+    ? `${currentPeer().address.includes(":") ? "IPv6" : "IPv4"} 邻居承载 ${familyLabel(family)} Channel，已自动启用`
+    : "";
   const extendedRequirement = $(`#${family}RequireExtendedNextHop`);
   if (extendedRequirement) {
     extendedRequirement.disabled = !enabled || !capabilities || !checked(`${family}ExtendedNextHop`);
@@ -1696,6 +1715,12 @@ function syncChannelRequirementControls(family) {
     $(`#${family}ImportLimitAction`).value = "disable";
   }
   $(`#${family}ImportLimitAction`).querySelector('option[value="restart"]').disabled = checked("disableAfterError");
+  const crossFamilyChannel = CHANNEL_FAMILIES.some((item) =>
+    checked(`${item}Enabled`) && channelUsesCrossFamilyTransport(item),
+  );
+  $("#capabilities").setCustomValidity(crossFamilyChannel && !capabilities
+    ? "跨地址族 Channel 需要 BGP Capabilities 协商"
+    : "");
 }
 
 function syncTimerConstraints() {
