@@ -504,9 +504,20 @@
           <div class="field"><label for="staticName">BIRD 名称（自动，可编辑）</label><input id="staticName" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required></div>
           <div class="field"><label for="staticFamily">地址族</label><select id="staticFamily"><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></select></div>
           <div class="field"><label for="staticDefineId">CIDR Define</label><select id="staticDefineId"><option value="">不创建标准路由</option></select></div>
-          <div class="field"><label for="staticAction">标准动作</label><select id="staticAction"><option value="">不创建标准路由</option><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option></select></div>
           <div class="field"><label for="staticImport">Static Import</label><select id="staticImport"><option value="all">all</option><option value="none">none</option></select></div>
           <div class="field"><label for="staticExport">Static Export</label><select id="staticExport"><option value="none">none</option><option value="all">all</option></select></div>
+          <input id="staticAction" type="hidden">
+          <section id="staticRouteActionsSection" class="static-route-editor full-width" aria-labelledby="staticRouteActionsTitle" hidden>
+            <div class="static-route-editor-head">
+              <div><h3 id="staticRouteActionsTitle">CIDR 条目标准动作</h3><small id="staticRouteActionSummary">仅显示完整 CIDR，BIRD 扩展前缀不会生成 Static 路由</small></div>
+            </div>
+            <div class="static-route-bulk">
+              <div class="field"><label for="staticBulkAction">统一设置动作</label><select id="staticBulkAction"><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option><option value="via">via</option></select></div>
+              <div id="staticBulkViaField" class="field"><label for="staticBulkVia">via 地址</label><input id="staticBulkVia" placeholder="198.51.100.1"></div>
+              <button id="applyStaticBulkActionButton" class="secondary-button" type="button">应用到全部条目</button>
+            </div>
+            <div id="staticRouteActionList" class="static-route-action-list" role="list"></div>
+          </section>
           <div class="field full-width"><label for="staticRaw">自定义 Static 指令</label><textarea id="staticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
           <label class="toggle-row full-width" for="staticEnabled"><span><strong>启用资源</strong></span><input id="staticEnabled" type="checkbox" checked><i aria-hidden="true"></i></label>
         </div>

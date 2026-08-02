@@ -688,6 +688,20 @@ dialog form { padding: 22px; }
 .node-retire-actions summary { cursor: pointer; }
 .node-retire-actions details .text-danger-button { margin-top: 7px; }
 .cleanup-list { margin: 16px 0 0; padding-left: 20px; color: var(--ink-soft); line-height: 1.8; font-size: 12px; }
+.static-route-editor { min-width: 0; padding-top: 3px; }
+.static-route-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.static-route-editor-head h3 { margin: 0; font-size: 13px; }
+.static-route-editor-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.static-route-bulk { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(180px, 1fr) auto; align-items: end; gap: 10px; margin-top: 13px; padding: 11px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
+.static-route-bulk .field { gap: 5px; }
+.static-route-bulk .secondary-button { min-height: 36px; padding: 7px 11px; font-size: 11px; }
+.static-route-action-list { margin-top: 10px; border-top: 1px solid var(--line-strong); }
+.static-route-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, .8fr) minmax(180px, 1fr); align-items: center; gap: 10px; min-height: 48px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.static-route-prefix { min-width: 0; overflow-wrap: anywhere; color: var(--ink); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.static-route-via { min-width: 0; }
+.static-route-via[hidden] { display: none; }
+.static-route-row input, .static-route-row select { min-width: 0; min-height: 35px; }
+.static-route-empty { margin: 10px 0 0; padding: 11px; color: var(--muted); background: var(--surface-soft); border: 1px dashed var(--line-strong); border-radius: 5px; font-size: 11px; }
 .account-session-section { margin-top: 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .account-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .account-section-heading h3, .password-settings-section h3 { margin: 0; font-size: 13px; }
@@ -751,6 +765,10 @@ dialog form { padding: 22px; }
   .form-actions { grid-template-columns: 1fr; }
   .protocol-table-wrap table { min-width: 620px; }
   .dialog-grid .full-width { grid-column: 1; }
+  .static-route-bulk { grid-template-columns: 1fr 1fr; }
+  .static-route-bulk .secondary-button { grid-column: 1 / -1; }
+  .static-route-row { grid-template-columns: minmax(0, 1fr) minmax(130px, .8fr); }
+  .static-route-via { grid-column: 1 / -1; }
   .account-section-heading { align-items: flex-start; }
   .account-session-row { grid-template-columns: 1fr; gap: 7px; }
   .account-session-row .text-danger-button { justify-self: start; }

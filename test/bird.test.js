@@ -142,7 +142,7 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.equal(normalizeSession(sessions[1]).channels.ipv4.static, undefined);
   assert.deepEqual(normalizeStaticProtocol(staticProtocols[1]), {
     id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp", family: "ipv4",
-    defineId: "prefix_ix", action: "reject", import: "all", export: "none", raw: "",
+    defineId: "prefix_ix", action: "reject", routeActions: {}, import: "all", export: "none", raw: "",
     enabled: true,
   });
   assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
@@ -154,6 +154,20 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.throws(
     () => normalizeStaticProtocol({ ...staticProtocols[0], defineId: null }),
     /必须同时设置/,
+  );
+  const viaStatic = normalizeStaticProtocol({
+    ...staticProtocols[0],
+    action: "blackhole",
+    routeActions: { "10.1.0.0/24": "via 192.0.2.254" },
+  });
+  assert.equal(viaStatic.routeActions["10.1.0.0/24"], "via 192.0.2.254");
+  assert.throws(
+    () => normalizeStaticProtocol({ ...staticProtocols[0], routeActions: { "10.0.0.0/8+": "reject" } }),
+    /完整 CIDR/,
+  );
+  assert.throws(
+    () => normalizeStaticProtocol({ ...staticProtocols[0], routeActions: { "10.1.0.0/24": "via 2001:db8::1" } }),
+    /必须是 IPv4 地址/,
   );
   assert.equal(normalizeSession({ ...sessions[0], enabled: false }).enabled, false);
   assert.throws(() => normalizePeer({ ...peers[0], name: "Bad\npeer" }), /控制字符/);
@@ -283,6 +297,16 @@ test("supports IPv6 prefix patterns and keeps CIDR Define families distinct", ()
     type: "cidr6", entries: ["192.0.2.0/24"], enabled: true,
   }), /必须是 IPv6/);
   assert.throws(() => parseBirdPrefixEntries("2001:db8::/32{64,129}", 6), /无效/);
+  assert.equal(normalizeStaticProtocol({
+    id: "static_v6_exact", nodeId: "local", label: "IPv6 exact", name: "static_v6_exact",
+    family: "ipv6", defineId: "prefix_v6", action: "blackhole",
+    routeActions: { "2a0a::/32": "via 2001:db8::1" }, raw: "", enabled: true,
+  }).routeActions["2a0a::/32"], "via 2001:db8::1");
+  assert.throws(() => normalizeStaticProtocol({
+    id: "static_v6_pattern", nodeId: "local", label: "IPv6 pattern", name: "static_v6_pattern",
+    family: "ipv6", defineId: "prefix_v6", action: "blackhole",
+    routeActions: { "2400:cb00::/32+": "reject" }, raw: "", enabled: true,
+  }), /完整 CIDR/);
 });
 
 test("renders IPv6-only and dual-stack BGP channels independently", () => {
@@ -458,6 +482,41 @@ test("renders reusable defines and session-specific local endpoints", () => {
   assert.match(config, /if net ~ TRANSIT_EXPORTS then accept;/);
   assert.match(config, /if net ~ IX_EXPORTS then accept;/);
   assert.equal((config.match(/multihop 10;/g) ?? []).length, 1);
+});
+
+test("renders per-CIDR Static actions and follows Define entry changes", () => {
+  const customized = {
+    ...staticProtocols[0],
+    action: "blackhole",
+    routeActions: {
+      "10.1.0.0/24": "reject",
+      "198.51.100.0/24": "via 192.0.2.254",
+    },
+  };
+  const renderDefine = { ...cidrDefines[0], entries: ["10.1.0.0/24", "10.0.0.0/8+", "10.0.0.0/8-", "198.51.100.0/24"] };
+  const config = renderBirdConfig(node, peers, sessions, [], [], [renderDefine, cidrDefines[1]], [], [customized]);
+  assert.match(config, /route 10\.1\.0\.0\/24 reject;/);
+  assert.match(config, /route 198\.51\.100\.0\/24 via 192\.0\.2\.254;/);
+  assert.doesNotMatch(config, /route 10\.0\.0\.0\/8[+-]/);
+
+  const changedDefine = {
+    ...cidrDefines[0],
+    entries: ["203.0.113.0/24", "198.51.100.0/24+"],
+  };
+  const state = validateInventory({
+    nodes: [node],
+    peers: [],
+    defines: [changedDefine],
+    functions: [],
+    filters: [],
+    rpki: [],
+    staticProtocols: [customized],
+    sessions: [],
+  });
+  assert.deepEqual(state.staticProtocols[0].routeActions, { "203.0.113.0/24": "blackhole" });
+  const changedConfig = renderBirdConfig(node, [], [], [], [], [changedDefine], [], [customized]);
+  assert.match(changedConfig, /route 203\.0\.113\.0\/24 blackhole;/);
+  assert.doesNotMatch(changedConfig, /route 198\.51\.100\.0\/24\+/);
 });
 
 test("does not render a disabled session but keeps independent node Static resources", () => {
@@ -859,7 +918,12 @@ test("native BIRD 2 parses automatic local binding and configurable Static chann
       ipv6: { enabled: false },
     },
   };
-  const configurableStatic = { ...staticProtocols[0], import: "none", export: "all" };
+  const configurableStatic = {
+    ...staticProtocols[0],
+    routeActions: { "10.1.0.0/24": "via 192.0.2.254" },
+    import: "none",
+    export: "all",
+  };
   await fs.writeFile(configPath, renderBirdConfig(node, [peers[0]], [session], [], [], [cidrDefines[0]], [], [configurableStatic]));
   await execFileAsync(available[0], ["-p", "-c", configPath]);
 });

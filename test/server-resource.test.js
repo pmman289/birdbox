@@ -61,7 +61,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
       type: "cidr4", entries: ["198.51.100.0/24"], enabled: true,
     }, {
       id: "define_static", nodeId: "local", label: "Static routes", name: "STATIC_ROUTES",
-      type: "cidr4", entries: ["192.0.2.0/24"], enabled: true,
+      type: "cidr4", entries: ["192.0.2.0/24", "198.51.100.0/24"], enabled: true,
     }],
     functions: [], filters: [], rpki: [], staticProtocols: [],
     sessions: [{
@@ -136,13 +136,19 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
     method: "POST",
     body: JSON.stringify({
       nodeId: "local", label: "Test Static", name: "test_static", family: "ipv4",
-      defineId: "define_static", action: "blackhole", import: "none", export: "all", raw: "", enabled: true,
+      defineId: "define_static", action: "blackhole",
+      routeActions: { "192.0.2.0/24": "blackhole", "198.51.100.0/24": "via 192.0.2.254" },
+      import: "none", export: "all", raw: "", enabled: true,
     }),
   });
   assert.equal(createdStatic.status, 201);
   assert.equal(createdStatic.body.deployment.applied, true);
   assert.equal(createdStatic.body.resource.import, "none");
   const staticId = createdStatic.body.resource.id;
+  assert.deepEqual(
+    createdStatic.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeActions,
+    { "192.0.2.0/24": "blackhole", "198.51.100.0/24": "via 192.0.2.254" },
+  );
 
   const updatedStatic = await authenticatedRequest(`/api/statics/${staticId}`, {
     method: "PUT",
@@ -151,6 +157,16 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(updatedStatic.status, 200);
   assert.equal(updatedStatic.body.resource.action, "reject");
   assert.equal(updatedStatic.body.resource.import, "all");
+
+  const updatedStaticDefine = await authenticatedRequest("/api/defines/define_static", {
+    method: "PUT",
+    body: JSON.stringify({ entries: ["203.0.113.0/24", "198.51.100.0/24+"] }),
+  });
+  assert.equal(updatedStaticDefine.status, 200);
+  assert.deepEqual(
+    updatedStaticDefine.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeActions,
+    { "203.0.113.0/24": "reject" },
+  );
 
   const rejectedStaticMove = await authenticatedRequest(`/api/statics/${staticId}`, {
     method: "PUT",

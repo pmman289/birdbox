@@ -528,6 +528,29 @@ export function normalizeDefine(input) {
   };
 }
 
+function normalizeStaticRouteAction(value, family, label = "Static 路由动作") {
+  const action = String(value ?? "").trim().toLowerCase();
+  assert(STATIC_ROUTE_ACTIONS.has(action) || /^via\s+\S+$/i.test(action), `${label}不合法`);
+  if (!action.startsWith("via ")) return action;
+  const address = normalizeIPAddress(action.slice(4).trim(), `${label} via 地址`, family === "ipv4" ? 4 : 6);
+  return `via ${address}`;
+}
+
+function normalizeStaticRouteActions(value, family) {
+  if (value === null || value === undefined) return {};
+  assert(value && typeof value === "object" && !Array.isArray(value), "Static CIDR 动作必须是对象");
+  const entries = Object.entries(value);
+  assert(entries.length <= 256, "Static CIDR 动作最多支持 256 个条目");
+  const normalized = {};
+  for (const [prefixInput, actionInput] of entries) {
+    const prefix = normalizeBirdPrefixPattern(prefixInput, family === "ipv4" ? 4 : 6);
+    assert(isExactPrefix(prefix), `Static CIDR 条目必须是完整 CIDR: ${prefixInput}`);
+    assert(!Object.hasOwn(normalized, prefix), `Static CIDR 条目重复: ${prefix}`);
+    normalized[prefix] = normalizeStaticRouteAction(actionInput, family, `Static CIDR ${prefix} 动作`);
+  }
+  return normalized;
+}
+
 export function normalizeStaticProtocol(input) {
   assert(input && typeof input === "object", "Static 资源参数不能为空");
   const family = normalizeEnum(input.family, new Set(["ipv4", "ipv6"]), "ipv4", "Static 地址族");
@@ -536,9 +559,10 @@ export function normalizeStaticProtocol(input) {
     : normalizeId(input.defineId, "Static CIDR Define ID");
   const actionValue = input.action === null || input.action === undefined || input.action === ""
     ? null
-    : String(input.action).trim().toLowerCase();
-  assert(actionValue === null || STATIC_ROUTE_ACTIONS.has(actionValue), "静态路由动作不合法");
+    : normalizeStaticRouteAction(input.action, family, "静态路由动作");
+  const routeActions = normalizeStaticRouteActions(input.routeActions, family);
   assert((defineId === null) === (actionValue === null), "Static CIDR Define 与标准动作必须同时设置");
+  assert(defineId !== null || !Object.keys(routeActions).length, "未选择 Static CIDR Define 时不能设置逐条动作");
   const raw = normalizeBirdBlockSource(input.raw, "额外 Static 指令");
   assert(actionValue !== null || raw, "Static 资源至少需要标准路由或自定义指令");
   const name = normalizeId(input.name, "Static 协议名称");
@@ -551,6 +575,7 @@ export function normalizeStaticProtocol(input) {
     family,
     defineId,
     action: actionValue,
+    routeActions,
     import: normalizeEnum(input.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置"),
     export: normalizeEnum(input.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
     raw,
@@ -1041,7 +1066,7 @@ export function validateInventory(input) {
   const functions = (input.functions ?? []).map(normalizePolicyFunction);
   const filters = (input.filters ?? []).map(normalizePolicyFilter);
   const rpki = (input.rpki ?? []).map(normalizeRPKISource);
-  const staticProtocols = (input.staticProtocols ?? []).map(normalizeStaticProtocol);
+  let staticProtocols = (input.staticProtocols ?? []).map(normalizeStaticProtocol);
   const sessions = (input.sessions ?? []).map(normalizeSession);
   assert(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
   assert(nodes.filter((item) => item.transport === "local").length <= 1, "只能配置一个本机节点");
@@ -1062,6 +1087,16 @@ export function validateInventory(input) {
   const defineMap = new Map(defines.map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
+  staticProtocols = staticProtocols.map((resource) => {
+    const staticDefine = resource.defineId === null ? null : defineMap.get(resource.defineId);
+    const exactPrefixes = staticDefine?.entries.filter(isExactPrefix) ?? [];
+    const routeActions = Object.fromEntries(exactPrefixes.map((prefix) => {
+      const action = resource.routeActions[prefix] ?? resource.action;
+      assert(action !== null, `Static 资源 ${resource.name} 未为 ${prefix} 设置标准动作`);
+      return [prefix, action];
+    }));
+    return { ...resource, routeActions };
+  });
   for (const peer of peers) {
     assert(nodeMap.has(peer.nodeId), `Peer ${peer.name} 引用了不存在的节点`);
   }
@@ -1173,12 +1208,14 @@ export function validateInventory(input) {
     for (const family of ["ipv4", "ipv6"]) {
       const routeActions = new Map();
       for (const resource of nodeStaticProtocols) {
-        if (!resource.enabled || resource.family !== family || resource.action === null) continue;
+        if (!resource.enabled || resource.family !== family || resource.defineId === null) continue;
         const staticDefine = defineMap.get(resource.defineId);
         for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
+          const action = resource.routeActions[prefix] ?? resource.action;
+          if (action === null) continue;
           const existing = routeActions.get(prefix);
-          assert(!existing || existing === resource.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-          routeActions.set(prefix, resource.action);
+          assert(!existing || existing === action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
+          routeActions.set(prefix, action);
         }
       }
     }
@@ -1198,7 +1235,7 @@ export function validateInventory(input) {
 }
 
 function isExactPrefix(pattern) {
-  return !/[+\-{]/.test(pattern);
+  return /^.+\/\d{1,3}$/.test(pattern);
 }
 
 function birdString(value) {
@@ -1437,12 +1474,14 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
       `Static 资源 ${resource.name} 的 CIDR Define 对节点 ${node.name} 不可用`,
     );
     const routes = [];
-    if (resource.action !== null && staticDefine !== null) {
+    if (staticDefine !== null) {
       for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
+        const action = resource.routeActions[prefix] ?? resource.action;
+        if (action === null) continue;
         const existing = routeActions[resource.family].get(prefix);
-        assert(!existing || existing === resource.action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-        routeActions[resource.family].set(prefix, resource.action);
-        routes.push([prefix, resource.action]);
+        assert(!existing || existing === action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
+        routeActions[resource.family].set(prefix, action);
+        routes.push([prefix, action]);
       }
     }
     return { ...resource, routes };

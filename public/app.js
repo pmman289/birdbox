@@ -51,6 +51,7 @@ let policyActionContextId = 0;
 let resourceMutationBusy = false;
 let sessionApplyInFlight = false;
 let unknownOutcomeRefreshTimer = null;
+let staticRouteActionState = {};
 let accountSessionsRequestId = 0;
 
 const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
@@ -399,6 +400,12 @@ function familyErrorFields(message, suffix) {
 }
 
 function formErrorField(form, message) {
+  const staticRouteMatch = /Static CIDR (.+?) 动作/.exec(message);
+  if (staticRouteMatch) {
+    const row = $$("#staticRouteActionList [data-static-route-prefix]")
+      .find((item) => item.dataset.staticRoutePrefix === staticRouteMatch[1]);
+    if (row) return row.querySelector(message.includes("via 地址") ? "[data-static-route-via]" : "[data-static-route-action]");
+  }
   const mappings = [
     [/协议名称只能|协议名称与 Birdbox/, ["protocolName"]],
     [/会话本地地址|本地与 Peer 地址|两端地址不能相同|地址族/, ["sessionLocalAddress"]],
@@ -410,7 +417,7 @@ function formErrorField(form, message) {
     [/Static 协议名称/, ["staticName"]],
     [/Static 地址族/, ["staticFamily"]],
     [/Static.*CIDR Define/, ["staticDefineId"]],
-    [/静态路由动作/, ["staticAction"]],
+    [/Static CIDR|静态路由动作/, ["staticBulkAction", "staticBulkVia"]],
     [/Static Import/, ["staticImport"]],
     [/Static Export/, ["staticExport"]],
     [/Static 资源至少|Static 指令/, ["staticRaw"]],
@@ -1854,7 +1861,7 @@ function renderResourceManagement() {
   $("#managementStaticRows").innerHTML = (state.inventory.staticProtocols ?? []).length
     ? state.inventory.staticProtocols.map((resource) => {
         const standardRoute = resource.defineId
-          ? `${defineNames.get(resource.defineId) ?? resource.defineId} · ${resource.action}`
+          ? `${defineNames.get(resource.defineId) ?? resource.defineId} · ${Object.keys(resource.routeActions ?? {}).length} 条 CIDR`
           : "仅自定义指令";
         return `<tr>
           <td><strong>${escapeHtml(resource.label)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
@@ -2282,7 +2289,83 @@ function syncStaticName() {
   $("#staticName").value = uniqueBirdName(prefix, value("staticLabel"));
 }
 
+function staticExactCidrEntries(resource) {
+  return (resource?.entries ?? []).filter((entry) => /^.+\/\d{1,3}$/.test(entry));
+}
+
+function collectStaticRouteActions({ visibleOnly = false } = {}) {
+  const actions = visibleOnly ? {} : { ...staticRouteActionState };
+  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => {
+    const prefix = row.dataset.staticRoutePrefix;
+    const action = row.querySelector("[data-static-route-action]")?.value ?? "";
+    const via = row.querySelector("[data-static-route-via]")?.value.trim() ?? "";
+    if (prefix && action) actions[prefix] = action === "via" ? `via ${via}` : action;
+  });
+  return actions;
+}
+
+function syncStaticRouteRow(row) {
+  const action = row.querySelector("[data-static-route-action]");
+  const via = row.querySelector("[data-static-route-via]");
+  if (!action || !via) return;
+  const viaMode = action.value === "via";
+  via.hidden = !viaMode;
+  via.required = viaMode;
+  via.setCustomValidity(viaMode && !via.value.trim() ? "请输入 via 地址" : "");
+  const prefix = row.dataset.staticRoutePrefix;
+  if (prefix && action.value) staticRouteActionState[prefix] = action.value === "via" ? `via ${via.value.trim()}` : action.value;
+}
+
+function syncStaticBulkAction() {
+  const viaMode = value("staticBulkAction") === "via";
+  $("#staticBulkVia").placeholder = value("staticFamily") === "ipv6" ? "2001:db8::1" : "198.51.100.1";
+  $("#staticBulkViaField").hidden = !viaMode;
+  $("#staticBulkVia").required = viaMode;
+  $("#staticBulkVia").setCustomValidity(viaMode && !value("staticBulkVia") ? "请输入 via 地址" : "");
+}
+
+function renderStaticRouteActions() {
+  const defineId = value("staticDefineId");
+  const section = $("#staticRouteActionsSection");
+  const list = $("#staticRouteActionList");
+  if (!defineId) {
+    section.hidden = true;
+    list.replaceChildren();
+    return;
+  }
+  const define = (state?.inventory?.defines ?? []).find((resource) => resource.id === defineId);
+  const entries = staticExactCidrEntries(define);
+  section.hidden = false;
+  $("#staticRouteActionSummary").textContent = entries.length
+    ? `已筛选 ${entries.length} 条完整 CIDR；BIRD 扩展前缀不会生成 Static 路由`
+    : "该 Define 没有完整 CIDR 条目，BIRD 扩展前缀不会生成 Static 路由";
+  if (!entries.length) {
+    list.innerHTML = '<p class="static-route-empty">没有可编辑的完整 CIDR 条目</p>';
+    return;
+  }
+  const fallback = value("staticAction") || "blackhole";
+  list.innerHTML = entries.map((prefix) => {
+    const configured = staticRouteActionState[prefix] ?? fallback;
+    const viaMatch = /^via\s+(.+)$/i.exec(configured);
+    const action = viaMatch ? "via" : configured;
+    const via = viaMatch ? viaMatch[1] : "";
+    return `<div class="static-route-row" role="listitem" data-static-route-prefix="${escapeHtml(prefix)}">
+      <code class="static-route-prefix">${escapeHtml(prefix)}</code>
+      <select data-static-route-action aria-label="${escapeHtml(prefix)} 的 Static 动作">
+        <option value="blackhole" ${action === "blackhole" ? "selected" : ""}>blackhole</option>
+        <option value="reject" ${action === "reject" ? "selected" : ""}>reject</option>
+        <option value="unreachable" ${action === "unreachable" ? "selected" : ""}>unreachable</option>
+        <option value="prohibit" ${action === "prohibit" ? "selected" : ""}>prohibit</option>
+        <option value="via" ${action === "via" ? "selected" : ""}>via</option>
+      </select>
+      <input class="static-route-via" data-static-route-via value="${escapeHtml(via)}" placeholder="via 地址" aria-label="${escapeHtml(prefix)} 的 via 地址"${action === "via" ? "" : " hidden"}>
+    </div>`;
+  }).join("");
+  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => syncStaticRouteRow(row));
+}
+
 function syncStaticDefines(preferredDefineId = value("staticDefineId")) {
+  staticRouteActionState = collectStaticRouteActions();
   const nodeId = value("staticNodeId");
   const type = value("staticFamily") === "ipv6" ? "cidr6" : "cidr4";
   const compatible = (state?.inventory?.defines ?? []).filter((resource) =>
@@ -2292,6 +2375,7 @@ function syncStaticDefines(preferredDefineId = value("staticDefineId")) {
     .map((resource) => `<option value="${escapeHtml(resource.id)}">${escapeHtml(resource.label)} · ${escapeHtml(resource.name)}${resource.nodeId === null ? " · 所有节点" : ""}</option>`)
     .join("");
   $("#staticDefineId").value = compatible.some((resource) => resource.id === preferredDefineId) ? preferredDefineId : "";
+  renderStaticRouteActions();
 }
 
 function syncStaticEditor() {
@@ -2299,7 +2383,12 @@ function syncStaticEditor() {
   const action = $("#staticAction");
   if (!hasDefine) action.value = "";
   action.disabled = !hasDefine;
-  action.setCustomValidity(hasDefine && !action.value ? "请选择 Static 标准动作" : "");
+  staticRouteActionState = collectStaticRouteActions();
+  syncStaticBulkAction();
+  const exactRouteCount = $$("#staticRouteActionList [data-static-route-prefix]").length;
+  $("#staticDefineId").setCustomValidity(hasDefine && !exactRouteCount && !value("staticRaw")
+    ? "所选 CIDR Define 没有可用于 Static 的完整 CIDR 条目"
+    : "");
   $("#staticRaw").setCustomValidity(!hasDefine && !value("staticRaw") ? "请配置标准路由或填写自定义 Static 指令" : "");
 }
 
@@ -2321,8 +2410,14 @@ function openStaticDialog(resource = null) {
   $("#staticLabel").value = resource?.label ?? "";
   $("#staticName").value = resource?.name ?? "";
   $("#staticFamily").value = resource?.family ?? "ipv4";
+  $("#staticRouteActionList").replaceChildren();
+  staticRouteActionState = { ...(resource?.routeActions ?? {}) };
+  const defaultRouteAction = resource?.action ?? Object.values(resource?.routeActions ?? {})[0] ?? (resource?.defineId ? "blackhole" : "");
+  const defaultViaMatch = /^via\s+(.+)$/i.exec(defaultRouteAction);
+  $("#staticAction").value = defaultRouteAction;
+  $("#staticBulkAction").value = defaultViaMatch ? "via" : (defaultRouteAction || "blackhole");
+  $("#staticBulkVia").value = defaultViaMatch?.[1] ?? "";
   syncStaticDefines(resource?.defineId ?? "");
-  $("#staticAction").value = resource?.action ?? "";
   $("#staticImport").value = resource?.import ?? "all";
   $("#staticExport").value = resource?.export ?? "none";
   $("#staticRaw").value = resource?.raw ?? "";
@@ -2332,6 +2427,8 @@ function openStaticDialog(resource = null) {
   else delete $("#staticName").dataset.edited;
   syncStaticEditor();
   elements.staticDialog.showModal();
+  elements.staticDialog.scrollTop = 0;
+  $("#staticLabel").focus({ preventScroll: true });
 }
 
 async function saveStatic(event) {
@@ -2348,6 +2445,7 @@ async function saveStatic(event) {
     family: value("staticFamily"),
     defineId: value("staticDefineId") || null,
     action: value("staticAction") || null,
+    routeActions: value("staticDefineId") ? collectStaticRouteActions({ visibleOnly: true }) : {},
     import: value("staticImport"),
     export: value("staticExport"),
     raw: $("#staticRaw").value,
@@ -2372,6 +2470,22 @@ async function saveStatic(event) {
     setFormPending(form, false);
     setButtonLoading(button, false);
   }
+}
+
+function applyStaticBulkAction() {
+  if (!value("staticDefineId")) return;
+  syncStaticBulkAction();
+  const action = value("staticBulkAction");
+  const via = value("staticBulkVia");
+  if (action === "via" && !$("#staticBulkVia").reportValidity()) return;
+  const configuredAction = action === "via" ? `via ${via}` : action;
+  $("#staticAction").value = configuredAction;
+  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => {
+    row.querySelector("[data-static-route-action]").value = action;
+    row.querySelector("[data-static-route-via]").value = action === "via" ? via : "";
+    syncStaticRouteRow(row);
+  });
+  syncStaticEditor();
 }
 
 function syncRPKIFields() {
@@ -2935,8 +3049,25 @@ $("#staticFamily").addEventListener("change", () => {
   syncStaticName();
   syncStaticEditor();
 });
-$("#staticDefineId").addEventListener("change", syncStaticEditor);
-$("#staticAction").addEventListener("change", syncStaticEditor);
+$("#staticDefineId").addEventListener("change", () => {
+  renderStaticRouteActions();
+  syncStaticEditor();
+});
+$("#staticBulkAction").addEventListener("change", syncStaticBulkAction);
+$("#staticBulkVia").addEventListener("input", syncStaticBulkAction);
+$("#applyStaticBulkActionButton").addEventListener("click", applyStaticBulkAction);
+$("#staticRouteActionList").addEventListener("change", (event) => {
+  const row = event.target.closest("[data-static-route-prefix]");
+  if (!row) return;
+  syncStaticRouteRow(row);
+  syncStaticEditor();
+});
+$("#staticRouteActionList").addEventListener("input", (event) => {
+  const row = event.target.closest("[data-static-route-prefix]");
+  if (!row) return;
+  syncStaticRouteRow(row);
+  syncStaticEditor();
+});
 $("#staticRaw").addEventListener("input", syncStaticEditor);
 $("#rpkiForm").addEventListener("submit", saveRPKI);
 $("#rpkiLabel").addEventListener("input", syncRPKINames);

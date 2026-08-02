@@ -1418,7 +1418,9 @@ async function handleApi(request, response, url) {
       return resource;
     }, () => [resource.nodeId]);
     event("success", `已添加 Static 资源 ${resource.name}`, resource.nodeId);
-    return sendJson(response, 201, { resource, inventory: state, deployment, events });
+    return sendJson(response, 201, {
+      resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events,
+    });
   }
   if (staticMatch && request.method === "PUT") {
     const resourceId = staticMatch[1];
@@ -1432,14 +1434,22 @@ async function handleApi(request, response, url) {
       if (Object.hasOwn(body, "nodeId") && body.nodeId !== previous.nodeId) {
         fail(409, "Static 资源不可直接移动到其他节点；请删除后重新添加");
       }
-      const updated = normalizeStaticProtocol({ ...previous, ...body, id: resourceId, nodeId });
+      const staticInput = { ...previous, ...body, id: resourceId, nodeId };
+      if (Object.hasOwn(body, "action") && !Object.hasOwn(body, "routeActions") && body.action !== null && body.action !== "") {
+        staticInput.routeActions = Object.fromEntries(
+          Object.keys(previous.routeActions ?? {}).map((prefix) => [prefix, body.action]),
+        );
+      }
+      const updated = normalizeStaticProtocol(staticInput);
       draft.staticProtocols[index] = updated;
       const candidate = validateInventory(draft);
       if (!updated.enabled) await preflightStaticProtocol(candidate, resourceId);
       return updated;
     }, () => [nodeId]);
     event("success", `已更新 Static 资源 ${resource.name}`, resource.nodeId);
-    return sendJson(response, 200, { resource, inventory: state, deployment, events });
+    return sendJson(response, 200, {
+      resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events,
+    });
   }
   if (staticMatch && request.method === "DELETE") {
     const resourceId = staticMatch[1];
