@@ -1,5 +1,5 @@
 import { pinyin } from "/vendor/pinyin-pro.mjs";
-import { resetFormPending, setFormPending } from "/interaction-state.js";
+import { createMutationWaitController, resetFormPending, setFormPending } from "/interaction-state.js";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -18,6 +18,7 @@ const elements = {
   apply: $("#applyButton"),
   removeSession: $("#removeSessionButton"),
   stop: $("#stopButton"),
+  mutationWaitDialog: $("#mutationWaitDialog"),
   applyDialog: $("#applyDialog"),
   nodeDialog: $("#nodeDialog"),
   peerDialog: $("#peerDialog"),
@@ -27,6 +28,12 @@ const elements = {
   rpkiDialog: $("#rpkiDialog"),
   nodeCleanupDialog: $("#nodeCleanupDialog"),
 };
+
+const mutationWaitController = createMutationWaitController(
+  elements.mutationWaitDialog,
+  $("#mutationWaitTitle"),
+  $("#mutationWaitDetail"),
+);
 
 let state = null;
 let busy = false;
@@ -61,6 +68,30 @@ function isDeploymentMutation(path, method) {
   if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT") return true;
   if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "DELETE" && !path.includes("force=true")) return true;
   return /^\/api\/peers\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT";
+}
+
+function mutationWaitPresentation(path, method) {
+  const pathname = path.split(/[?#]/, 1)[0];
+  let title = "正在处理变更";
+  if (pathname === "/api/sessions/apply") title = "正在应用会话变更";
+  else if (pathname === "/api/sessions/preview") title = "正在预检会话配置";
+  else if (/^\/api\/sessions\/[^/]+\/control$/.test(pathname)) title = "正在更新会话状态";
+  else if (method === "DELETE" && /^\/api\/sessions\//.test(pathname)) title = "正在移除会话";
+  else if (pathname === "/api/nodes/test") title = "正在检查节点接入条件";
+  else if (pathname === "/api/nodes/setup-script") title = "正在生成节点准备脚本";
+  else if (/^\/api\/nodes(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除节点" : "正在保存节点";
+  else if (/^\/api\/peers(?:\/|$)/.test(pathname) || /\/peers$/.test(pathname)) title = method === "DELETE" ? "正在删除 Peer" : "正在保存 Peer";
+  else if (/^\/api\/statics(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Static" : "正在应用 Static 变更";
+  else if (/^\/api\/rpki(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 RPKI" : "正在应用 RPKI 变更";
+  else if (/^\/api\/(defines|functions|filters)(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除策略资源" : "正在应用策略资源变更";
+  else if (pathname === "/api/auth/login") title = "正在验证登录";
+  else if (pathname === "/api/auth/setup") title = "正在设置管理密码";
+  else if (pathname === "/api/auth/password") title = "正在更新管理密码";
+  else if (pathname === "/api/auth/logout") title = "正在退出";
+  return {
+    title,
+    detail: isDeploymentMutation(path, method) ? "正在变更，请等待节点返回结果" : "请求正在处理，请稍候",
+  };
 }
 
 function scheduleUnknownOutcomeRefresh() {
@@ -233,8 +264,11 @@ function optionalNumber(id) { return value(id) === "" ? null : Number(value(id))
 function checked(id) { return $(`#${id}`).checked; }
 
 async function api(path, options = {}) {
-  const { signal: callerSignal, timeoutMs, headers, ...fetchOptions } = options;
+  const { signal: callerSignal, timeoutMs, headers, mutationWait = true, ...fetchOptions } = options;
   const method = String(fetchOptions.method ?? "GET").toUpperCase();
+  const mutationWaitToken = method === "GET" || mutationWait === false
+    ? null
+    : mutationWaitController.begin(mutationWaitPresentation(path, method));
   const controller = new AbortController();
   const timeout = timeoutMs ?? (method === "GET"
     ? API_READ_TIMEOUT_MS
@@ -286,6 +320,7 @@ async function api(path, options = {}) {
   } finally {
     window.clearTimeout(timeoutId);
     callerSignal?.removeEventListener("abort", abortFromCaller);
+    mutationWaitController.end(mutationWaitToken);
   }
 }
 
@@ -1904,6 +1939,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
       method: "POST",
       body: JSON.stringify(sessionPayload()),
       signal: controller.signal,
+      mutationWait: !silent,
     });
     if (requestId !== previewRequestId || !sameSessionContext(context)) return false;
     $("#localConfig").textContent = result.config;
@@ -2909,6 +2945,7 @@ $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(
 $$('dialog').forEach((dialog) => dialog.addEventListener("cancel", (event) => {
   if (dialog.querySelector('form[aria-busy="true"]')) event.preventDefault();
 }));
+elements.mutationWaitDialog.addEventListener("cancel", (event) => event.preventDefault());
 elements.policyActionDialog.addEventListener("close", () => { policyActionContext = null; });
 
 $("#deleteNodeButton").addEventListener("click", async () => {

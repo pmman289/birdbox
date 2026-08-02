@@ -391,6 +391,16 @@
     <div id="operationStatus" class="visually-hidden" role="status" aria-live="polite"></div>
     <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
 
+    <dialog id="mutationWaitDialog" class="mutation-wait-dialog" aria-labelledby="mutationWaitTitle" aria-describedby="mutationWaitDetail">
+      <div class="mutation-wait-content" role="status" aria-live="polite" aria-atomic="true">
+        <span class="mutation-wait-spinner" aria-hidden="true"></span>
+        <div class="mutation-wait-copy">
+          <strong id="mutationWaitTitle">正在处理变更</strong>
+          <span id="mutationWaitDetail">正在变更，请等待节点返回结果</span>
+        </div>
+      </div>
+    </dialog>
+
     <dialog id="nodeDialog" class="editor-dialog" aria-labelledby="nodeDialogTitle">
       <form id="nodeForm">
         <div class="dialog-head">

@@ -47,3 +47,37 @@ export function resetFormPending(form) {
   pendingForms.delete(form);
   restoreForm(form, false);
 }
+
+export function createMutationWaitController(dialog, titleElement, detailElement) {
+  const active = new Map();
+  let sequence = 0;
+
+  const render = () => {
+    const latest = [...active.values()].at(-1);
+    if (!latest) {
+      if (dialog.open) dialog.close();
+      return;
+    }
+    titleElement.textContent = latest.title;
+    detailElement.textContent = latest.detail;
+    if (!dialog.open) dialog.showModal();
+  };
+
+  return {
+    begin(presentation) {
+      const token = ++sequence;
+      active.set(token, presentation);
+      render();
+      return token;
+    },
+    end(token) {
+      if (token === null || token === undefined) return;
+      active.delete(token);
+      render();
+    },
+    reset() {
+      active.clear();
+      render();
+    },
+  };
+}
