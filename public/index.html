@@ -40,7 +40,7 @@
       <div class="header-actions">
         <span id="globalState" class="global-state"><i></i>正在连接</span>
         <button id="themeToggle" class="icon-button theme-toggle" type="button" data-theme-toggle title="切换到暗色模式" aria-label="切换到暗色模式"><span aria-hidden="true">☾</span></button>
-        <button id="accountButton" class="header-command" type="button">修改密码</button>
+        <button id="accountButton" class="header-command" type="button">设置</button>
         <button id="logoutButton" class="header-command" type="button">退出</button>
         <button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
       </div>
@@ -643,20 +643,33 @@
       </form>
     </dialog>
 
-    <dialog id="passwordDialog" class="editor-dialog" aria-labelledby="passwordDialogTitle">
+    <dialog id="passwordDialog" class="editor-dialog account-settings-dialog" aria-labelledby="passwordDialogTitle">
       <form id="passwordForm">
         <div class="dialog-head">
           <span class="dialog-icon">A</span>
-          <div><p class="eyebrow">ADMIN</p><h2 id="passwordDialogTitle">修改管理密码</h2></div>
+          <div><p class="eyebrow">ADMIN</p><h2 id="passwordDialogTitle">账户设置</h2></div>
         </div>
-        <div class="dialog-grid single-column-dialog">
-          <div class="field full-width"><label for="currentPassword">当前密码</label><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></div>
-          <div class="field full-width"><label for="newPassword">新密码</label><input id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
-          <div class="field full-width"><label for="newPasswordConfirmation">确认新密码</label><input id="newPasswordConfirmation" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
-          <p id="passwordError" class="auth-error full-width" role="alert" hidden></p>
-        </div>
+        <section class="account-session-section" aria-labelledby="activeSessionsTitle">
+          <div class="account-section-heading">
+            <div><h3 id="activeSessionsTitle">有效登录会话</h3><span id="activeSessionCount">正在加载</span></div>
+            <button id="revokeOtherSessionsButton" class="secondary-button" type="button" disabled>注销其他会话</button>
+          </div>
+          <p id="accountSessionsError" class="auth-error" role="alert" hidden></p>
+          <div id="accountSessionList" class="account-session-list" aria-live="polite">
+            <p class="account-session-empty">正在加载会话…</p>
+          </div>
+        </section>
+        <section class="password-settings-section" aria-labelledby="changePasswordTitle">
+          <h3 id="changePasswordTitle">修改管理密码</h3>
+          <div class="dialog-grid single-column-dialog account-password-fields">
+            <div class="field full-width"><label for="currentPassword">当前密码</label><input id="currentPassword" type="password" maxlength="128" autocomplete="current-password" required></div>
+            <div class="field full-width"><label for="newPassword">新密码</label><input id="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
+            <div class="field full-width"><label for="newPasswordConfirmation">确认新密码</label><input id="newPasswordConfirmation" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></div>
+            <p id="passwordError" class="auth-error full-width" role="alert" hidden></p>
+          </div>
+        </section>
         <div class="dialog-actions">
-          <button class="secondary-button" type="button" data-close="passwordDialog">取消</button>
+          <button class="secondary-button" type="button" data-close="passwordDialog">关闭</button>
           <button id="savePasswordButton" class="primary-button" type="submit">更新密码</button>
         </div>
       </form>

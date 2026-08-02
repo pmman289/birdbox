@@ -638,6 +638,7 @@ dialog[open] { animation: dialog-in var(--motion-base) ease-out both; }
 dialog.editor-dialog { width: min(580px, calc(100vw - 32px)); }
 dialog.editor-dialog { max-height: calc(100vh - 32px); overflow: auto; }
 dialog.policy-editor-dialog { width: min(720px, calc(100vw - 32px)); }
+dialog.account-settings-dialog { width: min(720px, calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(17, 26, 21, .48); }
 dialog form { padding: 22px; }
 .dialog-head { gap: 12px; }
@@ -687,6 +688,26 @@ dialog form { padding: 22px; }
 .node-retire-actions summary { cursor: pointer; }
 .node-retire-actions details .text-danger-button { margin-top: 7px; }
 .cleanup-list { margin: 16px 0 0; padding-left: 20px; color: var(--ink-soft); line-height: 1.8; font-size: 12px; }
+.account-session-section { margin-top: 20px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.account-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.account-section-heading h3, .password-settings-section h3 { margin: 0; font-size: 13px; }
+.account-section-heading span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+.account-section-heading .secondary-button { min-height: 32px; padding: 5px 10px; font-size: 11px; }
+.account-session-section > .auth-error { margin-top: 12px; }
+.account-session-list { margin-top: 13px; border-top: 1px solid var(--line); }
+.account-session-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.account-session-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.account-session-copy { min-width: 0; }
+.account-session-title { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.account-session-title strong { min-width: 0; overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.account-session-current { flex: 0 0 auto; padding: 2px 6px; color: var(--green-dark); background: var(--green-soft); border-radius: 999px; font-size: 9px; font-weight: 750; }
+.account-session-client, .account-session-time { display: block; overflow-wrap: anywhere; }
+.account-session-client { margin-top: 3px; color: var(--ink-soft); font-size: 10px; }
+.account-session-time { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.account-session-row .text-danger-button { grid-column: auto; white-space: nowrap; }
+.account-session-empty { margin: 12px 0 0; color: var(--muted); font-size: 11px; }
+.password-settings-section { padding-top: 18px; }
+.account-password-fields { margin-top: 13px; }
 #sshHostField[hidden] { display: none; }
 
 @media (max-width: 1080px) {
@@ -730,6 +751,9 @@ dialog form { padding: 22px; }
   .form-actions { grid-template-columns: 1fr; }
   .protocol-table-wrap table { min-width: 620px; }
   .dialog-grid .full-width { grid-column: 1; }
+  .account-section-heading { align-items: flex-start; }
+  .account-session-row { grid-template-columns: 1fr; gap: 7px; }
+  .account-session-row .text-danger-button { justify-self: start; }
   .split-actions { grid-template-columns: auto 1fr; }
   .split-actions span { display: none; }
   .split-actions .node-retire-actions { grid-column: 1 / -1; margin-bottom: 5px; }

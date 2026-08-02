@@ -13,6 +13,12 @@ const PASSWORD_MAX_LENGTH = 128;
 const SCRYPT_KEY_LENGTH = 64;
 const SCRYPT_OPTIONS = Object.freeze({ N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
 const LEGACY_IMPORT_MARKER = Object.freeze({ version: 1, completed: false });
+const AUTH_STATE_VERSION = 2;
+const SESSION_ID_BYTES = 16;
+const MAX_ACTIVE_SESSIONS = 64;
+const MAX_STORED_SESSIONS = 128;
+const MAX_SESSION_ADDRESS_LENGTH = 128;
+const MAX_SESSION_USER_AGENT_LENGTH = 512;
 
 function authError(status, code, message) {
   const error = new Error(message);
@@ -95,25 +101,62 @@ async function verifyPassword(password, record) {
   }
 }
 
-function createSession(ttlMs) {
+function normalizeSessionText(value, maximumLength) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maximumLength);
+}
+
+function normalizeSessionContext(value = {}) {
+  return {
+    address: normalizeSessionText(value.address, MAX_SESSION_ADDRESS_LENGTH),
+    userAgent: normalizeSessionText(value.userAgent, MAX_SESSION_USER_AGENT_LENGTH),
+  };
+}
+
+function createSession(ttlMs, context) {
   const token = randomBytes(32).toString("base64url");
   const now = Date.now();
   return {
     token,
     record: {
+      id: randomBytes(SESSION_ID_BYTES).toString("base64url"),
       tokenHash: tokenHash(token),
       createdAt: now,
       expiresAt: now + ttlMs,
+      ...normalizeSessionContext(context),
     },
   };
 }
 
-function validateStoredState(value) {
-  if (value?.version === 1 && value.configured === false) {
-    return { version: 1, configured: false, username: "admin", password: null, session: null };
-  }
+function normalizeStoredSession(value, { legacy = false } = {}) {
   const valid = value
-    && value.version === 1
+    && typeof value.tokenHash === "string"
+    && /^[a-f0-9]{64}$/i.test(value.tokenHash)
+    && Number.isFinite(value.createdAt)
+    && Number.isFinite(value.expiresAt)
+    && value.createdAt <= value.expiresAt
+    && (legacy || (typeof value.id === "string" && /^[A-Za-z0-9_-]{16,64}$/.test(value.id)))
+    && (legacy || (typeof value.address === "string" && value.address.length <= MAX_SESSION_ADDRESS_LENGTH))
+    && (legacy || (typeof value.userAgent === "string" && value.userAgent.length <= MAX_SESSION_USER_AGENT_LENGTH));
+  if (!valid) throw new Error("Birdbox 认证状态中的会话格式无效");
+  return {
+    id: legacy ? `legacy_${value.tokenHash.slice(0, 24)}` : value.id,
+    tokenHash: value.tokenHash.toLowerCase(),
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+    ...normalizeSessionContext(legacy ? {} : value),
+  };
+}
+
+function validateStoredState(value) {
+  if ((value?.version === 1 || value?.version === AUTH_STATE_VERSION) && value.configured === false) {
+    return { version: AUTH_STATE_VERSION, configured: false, username: "admin", password: null, sessions: [] };
+  }
+  const commonValid = value
+    && (value.version === 1 || value.version === AUTH_STATE_VERSION)
     && value.username === "admin"
     && value.password?.algorithm === "scrypt"
     && isBase64(value.password.salt, 16)
@@ -125,16 +168,38 @@ function validateStoredState(value) {
       } catch {
         return false;
       }
-    })()
-    && (value.session === null || (
-      typeof value.session?.tokenHash === "string"
-      && /^[a-f0-9]{64}$/i.test(value.session.tokenHash)
-      && Number.isFinite(value.session.createdAt)
-      && Number.isFinite(value.session.expiresAt)
-      && value.session.createdAt <= value.session.expiresAt
-    ));
-  if (!valid) throw new Error("Birdbox 认证状态格式无效，请从备份恢复");
-  return { ...value, configured: true };
+    })();
+  if (!commonValid) throw new Error("Birdbox 认证状态格式无效，请从备份恢复");
+  let sessions;
+  if (value.version === 1) {
+    sessions = value.session === null ? [] : [normalizeStoredSession(value.session, { legacy: true })];
+  } else {
+    if (!Array.isArray(value.sessions) || value.sessions.length > MAX_STORED_SESSIONS) {
+      throw new Error("Birdbox 认证状态中的会话集合无效");
+    }
+    sessions = value.sessions.map((session) => normalizeStoredSession(session));
+  }
+  if (new Set(sessions.map((session) => session.id)).size !== sessions.length
+    || new Set(sessions.map((session) => session.tokenHash)).size !== sessions.length) {
+    throw new Error("Birdbox 认证状态中存在重复会话");
+  }
+  return {
+    version: AUTH_STATE_VERSION,
+    configured: true,
+    username: "admin",
+    password: value.password,
+    sessions,
+  };
+}
+
+function activeSessions(state, now = Date.now()) {
+  return state.sessions.filter((session) => session.expiresAt > now);
+}
+
+function sessionForToken(state, token, now = Date.now()) {
+  if (!state?.configured || !token) return null;
+  const hash = tokenHash(token);
+  return activeSessions(state, now).find((session) => safeHexEqual(hash, session.tokenHash)) ?? null;
 }
 
 export class AuthStore {
@@ -180,7 +245,7 @@ export class AuthStore {
         // A legacy session token must never survive migration into the database.
         await this.database.mutateState(this.stateKey, emptyState, async (latestInput) => {
           const latest = validateStoredState(latestInput);
-          return latest.configured ? {} : { value: { ...legacy, session: null } };
+          return latest.configured ? {} : { value: { ...legacy, sessions: [] } };
         });
       }
     }
@@ -189,6 +254,10 @@ export class AuthStore {
         value: { version: 1, completed: true },
       }));
     }
+    await this.database.mutateState(this.stateKey, emptyState, async (latestInput) => {
+      const normalized = validateStoredState(latestInput);
+      return isDeepStrictEqual(normalized, latestInput) ? {} : { value: normalized };
+    });
   }
 
   async isConfigured() {
@@ -200,12 +269,7 @@ export class AuthStore {
   }
 
   #isAuthenticated(state, token) {
-    const session = state?.session;
-    return Boolean(state?.configured
-      && session
-      && session.expiresAt > Date.now()
-      && safeHexEqual(tokenHash(token), session.tokenHash),
-    );
+    return Boolean(sessionForToken(state, token));
   }
 
   async status(token) {
@@ -214,39 +278,39 @@ export class AuthStore {
       configured: state.configured,
       authenticated: this.#isAuthenticated(state, token),
       username: "admin",
-      singleSession: true,
+      singleSession: false,
     };
   }
 
-  async setup(passwordInput, confirmation) {
+  async setup(passwordInput, confirmation, context = {}) {
     await this.initialize();
     const observed = await this.#read();
     if (observed.configured) throw authError(409, "AUTH_ALREADY_CONFIGURED", "管理密码已经设置");
     const password = normalizePassword(passwordInput, confirmation);
     const passwordRecord = await makePasswordRecord(password);
-    const session = createSession(this.sessionTtlMs);
+    const session = createSession(this.sessionTtlMs, context);
     const operation = await this.database.mutateState(this.stateKey, this.#emptyState(), async (currentInput) => {
       const current = validateStoredState(currentInput);
       if (current.configured) throw authError(409, "AUTH_ALREADY_CONFIGURED", "管理密码已经设置");
       const state = {
-        version: 1,
+        version: AUTH_STATE_VERSION,
         configured: true,
         username: "admin",
         password: passwordRecord,
-        session: session.record,
+        sessions: [session.record],
       };
       return { value: state, result: session.token };
     });
     return operation.result;
   }
 
-  async login(password) {
+  async login(password, context = {}) {
     await this.initialize();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const observed = await this.#read();
       if (!observed.configured) throw authError(409, "AUTH_SETUP_REQUIRED", "请先设置管理密码");
       if (!await verifyPassword(password, observed.password)) return null;
-      const session = createSession(this.sessionTtlMs);
+      const session = createSession(this.sessionTtlMs, context);
       const passwordRecord = passwordRecordIsCurrent(observed.password)
         ? observed.password
         : await makePasswordRecord(password);
@@ -254,14 +318,18 @@ export class AuthStore {
         const current = validateStoredState(currentInput);
         if (!current.configured) throw authError(409, "AUTH_SETUP_REQUIRED", "请先设置管理密码");
         if (!isDeepStrictEqual(current.password, observed.password)) return { result: null };
-        return { value: { ...current, password: passwordRecord, session: session.record }, result: session.token };
+        const sessions = activeSessions(current);
+        if (sessions.length >= MAX_ACTIVE_SESSIONS) {
+          throw authError(409, "AUTH_SESSION_LIMIT", "有效登录会话过多，请先在已登录设备中注销旧会话");
+        }
+        return { value: { ...current, password: passwordRecord, sessions: [...sessions, session.record] }, result: session.token };
       });
       if (operation.result) return operation.result;
     }
     return null;
   }
 
-  async changePassword(token, currentPassword, passwordInput, confirmation) {
+  async changePassword(token, currentPassword, passwordInput, confirmation, context = {}) {
     await this.initialize();
     const observed = await this.#read();
     if (!this.#isAuthenticated(observed, token)) throw authError(401, "AUTH_REQUIRED", "登录状态已失效");
@@ -270,7 +338,7 @@ export class AuthStore {
     }
     const password = normalizePassword(passwordInput, confirmation);
     const passwordRecord = await makePasswordRecord(password);
-    const session = createSession(this.sessionTtlMs);
+    const session = createSession(this.sessionTtlMs, context);
     const operation = await this.database.mutateState(this.stateKey, this.#emptyState(), async (currentInput) => {
       const current = validateStoredState(currentInput);
       if (!this.#isAuthenticated(current, token)) throw authError(401, "AUTH_REQUIRED", "登录状态已失效");
@@ -280,7 +348,7 @@ export class AuthStore {
       const state = {
         ...current,
         password: passwordRecord,
-        session: session.record,
+        sessions: [session.record],
       };
       return { value: state, result: session.token };
     });
@@ -291,8 +359,60 @@ export class AuthStore {
     await this.initialize();
     const operation = await this.database.mutateState(this.stateKey, this.#emptyState(), async (currentInput) => {
       const current = validateStoredState(currentInput);
-      if (!this.#isAuthenticated(current, token)) return { result: false };
-      return { value: { ...current, session: null }, result: true };
+      const session = sessionForToken(current, token);
+      if (!session) return { result: false };
+      return {
+        value: { ...current, sessions: activeSessions(current).filter((item) => item.id !== session.id) },
+        result: true,
+      };
+    });
+    return operation.result;
+  }
+
+  async listSessions(token) {
+    const state = await this.#read();
+    const current = sessionForToken(state, token);
+    if (!current) throw authError(401, "AUTH_REQUIRED", "登录状态已失效");
+    return activeSessions(state)
+      .sort((left, right) => right.createdAt - left.createdAt)
+      .map((session) => ({
+        id: session.id,
+        address: session.address,
+        userAgent: session.userAgent,
+        createdAt: session.createdAt,
+        expiresAt: session.expiresAt,
+        current: session.id === current.id,
+      }));
+  }
+
+  async revokeSession(token, sessionId) {
+    await this.initialize();
+    const operation = await this.database.mutateState(this.stateKey, this.#emptyState(), async (currentInput) => {
+      const current = validateStoredState(currentInput);
+      const caller = sessionForToken(current, token);
+      if (!caller) throw authError(401, "AUTH_REQUIRED", "登录状态已失效");
+      const sessions = activeSessions(current);
+      const target = sessions.find((session) => session.id === sessionId);
+      if (!target) throw authError(404, "AUTH_SESSION_NOT_FOUND", "登录会话不存在或已经失效");
+      return {
+        value: { ...current, sessions: sessions.filter((session) => session.id !== target.id) },
+        result: { current: target.id === caller.id },
+      };
+    });
+    return operation.result;
+  }
+
+  async revokeOtherSessions(token) {
+    await this.initialize();
+    const operation = await this.database.mutateState(this.stateKey, this.#emptyState(), async (currentInput) => {
+      const current = validateStoredState(currentInput);
+      const caller = sessionForToken(current, token);
+      if (!caller) throw authError(401, "AUTH_REQUIRED", "登录状态已失效");
+      const sessions = activeSessions(current);
+      return {
+        value: { ...current, sessions: [caller] },
+        result: sessions.length - 1,
+      };
     });
     return operation.result;
   }
@@ -304,6 +424,6 @@ export class AuthStore {
   }
 
   #emptyState() {
-    return { version: 1, configured: false, username: "admin", password: null, session: null };
+    return { version: AUTH_STATE_VERSION, configured: false, username: "admin", password: null, sessions: [] };
   }
 }

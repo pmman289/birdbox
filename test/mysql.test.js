@@ -10,7 +10,7 @@ import { InventoryStore } from "../src/store.js";
 
 const mysqlUrl = process.env.BIRDBOX_TEST_MYSQL_URL;
 
-test("persists inventory, revision conflicts, and single-session auth in MySQL", {
+test("persists inventory, revision conflicts, and multi-session auth in MySQL", {
   skip: !mysqlUrl,
 }, async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-mysql-"));
@@ -106,6 +106,9 @@ test("persists inventory, revision conflicts, and single-session auth in MySQL",
   assert.equal((await secondAuth.status(token)).authenticated, true);
   const replacementToken = await secondAuth.login("mysql-integration-password");
   assert.notEqual(replacementToken, token);
+  assert.equal((await secondAuth.status(token)).authenticated, true);
+  assert.equal((await secondAuth.status(replacementToken)).authenticated, true);
+  assert.equal((await secondAuth.revokeOtherSessions(replacementToken)), 1);
   assert.equal((await secondAuth.status(token)).authenticated, false);
   assert.equal((await secondAuth.status(replacementToken)).authenticated, true);
 

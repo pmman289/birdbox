@@ -1142,6 +1142,13 @@ function loginAttemptKey(request) {
   return request.socket.remoteAddress ?? "unknown";
 }
 
+function authSessionContext(request) {
+  return {
+    address: request.socket.remoteAddress ?? "",
+    userAgent: request.headers["user-agent"] ?? "",
+  };
+}
+
 function activeLoginFailures(request) {
   const key = loginAttemptKey(request);
   const now = Date.now();
@@ -1204,7 +1211,7 @@ async function handleAuthApi(request, response, url) {
   }
   if (request.method === "POST" && pathname === "/api/auth/setup") {
     const body = await readJson(request);
-    const sessionToken = await authStore.setup(body.password, body.confirmation);
+    const sessionToken = await authStore.setup(body.password, body.confirmation, authSessionContext(request));
     sendJson(response, 201, { ok: true, ...await authStore.status(sessionToken) }, {
       "set-cookie": sessionCookie(request, sessionToken),
     });
@@ -1221,7 +1228,7 @@ async function handleAuthApi(request, response, url) {
     }
     let sessionToken;
     try {
-      sessionToken = await authStore.login(body.password);
+      sessionToken = await authStore.login(body.password, authSessionContext(request));
     } catch (error) {
       cancelLoginAttempt(reservation);
       throw error;
@@ -1240,10 +1247,32 @@ async function handleAuthApi(request, response, url) {
   }
   if (request.method === "POST" && pathname === "/api/auth/password") {
     const body = await readJson(request);
-    const sessionToken = await authStore.changePassword(token, body.currentPassword, body.password, body.confirmation);
+    const sessionToken = await authStore.changePassword(
+      token,
+      body.currentPassword,
+      body.password,
+      body.confirmation,
+      authSessionContext(request),
+    );
     sendJson(response, 200, { ok: true, ...await authStore.status(sessionToken) }, {
       "set-cookie": sessionCookie(request, sessionToken),
     });
+    return true;
+  }
+  if (request.method === "GET" && pathname === "/api/auth/sessions") {
+    sendJson(response, 200, { sessions: await authStore.listSessions(token) });
+    return true;
+  }
+  if (request.method === "DELETE" && pathname === "/api/auth/sessions") {
+    const revoked = await authStore.revokeOtherSessions(token);
+    sendJson(response, 200, { ok: true, revoked });
+    return true;
+  }
+  const sessionMatch = pathname.match(/^\/api\/auth\/sessions\/([A-Za-z0-9_-]{16,64})$/);
+  if (request.method === "DELETE" && sessionMatch) {
+    const result = await authStore.revokeSession(token, sessionMatch[1]);
+    const headers = result.current ? { "set-cookie": sessionCookie(request, "", 0) } : {};
+    sendJson(response, 200, { ok: true, current: result.current }, headers);
     return true;
   }
   if (request.method === "POST" && pathname === "/api/auth/logout") {

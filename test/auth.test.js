@@ -61,7 +61,7 @@ function openSlowLogin(port, body) {
   return { request, response };
 }
 
-test("supports password setup and enforces one active admin session", async (context) => {
+test("supports password setup and manages multiple active admin sessions", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-auth-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
@@ -89,7 +89,7 @@ test("supports password setup and enforces one active admin session", async (con
   assert.match(documentResponse.headers.get("permissions-policy"), /camera=\(\)/);
 
   const initial = await requestJson(port, "/api/auth/status");
-  assert.deepEqual(initial.body, { configured: false, authenticated: false, username: "admin", singleSession: true });
+  assert.deepEqual(initial.body, { configured: false, authenticated: false, username: "admin", singleSession: false });
 
   const invalidJsonShape = await requestJson(port, "/api/auth/login", { method: "POST", body: "null" });
   assert.equal(invalidJsonShape.status, 400);
@@ -98,6 +98,9 @@ test("supports password setup and enforces one active admin session", async (con
   const unauthorized = await requestJson(port, "/api/dashboard");
   assert.equal(unauthorized.status, 401);
   assert.equal(unauthorized.body.code, "AUTH_REQUIRED");
+  const unauthorizedSessions = await requestJson(port, "/api/auth/sessions");
+  assert.equal(unauthorizedSessions.status, 401);
+  assert.equal(unauthorizedSessions.body.code, "AUTH_REQUIRED");
 
   const weak = await requestJson(port, "/api/auth/setup", {
     method: "POST",
@@ -108,6 +111,7 @@ test("supports password setup and enforces one active admin session", async (con
   const firstPassword = "first-admin-password";
   const setup = await requestJson(port, "/api/auth/setup", {
     method: "POST",
+    headers: { "user-agent": "Birdbox setup browser" },
     body: JSON.stringify({ password: firstPassword, confirmation: firstPassword }),
   });
   assert.equal(setup.status, 201);
@@ -171,11 +175,31 @@ test("supports password setup and enforces one active admin session", async (con
 
   const secondLogin = await requestJson(port, "/api/auth/login", {
     method: "POST",
+    headers: { "user-agent": "Birdbox second browser" },
     body: JSON.stringify({ password: firstPassword }),
   });
   assert.equal(secondLogin.status, 200);
   const secondCookie = responseCookie(secondLogin);
   assert.notEqual(secondCookie, firstCookie);
+  assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: firstCookie } })).body.authenticated, true);
+  assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: secondCookie } })).body.authenticated, true);
+
+  const activeSessions = await requestJson(port, "/api/auth/sessions", { headers: { cookie: secondCookie } });
+  assert.equal(activeSessions.status, 200);
+  assert.equal(activeSessions.body.sessions.length, 2);
+  assert.equal(activeSessions.body.sessions.filter((session) => session.current).length, 1);
+  assert.equal(activeSessions.body.sessions.find((session) => session.current).userAgent, "Birdbox second browser");
+  const firstSession = activeSessions.body.sessions.find((session) => !session.current);
+  assert.ok(firstSession.id);
+  assert.ok(firstSession.address);
+  assert.equal(firstSession.userAgent, "Birdbox setup browser");
+
+  const revokedFirst = await requestJson(port, `/api/auth/sessions/${firstSession.id}`, {
+    method: "DELETE",
+    headers: { cookie: secondCookie },
+  });
+  assert.equal(revokedFirst.status, 200);
+  assert.equal(revokedFirst.body.current, false);
   assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: firstCookie } })).body.authenticated, false);
   assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: secondCookie } })).body.authenticated, true);
 
@@ -215,6 +239,15 @@ test("supports password setup and enforces one active admin session", async (con
     body: JSON.stringify({ password: secondPassword }),
   });
   const finalCookie = responseCookie(finalLogin);
+  assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: changedCookie } })).body.authenticated, true);
+  const revokedOthers = await requestJson(port, "/api/auth/sessions", {
+    method: "DELETE",
+    headers: { cookie: finalCookie },
+  });
+  assert.equal(revokedOthers.status, 200);
+  assert.equal(revokedOthers.body.revoked, 1);
+  assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: changedCookie } })).body.authenticated, false);
+  assert.equal((await requestJson(port, "/api/auth/status", { headers: { cookie: finalCookie } })).body.authenticated, true);
   const logout = await requestJson(port, "/api/auth/logout", {
     method: "POST",
     headers: { cookie: finalCookie },

@@ -51,6 +51,7 @@ let policyActionContextId = 0;
 let resourceMutationBusy = false;
 let sessionApplyInFlight = false;
 let unknownOutcomeRefreshTimer = null;
+let accountSessionsRequestId = 0;
 
 const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
 const THEME_STORAGE_KEY = "birdbox-theme";
@@ -87,6 +88,7 @@ function mutationWaitPresentation(path, method) {
   else if (pathname === "/api/auth/login") title = "正在验证登录";
   else if (pathname === "/api/auth/setup") title = "正在设置管理密码";
   else if (pathname === "/api/auth/password") title = "正在更新管理密码";
+  else if (/^\/api\/auth\/sessions(?:\/|$)/.test(pathname)) title = "正在注销登录会话";
   else if (pathname === "/api/auth/logout") title = "正在退出";
   return {
     title,
@@ -550,6 +552,62 @@ async function showApplication() {
   elements.appMain.hidden = false;
   startAuthMonitor();
   await loadDashboard();
+}
+
+function formatAccountSessionTime(timestamp) {
+  const value = new Date(timestamp);
+  if (!Number.isFinite(value.getTime())) return "未知";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(value);
+}
+
+function renderAccountSessions(sessions) {
+  const list = $("#accountSessionList");
+  $("#activeSessionCount").textContent = `${sessions.length} 个有效会话`;
+  $("#revokeOtherSessionsButton").disabled = sessions.length <= 1;
+  if (!sessions.length) {
+    list.innerHTML = '<p class="account-session-empty">没有有效登录会话</p>';
+    return;
+  }
+  list.innerHTML = sessions.map((session) => {
+    const address = session.address || "来源地址未知";
+    const client = session.userAgent || "客户端信息未知";
+    return `
+      <div class="account-session-row">
+        <div class="account-session-copy">
+          <div class="account-session-title">
+            <strong>${escapeHtml(address)}</strong>
+            ${session.current ? '<span class="account-session-current">当前会话</span>' : ""}
+          </div>
+          <span class="account-session-client">${escapeHtml(client)}</span>
+          <span class="account-session-time">登录 ${escapeHtml(formatAccountSessionTime(session.createdAt))} · 到期 ${escapeHtml(formatAccountSessionTime(session.expiresAt))}</span>
+        </div>
+        <button class="text-danger-button" type="button" data-revoke-session="${escapeHtml(session.id)}" data-current-session="${session.current ? "true" : "false"}">${session.current ? "退出此会话" : "注销"}</button>
+      </div>`;
+  }).join("");
+}
+
+async function loadAccountSessions() {
+  const requestId = ++accountSessionsRequestId;
+  $("#activeSessionCount").textContent = "正在加载";
+  $("#revokeOtherSessionsButton").disabled = true;
+  $("#accountSessionList").innerHTML = '<p class="account-session-empty">正在加载会话…</p>';
+  setAuthError($("#accountSessionsError"));
+  try {
+    const result = await api("/api/auth/sessions");
+    if (requestId !== accountSessionsRequestId || !$("#passwordDialog").open) return;
+    renderAccountSessions(result.sessions ?? []);
+  } catch (error) {
+    if (requestId !== accountSessionsRequestId || !$("#passwordDialog").open) return;
+    $("#activeSessionCount").textContent = "加载失败";
+    $("#accountSessionList").innerHTML = '<p class="account-session-empty">无法读取有效会话</p>';
+    setAuthError($("#accountSessionsError"), error.message);
+  }
 }
 
 async function initializeAuthentication() {
@@ -2716,8 +2774,48 @@ $("#authForm").addEventListener("submit", async (event) => {
 $("#accountButton").addEventListener("click", () => {
   $("#passwordForm").reset();
   setAuthError($("#passwordError"));
+  setAuthError($("#accountSessionsError"));
   $("#passwordDialog").showModal();
+  void loadAccountSessions();
   $("#currentPassword").focus();
+});
+
+$("#accountSessionList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-revoke-session]");
+  if (!button) return;
+  const current = button.dataset.currentSession === "true";
+  const message = current ? "退出当前登录会话？" : "注销这个登录会话？对应设备将需要重新登录。";
+  if (!window.confirm(message)) return;
+  setButtonLoading(button, true, current ? "正在退出" : "正在注销");
+  try {
+    const result = await api(`/api/auth/sessions/${button.dataset.revokeSession}`, { method: "DELETE" });
+    if (result.current) {
+      state = null;
+      showAuthentication({ configured: true, authenticated: false, username: "admin" });
+      return;
+    }
+    await loadAccountSessions();
+    toast("登录会话已注销", "success");
+  } catch (error) {
+    setAuthError($("#accountSessionsError"), error.message);
+  } finally {
+    setButtonLoading(button, false);
+  }
+});
+
+$("#revokeOtherSessionsButton").addEventListener("click", async (event) => {
+  if (!window.confirm("注销当前会话之外的全部登录会话？")) return;
+  const button = event.currentTarget;
+  setButtonLoading(button, true, "正在注销");
+  try {
+    const result = await api("/api/auth/sessions", { method: "DELETE" });
+    await loadAccountSessions();
+    toast(result.revoked ? `已注销 ${result.revoked} 个登录会话` : "没有其他有效会话", "success");
+  } catch (error) {
+    setAuthError($("#accountSessionsError"), error.message);
+  } finally {
+    setButtonLoading(button, false);
+  }
 });
 
 $("#logoutButton").addEventListener("click", async () => {
@@ -2753,7 +2851,7 @@ $("#passwordForm").addEventListener("submit", async (event) => {
     });
     $("#passwordDialog").close();
     form.reset();
-    toast("管理密码已更新", "success");
+    toast("管理密码已更新，其他登录会话已注销", "success");
   } catch (error) {
     setAuthError($("#passwordError"), error.message);
   } finally {
