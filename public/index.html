@@ -603,7 +603,13 @@
               <textarea id="policyResourceSource" class="policy-source-editor" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" required></textarea>
               <div class="code-input-status"><span>BIRD</span><span id="policySourcePosition">Ln 1, Col 1</span></div>
             </div>
-            <div id="policySourceReferencePanel" class="code-references"><span>可用 Defines</span><div id="policySourceReferences"></div></div>
+            <div id="policySourceReferencePanel" class="code-references">
+              <div class="code-reference-toolbar">
+                <div class="code-reference-heading"><strong>可用资源</strong><span id="policySourceReferenceCount">0 项</span></div>
+                <input id="policySourceReferenceSearch" type="search" autocomplete="off" aria-label="搜索可用策略资源" placeholder="搜索名称、标识符或类型">
+              </div>
+              <div id="policySourceReferences" class="code-reference-groups" aria-live="polite"></div>
+            </div>
           </div>
           <label class="toggle-row full-width" for="policyResourceEnabled">
             <span><strong>启用资源</strong></span>

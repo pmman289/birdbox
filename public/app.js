@@ -1,5 +1,6 @@
 import { pinyin } from "/vendor/pinyin-pro.mjs";
 import { createMutationWaitController, resetFormPending, setFormPending } from "/interaction-state.js";
+import { availablePolicySourceReferences, policySourceReferenceInsertion } from "/policy-references.js";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -2685,16 +2686,56 @@ function updatePolicySourceEditor() {
 
 function renderPolicySourceReferences() {
   const nodeId = value("policyResourceNodeId") || null;
-  const compatible = (resource) => resource.nodeId === null || (nodeId !== null && resource.nodeId === nodeId);
   const currentId = value("policyResourceId");
-  const currentIndex = (state?.inventory?.defines ?? []).findIndex((resource) => resource.id === currentId);
-  const available = (state?.inventory?.defines ?? []).filter((resource, index) =>
-    resource.enabled && resource.id !== currentId && compatible(resource) &&
-    (value("policyResourceKind") !== "defines" || currentIndex < 0 || index < currentIndex),
-  );
-  $("#policySourceReferences").innerHTML = available.length
-    ? available.map((resource) => `<button class="code-reference-button" type="button" title="插入 ${escapeHtml(resource.name)}" data-insert-define="${escapeHtml(resource.name)}">${escapeHtml(resource.label ?? resource.name)} · ${escapeHtml(resource.name)}</button>`).join("")
-    : '<span class="code-reference-empty">无</span>';
+  const collection = value("policyResourceKind");
+  const available = availablePolicySourceReferences({ inventory: state?.inventory, collection, currentId, nodeId });
+  const query = value("policySourceReferenceSearch").toLocaleLowerCase();
+  const nodeNames = new Map((state?.inventory?.nodes ?? []).map((node) => [node.id, node.name]));
+  const typeLabel = (resource, kind) => kind === "function"
+    ? (resource.callable ? "无参 Function" : "有参 Function")
+    : resource.type === "cidr4" ? "IPv4 CIDR" : resource.type === "cidr6" ? "IPv6 CIDR" : "表达式 Define";
+  const matches = (resource, kind) => {
+    if (!query) return true;
+    const terms = query.split(/\s+/).filter(Boolean);
+    const label = resource.label ?? resource.name;
+    const searchText = [
+      label,
+      resource.name,
+      kind,
+      typeLabel(resource, kind),
+      resource.nodeId === null ? "所有节点 global" : (nodeNames.get(resource.nodeId) ?? resource.nodeId),
+      birdNameSlug(label).replaceAll("_", " "),
+    ].join(" ").toLocaleLowerCase();
+    return terms.every((term) => searchText.includes(term));
+  };
+  const groups = [
+    { kind: "define", label: "Defines", resources: available.defines },
+    { kind: "function", label: "Functions", resources: available.functions },
+  ].filter((group) => group.resources.length);
+  const total = groups.reduce((count, group) => count + group.resources.length, 0);
+  const filteredGroups = groups.map((group) => ({
+    ...group,
+    resources: group.resources.filter((resource) => matches(resource, group.kind)),
+  })).filter((group) => group.resources.length);
+  const shown = filteredGroups.reduce((count, group) => count + group.resources.length, 0);
+  $("#policySourceReferenceCount").textContent = query ? `${shown} / ${total} 项` : `${total} 项`;
+  $("#policySourceReferences").innerHTML = filteredGroups.length
+    ? filteredGroups.map((group) => `<section class="code-reference-group" aria-label="可用 ${group.label}">
+        <div class="code-reference-group-heading"><span class="code-reference-kind ${group.kind}" aria-hidden="true">${group.kind === "function" ? "ƒ" : "D"}</span><strong>${group.label}</strong><span>${group.resources.length}</span></div>
+        <div class="code-reference-list">${group.resources.map((resource) => {
+          const insertion = policySourceReferenceInsertion(resource, group.kind);
+          const scope = resource.nodeId === null ? "所有节点" : (nodeNames.get(resource.nodeId) ?? "当前节点");
+          const signature = group.kind === "function"
+            ? (String(resource.source ?? "").match(/^\s*function\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)/)?.[1]?.trim() ?? "")
+            : "";
+          const symbol = group.kind === "function" ? `${resource.name}(${signature})` : resource.name;
+          return `<button class="code-reference-button" type="button" title="插入 ${escapeHtml(insertion)}" aria-label="插入 ${escapeHtml(insertion)}" data-reference-insert="${escapeHtml(insertion)}">
+            <span class="code-reference-copy"><strong>${escapeHtml(resource.label ?? resource.name)}</strong><code>${escapeHtml(symbol)}</code></span>
+            <span class="code-reference-meta"><span>${escapeHtml(typeLabel(resource, group.kind))}</span><span>${escapeHtml(scope)}</span></span>
+          </button>`;
+        }).join("")}</div>
+      </section>`).join("")
+    : `<span class="code-reference-empty">${total ? "没有匹配的资源" : "当前作用域没有可用资源"}</span>`;
 }
 
 function syncPolicyResourceEditor() {
@@ -2775,6 +2816,7 @@ function openPolicyResourceDialog(collection, resource = null) {
   $("#policyResourceIcon").textContent = collection === "functions" ? "ƒ" : collection === "filters" ? "F" : "D";
   $("#policyResourceId").value = resource?.id ?? "";
   $("#policyResourceKind").value = collection;
+  $("#policySourceReferenceSearch").value = "";
   $("#policyResourceNodeId").innerHTML = resourceScopeOptions(resource ? resource.nodeId : null);
   $("#policyResourceType").value = resource?.type ?? "cidr4";
   $("#policyResourceLabel").value = resource?.label ?? resource?.name ?? "";
@@ -3144,11 +3186,12 @@ $("#policyResourceSource").addEventListener("scroll", updatePolicySourceEditor);
 $("#policyResourceSource").addEventListener("click", updatePolicySourceEditor);
 $("#policyResourceSource").addEventListener("keyup", updatePolicySourceEditor);
 $("#policyResourceNodeId").addEventListener("change", renderPolicySourceReferences);
+$("#policySourceReferenceSearch").addEventListener("input", renderPolicySourceReferences);
 $("#policySourceReferences").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-insert-define]");
+  const button = event.target.closest("[data-reference-insert]");
   if (!button) return;
   const editor = $("#policyResourceSource");
-  const symbol = button.dataset.insertDefine;
+  const symbol = button.dataset.referenceInsert;
   replacePolicySource(editor.selectionStart, editor.selectionEnd, symbol, editor.selectionStart + symbol.length);
   editor.focus();
 });
