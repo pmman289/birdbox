@@ -47,7 +47,25 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   const bashEnv = path.join(root, "bash.env");
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(fakeBin, { recursive: true });
-  const fakeCommand = "#!/bin/sh\nprintf '%s %s\\n' \"$0\" \"$*\" >> \"$BIRDBOX_FAKE_LOG\"\nif [ -f \"$BIRDBOX_FAIL_APPLY\" ] && ! printf '%s' \"$*\" | grep -q -- '-p -c'; then exit 1; fi\nexit 0\n";
+  const fakeCommand = `#!/bin/sh
+printf '%s %s\n' "$0" "$*" >> "$BIRDBOX_FAKE_LOG"
+case "$*" in
+  *"show route table master4 protocol test_bgp all"*)
+    printf '%s\n' 'BIRD 2.19.1 ready.' 'Table master4:' \
+      '203.0.113.0/24    unicast [test_bgp 10:00:00.000] * (100) [AS65002i]' \
+      '  Type: BGP univ' '  BGP.next_hop: 192.0.2.2' '  BGP.as_path: 65002'
+    exit 0
+    ;;
+  *"show route table master4 export test_bgp all"*)
+    printf '%s\n' 'BIRD 2.19.1 ready.' 'Table master4:' \
+      '198.51.100.0/24   unicast [test_static 10:00:00.000] * (200)' \
+      '  Type: static univ' '  BGP.next_hop: 192.0.2.1'
+    exit 0
+    ;;
+esac
+if [ -f "$BIRDBOX_FAIL_APPLY" ] && ! printf '%s' "$*" | grep -q -- '-p -c'; then exit 1; fi
+exit 0
+`;
   await fs.writeFile(path.join(fakeBin, "bird"), fakeCommand, { mode: 0o755 });
   await fs.writeFile(path.join(fakeBin, "birdc"), fakeCommand, { mode: 0o755 });
   await fs.writeFile(bashEnv, `export PATH=${fakeBin}:$PATH\n`);
@@ -205,6 +223,17 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   assert.equal(started.status, 200);
   assert.equal(started.body.action, "enable");
   assert.match(await fs.readFile(fakeLog, "utf8"), /birdc .*enable test_bgp/);
+
+  const importedRoutes = await authenticatedRequest("/api/sessions/session_test/routes?family=ipv4&direction=import");
+  assert.equal(importedRoutes.status, 200);
+  assert.equal(importedRoutes.body.table, "master4");
+  assert.deepEqual(importedRoutes.body.routes.map((route) => route.prefix), ["203.0.113.0/24"]);
+  assert.match(importedRoutes.body.routes[0].details, /BGP\.as_path: 65002/);
+  const exportedRoutes = await authenticatedRequest("/api/sessions/session_test/routes?family=ipv4&direction=export");
+  assert.equal(exportedRoutes.status, 200);
+  assert.deepEqual(exportedRoutes.body.routes.map((route) => route.prefix), ["198.51.100.0/24"]);
+  const invalidRouteFamily = await authenticatedRequest("/api/sessions/session_test/routes?family=all&direction=import");
+  assert.equal(invalidRouteFamily.status, 400);
 
   const disabledSession = await authenticatedRequest("/api/sessions/apply", {
     method: "POST",

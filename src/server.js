@@ -13,6 +13,7 @@ import {
   checkIncludeNodeAccess,
   configureManagedSsh,
   inspectNode,
+  inspectProtocolRoutes,
   normalizeDefine,
   normalizeNode,
   normalizePeer,
@@ -1641,6 +1642,32 @@ async function handleApi(request, response, url) {
       config: staged.config,
       validation: staged.validation,
       events,
+    });
+  }
+
+  const sessionRoutesMatch = pathname.match(/^\/api\/sessions\/([A-Za-z_][A-Za-z0-9_]*)\/routes$/);
+  if (sessionRoutesMatch && request.method === "GET") {
+    const family = String(searchParams.get("family") ?? "").toLowerCase();
+    const direction = String(searchParams.get("direction") ?? "").toLowerCase();
+    if (family !== "ipv4" && family !== "ipv6") fail(400, "路由地址族必须是 ipv4 或 ipv6");
+    if (direction !== "import" && direction !== "export") fail(400, "路由方向必须是 import 或 export");
+    const state = await store.read();
+    const session = state.sessions.find((item) => item.id === sessionRoutesMatch[1]);
+    if (!session) fail(404, "会话不存在");
+    if (!session.enabled) fail(409, "会话配置已停用，无法读取路由明细");
+    const channel = session.channels[family];
+    if (!channel?.enabled) fail(409, `会话未启用 ${family === "ipv4" ? "IPv4" : "IPv6"} Channel`);
+    const node = findNode(state, session.nodeId);
+    const result = await inspectProtocolRoutes(node, session.protocolName, family, direction, { table: channel.table });
+    if (!result.ok) fail(502, result.error || "无法读取 BIRD 路由明细");
+    return sendJson(response, 200, {
+      session: { id: session.id, protocolName: session.protocolName },
+      family,
+      direction,
+      table: result.table ?? channel.table ?? (family === "ipv4" ? "master4" : "master6"),
+      routes: result.routes,
+      truncated: result.truncated,
+      limit: result.limit,
     });
   }
 

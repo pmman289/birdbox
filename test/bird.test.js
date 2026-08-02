@@ -20,6 +20,7 @@ import {
   normalizeStaticProtocol,
   parseBirdPrefixEntries,
   parseProtocolStatuses,
+  parseRouteDetails,
   renderBirdConfig,
   runOnNode,
   validateInventory,
@@ -1150,4 +1151,43 @@ test("parses multiple BGP protocol states independently", () => {
   `);
   assert.equal(disabled.disabled, true);
   assert.equal(disabled.established, false);
+});
+
+test("parses per-family BGP channel counts and bounded route details", () => {
+  const [protocol] = parseProtocolStatuses(`
+1002-dual_bgp BGP --- up 10:00:00 Established
+1006-  BGP state:          Established
+       Neighbor address: 2001:db8::2
+       Neighbor AS:      65002
+       Channel ipv4
+         State:          UP
+         Table:          customer4
+         Routes:         5 imported, 3 exported, 5 preferred
+       Channel ipv6
+         State:          UP
+         Table:          customer6
+         Routes:         7 imported, 2 exported, 6 preferred
+  `);
+  assert.equal(protocol.imported, 12);
+  assert.equal(protocol.exported, 5);
+  assert.deepEqual(protocol.channels, {
+    ipv4: { state: "UP", table: "customer4", imported: 5, exported: 3, preferred: 5 },
+    ipv6: { state: "UP", table: "customer6", imported: 7, exported: 2, preferred: 6 },
+  });
+
+  const details = parseRouteDetails(`
+BIRD 2.19.1 ready.
+Table customer6:
+2001:db8:100::/48  unicast [dual_bgp 10:00:01.000] * (100) [AS65002i]
+  Type: BGP univ
+  BGP.next_hop: 2001:db8::2
+  BGP.as_path: 65002
+2001:db8:200::/48  unicast [dual_bgp 10:00:02.000] * (100) [AS65002i]
+  Type: BGP univ
+---BIRDBOX-ROUTE-TRUNCATED---
+  `, "ipv6", 200);
+  assert.equal(details.table, "customer6");
+  assert.equal(details.truncated, true);
+  assert.deepEqual(details.routes.map((route) => route.prefix), ["2001:db8:100::/48", "2001:db8:200::/48"]);
+  assert.match(details.routes[0].details, /BGP\.next_hop: 2001:db8::2/);
 });

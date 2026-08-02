@@ -105,6 +105,12 @@
             <div><p class="eyebrow">会话</p><h2 id="sessionTitle">会话配置</h2></div>
             <span class="compatibility-badge">BIRD 2.19.1</span>
           </div>
+          <div id="sessionPreviewOverlay" class="session-preview-overlay" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <div class="session-preview-notice">
+              <span class="session-preview-spinner" aria-hidden="true"></span>
+              <div><strong id="sessionPreviewOverlayTitle">正在预检会话配置</strong><span id="sessionPreviewOverlayDetail">正在等待节点返回候选配置检查结果</span></div>
+            </div>
+          </div>
 
           <div id="sessionEmpty" class="empty-state" hidden>
             <strong>此节点尚未定义远端 Peer</strong>
@@ -264,7 +270,7 @@
           </div>
           <div class="protocol-table-wrap">
             <table>
-              <thead><tr><th>Peer</th><th>地址</th><th>协议</th><th>状态</th><th>路由</th></tr></thead>
+              <thead><tr><th>Peer</th><th>地址</th><th>协议</th><th>状态</th><th>路由明细</th></tr></thead>
               <tbody id="protocolRows"><tr><td colspan="5" class="empty-cell">尚无远端 Peer</td></tr></tbody>
             </table>
           </div>
@@ -390,6 +396,34 @@
 
     <div id="operationStatus" class="visually-hidden" role="status" aria-live="polite"></div>
     <div id="toastRegion" class="toast-region" aria-live="assertive"></div>
+
+    <dialog id="routeDialog" class="route-dialog" aria-labelledby="routeDialogTitle">
+      <div class="route-dialog-shell">
+        <header class="route-dialog-head">
+          <div>
+            <p class="eyebrow">BIRD ROUTES</p>
+            <h2 id="routeDialogTitle">会话路由</h2>
+            <span id="routeDialogSubtitle"></span>
+          </div>
+          <button class="icon-button" type="button" data-close="routeDialog" title="关闭" aria-label="关闭路由详情">×</button>
+        </header>
+        <div class="route-dialog-toolbar">
+          <div id="routeFamilyControl" class="route-segmented" role="group" aria-label="路由地址族">
+            <button type="button" data-route-family="ipv4">IPv4</button>
+            <button type="button" data-route-family="ipv6">IPv6</button>
+          </div>
+          <div id="routeDirectionControl" class="route-segmented" role="group" aria-label="路由方向">
+            <button type="button" data-route-direction="import">导入</button>
+            <button type="button" data-route-direction="export">导出</button>
+          </div>
+        </div>
+        <div class="route-dialog-meta">
+          <span id="routeDialogCount">0 条路由</span>
+          <span id="routeDialogTable">-</span>
+        </div>
+        <div id="routeDialogBody" class="route-dialog-body" aria-live="polite"></div>
+      </div>
+    </dialog>
 
     <dialog id="mutationWaitDialog" class="mutation-wait-dialog" aria-labelledby="mutationWaitTitle" aria-describedby="mutationWaitDetail">
       <div class="mutation-wait-content" role="status" aria-live="polite" aria-atomic="true">

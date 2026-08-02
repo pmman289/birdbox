@@ -15,6 +15,7 @@ const elements = {
   selectionLoadingStatus: $("#selectionLoadingStatus"),
   globalState: $("#globalState"),
   sessionForm: $("#sessionForm"),
+  sessionPreviewOverlay: $("#sessionPreviewOverlay"),
   preview: $("#previewButton"),
   apply: $("#applyButton"),
   removeSession: $("#removeSessionButton"),
@@ -27,6 +28,7 @@ const elements = {
   policyActionDialog: $("#policyActionDialog"),
   staticDialog: $("#staticDialog"),
   rpkiDialog: $("#rpkiDialog"),
+  routeDialog: $("#routeDialog"),
   nodeCleanupDialog: $("#nodeCleanupDialog"),
 };
 
@@ -54,6 +56,9 @@ let sessionApplyInFlight = false;
 let unknownOutcomeRefreshTimer = null;
 let staticRouteActionState = {};
 let accountSessionsRequestId = 0;
+let routeDialogContext = null;
+let routeDetailsRequestId = 0;
+let routeDetailsAbortController = null;
 
 const CHANNEL_FAMILIES = ["ipv4", "ipv6"];
 const THEME_STORAGE_KEY = "birdbox-theme";
@@ -673,12 +678,25 @@ function sameSessionContext(context) {
   return Boolean(context && current && context.nodeId === current.nodeId && context.peerId === current.peerId);
 }
 
+function setSessionPreviewOverlay(next, detail = "") {
+  const overlay = elements.sessionPreviewOverlay;
+  overlay.hidden = !next;
+  if (next) {
+    $("#sessionPreviewOverlayTitle").textContent = "正在预检会话配置";
+    $("#sessionPreviewOverlayDetail").textContent = detail || "正在等待节点返回候选配置检查结果";
+    overlay.setAttribute("aria-busy", "true");
+  } else {
+    overlay.removeAttribute("aria-busy");
+  }
+}
+
 function cancelPendingPreview() {
   clearTimeout(autoPreviewTimer);
   autoPreviewTimer = null;
   previewRequestId += 1;
   previewAbortController?.abort();
   previewAbortController = null;
+  setSessionPreviewOverlay(false);
   if (previewInFlight) {
     previewInFlight = false;
     setBusy(false);
@@ -1795,16 +1813,129 @@ function renderProtocols() {
   }
   $("#protocolRows").innerHTML = state.peers.map((peer) => {
     const presentation = protocolPresentation(peer);
-    const routeCount = peer.protocol ? `${peer.protocol.imported ?? 0} / ${peer.protocol.exported ?? 0}` : "-";
+    const enabledFamilies = CHANNEL_FAMILIES.filter((family) => peer.session?.channels?.[family]?.enabled);
+    const routeSummary = enabledFamilies.map((family) => {
+      const channel = peer.protocol?.channels?.[family];
+      const fallback = enabledFamilies.length === 1 ? peer.protocol : null;
+      const imported = channel?.imported ?? fallback?.imported;
+      const exported = channel?.exported ?? fallback?.exported;
+      return `<span>${familyLabel(family)} ${imported ?? "-"} 入 / ${exported ?? "-"} 出</span>`;
+    }).join("");
+    const routesAvailable = Boolean(
+      peer.session?.enabled !== false && enabledFamilies.length && state.runtime?.reachable && peer.protocol?.configured !== false,
+    );
     const stateClass = peer.protocol?.established ? "up" : (peer.session ? "down" : "");
     return `<tr data-peer-id="${escapeHtml(peer.id)}">
       <td>${escapeHtml(peer.name)}</td>
       <td>${escapeHtml(peer.address)}</td>
       <td>${escapeHtml(peer.session?.protocolName ?? "-")}</td>
       <td><span class="table-state ${stateClass}">${escapeHtml(presentation.label)}</span></td>
-      <td>${routeCount}</td>
+      <td>${peer.session ? `<button class="route-summary-button" type="button" data-open-routes="${escapeHtml(peer.id)}"${routesAvailable ? "" : " disabled"} aria-label="查看 ${escapeHtml(peer.name)} 的路由明细"><span class="route-summary-copy"><strong>查看路由</strong>${routeSummary || "<span>Channel 未启用</span>"}</span><span aria-hidden="true">›</span></button>` : "-"}</td>
     </tr>`;
   }).join("");
+}
+
+function routeRuntimeCount(peer, family, direction) {
+  const enabledFamilies = CHANNEL_FAMILIES.filter((item) => peer.session?.channels?.[item]?.enabled);
+  const channel = peer.protocol?.channels?.[family];
+  const fallback = enabledFamilies.length === 1 ? peer.protocol : null;
+  return channel?.[direction === "import" ? "imported" : "exported"]
+    ?? fallback?.[direction === "import" ? "imported" : "exported"]
+    ?? null;
+}
+
+function syncRouteDialogControls() {
+  if (!routeDialogContext) return;
+  const peer = state.peers.find((item) => item.id === routeDialogContext.peerId);
+  $$("[data-route-family]").forEach((button) => {
+    const enabled = peer?.session?.channels?.[button.dataset.routeFamily]?.enabled === true;
+    const active = button.dataset.routeFamily === routeDialogContext.family;
+    button.disabled = !enabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  $$("[data-route-direction]").forEach((button) => {
+    const active = button.dataset.routeDirection === routeDialogContext.direction;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function renderRouteDetails(result) {
+  if (!routeDialogContext) return;
+  const peer = state.peers.find((item) => item.id === routeDialogContext.peerId);
+  const runtimeCount = routeRuntimeCount(peer, result.family, result.direction);
+  $("#routeDialogCount").textContent = runtimeCount === null
+    ? `${result.routes.length}${result.truncated ? "+" : ""} 条路由`
+    : result.truncated
+      ? `${runtimeCount} 条路由 · 当前显示 ${result.routes.length} 条`
+      : `${runtimeCount} 条路由`;
+  $("#routeDialogTable").textContent = result.table ? `Table ${result.table}` : "-";
+  if (!result.routes.length) {
+    const label = result.direction === "import" ? "没有已接受的导入路由" : "没有当前导出路由";
+    $("#routeDialogBody").innerHTML = `<div class="route-dialog-state">${label}</div>`;
+    return;
+  }
+  const notice = result.truncated
+    ? `<div class="route-list-notice">路由数量较多，仅显示前 ${result.limit} 个前缀</div>`
+    : "";
+  $("#routeDialogBody").innerHTML = `${notice}<ol class="route-list">${result.routes.map((route) => `
+    <li class="route-entry"><details>
+      <summary><code class="route-entry-prefix">${escapeHtml(route.prefix)}</code><span class="route-entry-summary">${escapeHtml(route.summary)}</span></summary>
+      <pre>${escapeHtml(route.details || route.summary)}</pre>
+    </details></li>
+  `).join("")}</ol>`;
+}
+
+async function loadRouteDetails({ force = false } = {}) {
+  const context = routeDialogContext;
+  if (!context) return;
+  const cacheKey = `${context.family}:${context.direction}`;
+  if (!force && context.cache.has(cacheKey)) {
+    renderRouteDetails(context.cache.get(cacheKey));
+    return;
+  }
+  routeDetailsAbortController?.abort();
+  routeDetailsAbortController = new AbortController();
+  const requestId = ++routeDetailsRequestId;
+  $("#routeDialogCount").textContent = "正在读取";
+  $("#routeDialogTable").textContent = "-";
+  $("#routeDialogBody").innerHTML = '<div class="route-dialog-state"><div class="route-loading-copy"><i aria-hidden="true"></i><span>正在读取 BIRD 路由</span></div></div>';
+  try {
+    const result = await api(
+      `/api/sessions/${encodeURIComponent(context.sessionId)}/routes?family=${context.family}&direction=${context.direction}`,
+      { signal: routeDetailsAbortController.signal, timeoutMs: 30000 },
+    );
+    if (requestId !== routeDetailsRequestId || routeDialogContext?.id !== context.id) return;
+    context.cache.set(cacheKey, result);
+    renderRouteDetails(result);
+  } catch (error) {
+    if (error.name === "AbortError" || requestId !== routeDetailsRequestId || routeDialogContext?.id !== context.id) return;
+    $("#routeDialogCount").textContent = "读取失败";
+    $("#routeDialogBody").innerHTML = `<div class="route-dialog-state error"><div><p>${escapeHtml(error.message)}</p><button class="secondary-button" type="button" data-retry-routes>重试</button></div></div>`;
+  } finally {
+    if (requestId === routeDetailsRequestId) routeDetailsAbortController = null;
+  }
+}
+
+function openRouteDialog(peerId) {
+  const peer = state.peers.find((item) => item.id === peerId);
+  const families = CHANNEL_FAMILIES.filter((family) => peer?.session?.channels?.[family]?.enabled);
+  if (!peer?.session || !families.length) return;
+  routeDetailsAbortController?.abort();
+  routeDialogContext = {
+    id: routeDetailsRequestId + 1,
+    peerId: peer.id,
+    sessionId: peer.session.id,
+    family: families[0],
+    direction: "import",
+    cache: new Map(),
+  };
+  $("#routeDialogTitle").textContent = `${peer.name} 路由`;
+  $("#routeDialogSubtitle").textContent = `${currentNode()?.name ?? "节点"} · ${peer.session.protocolName} · ${peer.address}`;
+  syncRouteDialogControls();
+  elements.routeDialog.showModal();
+  void loadRouteDetails();
 }
 
 function renderEvents() {
@@ -2024,6 +2155,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
   const controller = new AbortController();
   previewAbortController = controller;
   previewInFlight = true;
+  setSessionPreviewOverlay(true, silent ? "正在自动检查刚刚修改的会话配置" : "正在等待节点返回候选配置检查结果");
   setBusy(true, "正在预检", elements.preview);
   try {
     const result = await api("/api/sessions/preview", {
@@ -2049,6 +2181,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
     if (requestId === previewRequestId) {
       previewAbortController = null;
       previewInFlight = false;
+      setSessionPreviewOverlay(false);
       setBusy(false);
     }
   }
@@ -3244,6 +3377,33 @@ $$('dialog').forEach((dialog) => dialog.addEventListener("cancel", (event) => {
 }));
 elements.mutationWaitDialog.addEventListener("cancel", (event) => event.preventDefault());
 elements.policyActionDialog.addEventListener("close", () => { policyActionContext = null; });
+$("#protocolRows").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-open-routes]");
+  if (button && !button.disabled) openRouteDialog(button.dataset.openRoutes);
+});
+$("#routeFamilyControl").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-route-family]");
+  if (!button || button.disabled || !routeDialogContext || routeDialogContext.family === button.dataset.routeFamily) return;
+  routeDialogContext.family = button.dataset.routeFamily;
+  syncRouteDialogControls();
+  void loadRouteDetails();
+});
+$("#routeDirectionControl").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-route-direction]");
+  if (!button || !routeDialogContext || routeDialogContext.direction === button.dataset.routeDirection) return;
+  routeDialogContext.direction = button.dataset.routeDirection;
+  syncRouteDialogControls();
+  void loadRouteDetails();
+});
+$("#routeDialogBody").addEventListener("click", (event) => {
+  if (event.target.closest("[data-retry-routes]")) void loadRouteDetails({ force: true });
+});
+elements.routeDialog.addEventListener("close", () => {
+  routeDetailsAbortController?.abort();
+  routeDetailsAbortController = null;
+  routeDetailsRequestId += 1;
+  routeDialogContext = null;
+});
 
 $("#deleteNodeButton").addEventListener("click", async () => {
   const node = inventoryNode(value("nodeId"));

@@ -1704,7 +1704,24 @@ export function parseProtocolStatus(raw) {
   const bgpSection = state ? text.slice(text.search(/BGP state:/i)) : text;
   const neighbor = text.match(/Neighbor address:\s+([^\s]+)/i)?.[1] ?? null;
   const neighborAs = text.match(/Neighbor AS:\s+(\d+)/i)?.[1] ?? null;
-  const routes = bgpSection.match(/Routes:\s+(\d+) imported,\s+(\d+) exported/i);
+  const channelHeaders = [...text.matchAll(/^(?:\d{4}[- ]?)?\s*Channel\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/gmi)];
+  const channels = Object.fromEntries(channelHeaders.map((match, index) => {
+    const end = channelHeaders[index + 1]?.index ?? text.length;
+    const section = text.slice(match.index, end);
+    const routeCounts = section.match(/Routes:\s+(\d+) imported,\s+(\d+) exported(?:,\s+(\d+) preferred)?/i);
+    return [match[1].toLowerCase(), {
+      state: section.match(/State:\s+([^\r\n]+)/i)?.[1]?.trim() ?? null,
+      table: section.match(/Table:\s+([^\s]+)/i)?.[1] ?? null,
+      imported: routeCounts ? Number(routeCounts[1]) : null,
+      exported: routeCounts ? Number(routeCounts[2]) : null,
+      preferred: routeCounts?.[3] ? Number(routeCounts[3]) : null,
+    }];
+  }));
+  const fallbackRoutes = bgpSection.match(/Routes:\s+(\d+) imported,\s+(\d+) exported/i);
+  const channelValues = Object.values(channels);
+  const sumChannelCount = (key) => channelValues.some((channel) => channel[key] !== null)
+    ? channelValues.reduce((total, channel) => total + (channel[key] ?? 0), 0)
+    : null;
   return {
     configured: text.length > 0 && !/Unable to connect/i.test(text),
     disabled: /\b(?:Admin down|Disabled)\b/i.test(header),
@@ -1712,8 +1729,9 @@ export function parseProtocolStatus(raw) {
     established: state?.toLowerCase() === "established",
     neighbor,
     neighborAs: neighborAs ? Number(neighborAs) : null,
-    imported: routes ? Number(routes[1]) : null,
-    exported: routes ? Number(routes[2]) : null,
+    imported: channelValues.length ? sumChannelCount("imported") : (fallbackRoutes ? Number(fallbackRoutes[1]) : null),
+    exported: channelValues.length ? sumChannelCount("exported") : (fallbackRoutes ? Number(fallbackRoutes[2]) : null),
+    ...(channelValues.length ? { channels } : {}),
   };
 }
 
@@ -1724,6 +1742,99 @@ export function parseProtocolStatuses(raw) {
     const end = headers[index + 1]?.index ?? text.length;
     return { name: match[1], ...parseProtocolStatus(text.slice(match.index, end)) };
   });
+}
+
+export function parseRouteDetails(raw, family, limit = 200) {
+  assert(family === "ipv4" || family === "ipv6", "路由地址族不合法");
+  assert(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1000, "路由明细数量限制不合法");
+  const expectedFamily = family === "ipv4" ? 4 : 6;
+  const routes = [];
+  let current = null;
+  let table = null;
+  let truncated = false;
+  const pushCurrent = () => {
+    if (!current) return;
+    current.details = current.details.join("\n").trim();
+    routes.push(current);
+    current = null;
+  };
+  for (const inputLine of String(raw ?? "").split(/\r?\n/)) {
+    if (inputLine.trim() === "---BIRDBOX-ROUTE-TRUNCATED---") {
+      truncated = true;
+      continue;
+    }
+    const line = inputLine.replace(/^\d{4}[- ]/, "");
+    const tableMatch = line.match(/^Table\s+([^:]+):\s*$/i);
+    if (tableMatch) {
+      table = tableMatch[1].trim();
+      continue;
+    }
+    if (/^BIRD\s+\S+\s+ready\.?$/i.test(line.trim()) || /^\d{4}\s*$/.test(line.trim())) continue;
+    const routeMatch = line.match(/^\s*([0-9A-Fa-f:.]+\/(\d+))\s+(.+)$/);
+    if (routeMatch && net.isIP(routeMatch[1].slice(0, routeMatch[1].lastIndexOf("/"))) === expectedFamily) {
+      pushCurrent();
+      if (routes.length >= limit) {
+        truncated = true;
+        continue;
+      }
+      current = { prefix: routeMatch[1], summary: routeMatch[3].trim(), details: [] };
+      continue;
+    }
+    if (current && line.trim()) current.details.push(line.trimEnd());
+  }
+  pushCurrent();
+  return { family, table, routes, truncated, limit };
+}
+
+export async function inspectProtocolRoutes(nodeInput, protocolNameInput, family, direction, options = {}) {
+  const node = normalizeNode(nodeInput);
+  const protocolName = normalizeId(protocolNameInput, "BGP 协议名称");
+  assert(family === "ipv4" || family === "ipv6", "路由地址族不合法");
+  assert(direction === "import" || direction === "export", "路由方向不合法");
+  const limit = options.limit ?? 200;
+  assert(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1000, "路由明细数量限制不合法");
+  const table = normalizeOptionalName(options.table, "Channel 路由表名称") ?? (family === "ipv4" ? "master4" : "master6");
+  const routeSelector = direction === "import" ? `protocol ${protocolName}` : `export ${protocolName}`;
+  const query = `show route table ${table} ${routeSelector} all`;
+  const command = `
+status_file=$(mktemp)
+filter_status_file=$(mktemp)
+cleanup_route_query() { rm -f "$status_file" "$filter_status_file"; }
+trap cleanup_route_query EXIT HUP INT TERM
+output=$(
+  (birdc -s '${node.socketPath}' '${query}' 2>&1; printf '%s' "$?" > "$status_file") |
+  (
+    awk -v limit='${limit}' '
+      /^[[:space:]]*[[:xdigit:].:]+\\/[0-9]+[[:space:]]/ {
+        route_count += 1
+        if (route_count > limit) {
+          print "---BIRDBOX-ROUTE-TRUNCATED---"
+          exit
+        }
+      }
+      { print }
+    '
+    printf '%s' "$?" > "$filter_status_file"
+  )
+)
+status=$(cat "$status_file" 2>/dev/null || printf '1')
+filter_status=$(cat "$filter_status_file" 2>/dev/null || printf '1')
+cleanup_route_query
+trap - EXIT HUP INT TERM
+printf '%s\n' "$output"
+if [ "$filter_status" -ne 0 ]; then
+  exit "$filter_status"
+fi
+if [ "$status" -ne 0 ] && ! printf '%s\n' "$output" | grep -q '^---BIRDBOX-ROUTE-TRUNCATED---$'; then
+  exit "$status"
+fi
+`.trim();
+  const result = await runOnNode(node, command, { timeout: 20000, maxBuffer: 2 * 1024 * 1024 });
+  return {
+    ok: result.ok,
+    ...parseRouteDetails(result.stdout, family, limit),
+    error: result.ok ? null : (result.stderr || result.stdout || "无法读取 BIRD 路由明细"),
+  };
 }
 
 export async function stageAndValidate(node, config) {
