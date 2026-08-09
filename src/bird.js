@@ -34,6 +34,17 @@ const PREFIX_PATTERN_RE = /^(.+)\/(\d{1,3})(?:(\+|-)|\{(\d{1,3}),(\d{1,3})\})?$/
 const RESERVED_PROTOCOL_NAMES = new Set(["birdbox_device", "birdbox_static", "birdbox_static4", "birdbox_static6", "birdbox_bfd"]);
 const STATIC_ROUTE_ACTIONS = new Set(["blackhole", "reject", "unreachable", "prohibit"]);
 const STATIC_CHANNEL_POLICIES = new Set(["all", "none"]);
+const STATIC_ROUTE_FILTER_OPERATION_TYPES = new Set(["set", "community", "prepend"]);
+const STATIC_ROUTE_FILTER_ATTRIBUTES = new Map([
+  ["preference", { kind: "integer", minimum: 0, maximum: 4294967295 }],
+  ["igp_metric", { kind: "integer", minimum: 0, maximum: 4294967295 }],
+  ["bgp_local_pref", { kind: "integer", minimum: 0, maximum: 4294967295 }],
+  ["bgp_med", { kind: "integer", minimum: 0, maximum: 4294967295 }],
+  ["bgp_origin", { kind: "origin" }],
+]);
+const STATIC_ROUTE_FILTER_COMMUNITY_LISTS = new Set(["standard", "large"]);
+const STATIC_ROUTE_FILTER_COMMUNITY_OPERATIONS = new Set(["add", "delete", "empty"]);
+const STATIC_ROUTE_FILTER_ORIGINS = new Set(["igp", "egp", "incomplete"]);
 const POLICY_MODES = new Set(["form", "combined", "custom"]);
 const FUNCTION_STEP_ACTIONS = new Set(["accept", "reject", "execute"]);
 const SWITCH_SETTINGS = new Set(["default", "on", "off"]);
@@ -50,6 +61,9 @@ const RPKI_TRANSPORTS = new Set(["tcp", "ssh"]);
 const RPKI_TCP_AUTHENTICATION = new Set(["none", "md5"]);
 const RPKI_SWITCH_SETTINGS = new Set(["default", "on", "off"]);
 const MAX_POLICY_SOURCE_LENGTH = 32 * 1024;
+const MAX_STATIC_ROUTE_FILTER_CUSTOM_LENGTH = 8 * 1024;
+const MAX_STATIC_ROUTE_FILTER_TOTAL_LENGTH = 256 * 1024;
+const MAX_STATIC_ROUTE_FILTER_OPERATIONS = 32;
 const MAX_GRACEFUL_RESTART_TIME = 4095;
 const MAX_LONG_LIVED_STALE_TIME = 16777215;
 
@@ -555,6 +569,78 @@ function normalizeStaticRouteActions(value, family) {
   return normalized;
 }
 
+function normalizeStaticRouteFilterOperation(input, prefix, index) {
+  const label = `Static CIDR ${prefix} 快捷操作 ${index + 1}`;
+  assert(input && typeof input === "object" && !Array.isArray(input), `${label}必须是对象`);
+  const type = normalizeEnum(input.type, STATIC_ROUTE_FILTER_OPERATION_TYPES, "", `${label}类型`);
+  if (type === "set") {
+    const attribute = String(input.attribute ?? "").trim().toLowerCase();
+    const definition = STATIC_ROUTE_FILTER_ATTRIBUTES.get(attribute);
+    assert(definition, `${label}属性不合法`);
+    if (definition.kind === "origin") {
+      return {
+        type,
+        attribute,
+        value: normalizeEnum(input.value, STATIC_ROUTE_FILTER_ORIGINS, "", `${label}值`),
+      };
+    }
+    const value = normalizeOptionalInteger(input.value, `${label}值`, definition.minimum, definition.maximum);
+    assert(value !== null, `${label}值不能为空`);
+    return { type, attribute, value };
+  }
+  if (type === "community") {
+    const list = normalizeEnum(input.list, STATIC_ROUTE_FILTER_COMMUNITY_LISTS, "standard", `${label} Community 类型`);
+    const operation = normalizeEnum(input.operation, STATIC_ROUTE_FILTER_COMMUNITY_OPERATIONS, "add", `${label} Community 动作`);
+    if (operation === "empty") return { type, list, operation };
+    assert(Array.isArray(input.value), `${label} Community 值必须是数组`);
+    const expectedLength = list === "large" ? 3 : 2;
+    const maximum = list === "large" ? 4294967295 : 65535;
+    assert(input.value.length === expectedLength, `${label} Community 必须包含 ${expectedLength} 个整数`);
+    const value = input.value.map((part, partIndex) => {
+      const normalized = normalizeOptionalInteger(part, `${label} Community 第 ${partIndex + 1} 段`, 0, maximum);
+      assert(normalized !== null, `${label} Community 第 ${partIndex + 1} 段不能为空`);
+      return normalized;
+    });
+    return { type, list, operation, value };
+  }
+  const asn = normalizeOptionalInteger(input.asn, `${label} ASN`, 1, 4294967295);
+  const count = normalizeOptionalInteger(input.count, `${label}次数`, 1, 20);
+  assert(asn !== null, `${label} ASN 不能为空`);
+  assert(count !== null, `${label}次数不能为空`);
+  return { type, asn, count };
+}
+
+function normalizeStaticRouteFilter(input, prefix) {
+  if (input === null || input === undefined) return { operations: [], custom: "" };
+  assert(input && typeof input === "object" && !Array.isArray(input), `Static CIDR ${prefix} per-route 配置必须是对象`);
+  const operationsInput = input.operations ?? [];
+  assert(Array.isArray(operationsInput), `Static CIDR ${prefix} 快捷操作必须是数组`);
+  assert(operationsInput.length <= MAX_STATIC_ROUTE_FILTER_OPERATIONS, `Static CIDR ${prefix} 快捷操作最多支持 ${MAX_STATIC_ROUTE_FILTER_OPERATIONS} 项`);
+  const custom = normalizeBirdBlockSource(input.custom, `Static CIDR ${prefix} 自定义 per-route 源码`);
+  assert(Buffer.byteLength(custom, "utf8") <= MAX_STATIC_ROUTE_FILTER_CUSTOM_LENGTH, `Static CIDR ${prefix} 自定义 per-route 源码不能超过 8 KiB`);
+  assert(!(custom.startsWith("{") && custom.endsWith("}")), `Static CIDR ${prefix} 自定义 per-route 源码只填写块内容，不包含外层花括号`);
+  return {
+    operations: operationsInput.map((operation, index) => normalizeStaticRouteFilterOperation(operation, prefix, index)),
+    custom,
+  };
+}
+
+function normalizeStaticRouteFilters(value, family) {
+  if (value === null || value === undefined) return {};
+  assert(value && typeof value === "object" && !Array.isArray(value), "Static CIDR per-route 配置必须是对象");
+  const entries = Object.entries(value);
+  assert(entries.length <= 256, "Static CIDR per-route 配置最多支持 256 个条目");
+  const normalized = {};
+  for (const [prefixInput, filterInput] of entries) {
+    const prefix = normalizeBirdPrefixPattern(prefixInput, family === "ipv4" ? 4 : 6);
+    assert(isExactPrefix(prefix), `Static CIDR per-route 条目必须是完整 CIDR: ${prefixInput}`);
+    assert(!Object.hasOwn(normalized, prefix), `Static CIDR per-route 条目重复: ${prefix}`);
+    normalized[prefix] = normalizeStaticRouteFilter(filterInput, prefix);
+  }
+  assert(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= MAX_STATIC_ROUTE_FILTER_TOTAL_LENGTH, "单个 Static 的 per-route 配置不能超过 256 KiB");
+  return normalized;
+}
+
 export function normalizeStaticProtocol(input) {
   assert(input && typeof input === "object", "Static 资源参数不能为空");
   const family = normalizeEnum(input.family, new Set(["ipv4", "ipv6"]), "ipv4", "Static 地址族");
@@ -565,8 +651,10 @@ export function normalizeStaticProtocol(input) {
     ? null
     : normalizeStaticRouteAction(input.action, family, "静态路由动作");
   const routeActions = normalizeStaticRouteActions(input.routeActions, family);
+  const routeFilters = normalizeStaticRouteFilters(input.routeFilters, family);
   assert((defineId === null) === (actionValue === null), "Static CIDR Define 与标准动作必须同时设置");
   assert(defineId !== null || !Object.keys(routeActions).length, "未选择 Static CIDR Define 时不能设置逐条动作");
+  assert(defineId !== null || !Object.keys(routeFilters).length, "未选择 Static CIDR Define 时不能设置 per-route 配置");
   const raw = normalizeBirdBlockSource(input.raw, "额外 Static 指令");
   assert(actionValue !== null || raw, "Static 资源至少需要标准路由或自定义指令");
   const name = normalizeId(input.name, "Static 协议名称");
@@ -580,6 +668,7 @@ export function normalizeStaticProtocol(input) {
     defineId,
     action: actionValue,
     routeActions,
+    routeFilters,
     import: normalizeEnum(input.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置"),
     export: normalizeEnum(input.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
     raw,
@@ -1099,7 +1188,11 @@ export function validateInventory(input) {
       assert(action !== null, `Static 资源 ${resource.name} 未为 ${prefix} 设置标准动作`);
       return [prefix, action];
     }));
-    return { ...resource, routeActions };
+    const routeFilters = Object.fromEntries(exactPrefixes.map((prefix) => [
+      prefix,
+      resource.routeFilters[prefix] ?? { operations: [], custom: "" },
+    ]));
+    return { ...resource, routeActions, routeFilters };
   });
   for (const peer of peers) {
     assert(nodeMap.has(peer.nodeId), `Peer ${peer.name} 引用了不存在的节点`);
@@ -1139,10 +1232,11 @@ export function validateInventory(input) {
       ),
       `Static 资源 ${resource.name} 的 CIDR Define 对所选节点或地址族不可用`,
     );
-    const identifiers = birdIdentifiers(resource.raw);
-    for (const dependency of managedDefines.filter((item) => identifiers.has(item.name))) {
-      assert(dependency.nodeId === null || dependency.nodeId === node.id, `Static 资源 ${resource.name} 引用了作用域不兼容的 Define ${dependency.name}`);
-      assert(dependency.enabled, `Static 资源 ${resource.name} 引用了已停用的 Define ${dependency.name}`);
+    const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
+    const identifiers = new Set(sources.flatMap((source) => [...birdIdentifiers(source)]));
+    for (const dependency of [...managedDefines, ...functions].filter((item) => identifiers.has(item.name))) {
+      assert(dependency.nodeId === null || dependency.nodeId === node.id, `Static 资源 ${resource.name} 引用了作用域不兼容的资源 ${dependency.name}`);
+      assert(dependency.enabled, `Static 资源 ${resource.name} 引用了已停用的资源 ${dependency.name}`);
     }
   }
   for (const session of sessions) {
@@ -1214,23 +1308,25 @@ export function validateInventory(input) {
     ];
     assert(new Set(symbols).size === symbols.length, `节点 ${node.name} 的 BIRD 全局标识符冲突`);
     for (const family of ["ipv4", "ipv6"]) {
-      const routeActions = new Map();
+      const routeDefinitions = new Map();
       for (const resource of nodeStaticProtocols) {
         if (!resource.enabled || resource.family !== family || resource.defineId === null) continue;
         const staticDefine = defineMap.get(resource.defineId);
         for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
           const action = resource.routeActions[prefix] ?? resource.action;
           if (action === null) continue;
-          const existing = routeActions.get(prefix);
-          assert(!existing || existing === action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-          routeActions.set(prefix, action);
+          const routeFilter = resource.routeFilters[prefix] ?? { operations: [], custom: "" };
+          const signature = staticRouteDefinitionSignature(action, routeFilter);
+          const existing = routeDefinitions.get(prefix);
+          assert(!existing || existing === signature, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由定义`);
+          routeDefinitions.set(prefix, signature);
         }
       }
     }
   }
 
   return {
-    version: 19,
+    version: 20,
     nodes,
     peers,
     defines,
@@ -1254,6 +1350,58 @@ function indentBirdBlock(source, spaces) {
   if (!source) return "";
   const indentation = " ".repeat(spaces);
   return `${source.split("\n").map((line) => `${indentation}${line}`).join("\n")}\n`;
+}
+
+function staticRouteDefinitionSignature(action, routeFilter) {
+  return JSON.stringify({ action, ...(routeFilter ?? { operations: [], custom: "" }) });
+}
+
+function renderStaticRouteFilterOperation(operation) {
+  if (operation.type === "set") {
+    const value = operation.attribute === "bgp_origin" ? `ORIGIN_${operation.value.toUpperCase()}` : operation.value;
+    return `${operation.attribute} = ${value};`;
+  }
+  if (operation.type === "community") {
+    const attribute = operation.list === "large" ? "bgp_large_community" : "bgp_community";
+    if (operation.operation === "empty") return `${attribute}.empty;`;
+    return `${attribute}.${operation.operation}((${operation.value.join(", ")}));`;
+  }
+  return Array.from({ length: operation.count }, () => `bgp_path.prepend(${operation.asn});`).join("\n");
+}
+
+function renderStaticRoute(resourceId, prefix, action, routeFilter) {
+  if (!routeFilter.operations.length && !routeFilter.custom) return `  route ${prefix} ${action};\n`;
+  let source = `  # birdbox-source static=${resourceId} cidr=${prefix} route\n` +
+    `  route ${prefix} ${action} {\n`;
+  routeFilter.operations.forEach((operation, index) => {
+    source += `    # birdbox-source static=${resourceId} cidr=${prefix} operation=${index + 1}\n`;
+    source += indentBirdBlock(renderStaticRouteFilterOperation(operation), 4);
+  });
+  if (routeFilter.custom) {
+    source += `    # birdbox-source static=${resourceId} cidr=${prefix} custom\n`;
+    source += indentBirdBlock(routeFilter.custom, 4);
+  }
+  return `${source}  };\n`;
+}
+
+export function locateStaticRouteDiagnostic(config, diagnostic) {
+  const location = String(diagnostic ?? "").match(/:(\d+):(\d+)(?:\s|$)/);
+  if (!location) return null;
+  const lines = String(config ?? "").split("\n");
+  let cursor = Math.min(Number(location[1]) - 1, lines.length - 1);
+  for (; cursor >= 0; cursor -= 1) {
+    const marker = lines[cursor].match(/^\s*# birdbox-source static=([A-Za-z_][A-Za-z0-9_]*) cidr=(\S+) (route|custom|operation=(\d+))\s*$/);
+    if (!marker) continue;
+    return {
+      resourceId: marker[1],
+      prefix: marker[2],
+      section: marker[3] === "route" ? "route" : marker[3] === "custom" ? "custom" : "operation",
+      operationIndex: marker[4] ? Number(marker[4]) - 1 : null,
+      line: Number(location[1]),
+      column: Number(location[2]),
+    };
+  }
+  return null;
 }
 
 function renderSetting(name, value, spaces = 2) {
@@ -1477,7 +1625,7 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
     }
     return { session, peer, exportDefines };
   });
-  const routeActions = { ipv4: new Map(), ipv6: new Map() };
+  const routeDefinitions = { ipv4: new Map(), ipv6: new Map() };
   const renderedStaticProtocols = staticProtocols.map((resource) => {
     const expectedType = resource.family === "ipv4" ? "cidr4" : "cidr6";
     const staticDefine = resource.defineId === null ? null : defineMap.get(resource.defineId);
@@ -1490,10 +1638,12 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
       for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
         const action = resource.routeActions[prefix] ?? resource.action;
         if (action === null) continue;
-        const existing = routeActions[resource.family].get(prefix);
-        assert(!existing || existing === action, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由动作`);
-        routeActions[resource.family].set(prefix, action);
-        routes.push([prefix, action]);
+        const routeFilter = resource.routeFilters[prefix] ?? { operations: [], custom: "" };
+        const signature = staticRouteDefinitionSignature(action, routeFilter);
+        const existing = routeDefinitions[resource.family].get(prefix);
+        assert(!existing || existing === signature, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由定义`);
+        routeDefinitions[resource.family].set(prefix, signature);
+        routes.push({ prefix, action, routeFilter });
       }
     }
     return { ...resource, routes };
@@ -1528,7 +1678,9 @@ export function renderBirdConfig(nodeInput, peerInputs, sessionInputs, functionI
       `    import ${staticProtocol.import};\n` +
       `    export ${staticProtocol.export};\n` +
       "  };\n";
-    for (const [prefix, action] of staticProtocol.routes) config += `  route ${prefix} ${action};\n`;
+    for (const { prefix, action, routeFilter } of staticProtocol.routes) {
+      config += renderStaticRoute(staticProtocol.id, prefix, action, routeFilter);
+    }
     if (staticProtocol.raw) config += indentBirdBlock(staticProtocol.raw, 2);
     config += `}\n`;
   }

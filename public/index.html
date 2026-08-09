@@ -29,7 +29,7 @@
           <button id="authSubmitButton" class="primary-button auth-submit" type="submit">登录</button>
         </form>
       </div>
-      <span class="auth-version">0.01a</span>
+      <span class="auth-version">0.01b</span>
     </section>
 
     <header id="appHeader" class="app-header" hidden>
@@ -525,7 +525,7 @@
       </form>
     </dialog>
 
-    <dialog id="staticDialog" class="editor-dialog" aria-labelledby="staticDialogTitle">
+    <dialog id="staticDialog" class="editor-dialog static-editor-dialog" aria-labelledby="staticDialogTitle">
       <form id="staticForm">
         <div class="dialog-head">
           <span class="dialog-icon">S</span>
@@ -543,14 +543,41 @@
           <input id="staticAction" type="hidden">
           <section id="staticRouteActionsSection" class="static-route-editor full-width" aria-labelledby="staticRouteActionsTitle" hidden>
             <div class="static-route-editor-head">
-              <div><h3 id="staticRouteActionsTitle">CIDR 条目标准动作</h3><small id="staticRouteActionSummary">仅显示完整 CIDR，BIRD 扩展前缀不会生成 Static 路由</small></div>
+              <div><h3 id="staticRouteActionsTitle">CIDR 条目与 per-route 块</h3><small id="staticRouteActionSummary">仅显示完整 CIDR</small></div>
             </div>
             <div class="static-route-bulk">
               <div class="field"><label for="staticBulkAction">统一设置动作</label><select id="staticBulkAction"><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option><option value="via">via</option></select></div>
-              <div id="staticBulkViaField" class="field"><label for="staticBulkVia">via 地址</label><input id="staticBulkVia" placeholder="198.51.100.1"></div>
-              <button id="applyStaticBulkActionButton" class="secondary-button" type="button">应用到全部条目</button>
+              <div id="staticBulkViaField" class="field" hidden><label for="staticBulkVia">via 地址</label><input id="staticBulkVia" placeholder="198.51.100.1"></div>
+              <button id="applyStaticBulkActionButton" class="secondary-button" type="button">统一转发动作</button>
+              <button id="copyStaticRouteBlockButton" class="secondary-button" type="button">复制当前块到全部</button>
+              <button id="clearStaticRouteBlocksButton" class="text-danger-button" type="button">清空全部块</button>
             </div>
-            <div id="staticRouteActionList" class="static-route-action-list" role="list"></div>
+            <div class="static-route-workspace">
+              <div id="staticRouteActionList" class="static-route-action-list" role="listbox" aria-label="Static CIDR 条目"></div>
+              <div id="staticRouteDetail" class="static-route-detail" hidden>
+                <div class="static-route-detail-head">
+                  <div><span>当前 CIDR</span><code id="staticRouteDetailPrefix"></code></div>
+                  <span id="staticRouteDetailStatus"></span>
+                </div>
+                <div class="static-route-action-fields">
+                  <div class="field"><label for="staticRouteAction">转发动作</label><select id="staticRouteAction"><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option><option value="via">via</option></select></div>
+                  <div id="staticRouteViaField" class="field" hidden><label for="staticRouteVia">via 地址</label><input id="staticRouteVia" placeholder="198.51.100.1"></div>
+                </div>
+                <section class="static-filter-operations" aria-labelledby="staticFilterOperationsTitle">
+                  <div class="static-filter-section-head">
+                    <div><span>快捷操作</span><strong id="staticFilterOperationsTitle">按列表顺序执行</strong></div>
+                    <div class="static-filter-add-controls"><select id="staticAddOperationType" aria-label="快捷操作类型"><option value="set">设置属性</option><option value="community">Community</option><option value="prepend">AS prepend</option></select><button id="addStaticFilterOperationButton" class="secondary-button" type="button">添加</button></div>
+                  </div>
+                  <div id="staticFilterOperationList" class="static-filter-operation-list"></div>
+                </section>
+                <div class="field static-route-custom-field"><label for="staticRouteCustom">自定义 per-route 源码</label><textarea id="staticRouteCustom" class="compact-code-editor" maxlength="8192" spellcheck="false" placeholder="if net.len = 24 then bgp_med = 50;"></textarea></div>
+                <section class="static-code-references" aria-labelledby="staticReferenceTitle">
+                  <div class="code-reference-toolbar"><div class="code-reference-heading"><strong id="staticReferenceTitle">可用资源</strong><span id="staticReferenceCount">0 项</span></div><input id="staticReferenceSearch" type="search" placeholder="搜索 Define / Function"></div>
+                  <div id="staticReferences" class="code-reference-groups"></div>
+                </section>
+                <div class="static-route-preview"><span>最终 BIRD 路由</span><pre id="staticRoutePreview"></pre></div>
+              </div>
+            </div>
           </section>
           <div class="field full-width"><label for="staticRaw">自定义 Static 指令</label><textarea id="staticRaw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
           <label class="toggle-row full-width" for="staticEnabled"><span><strong>启用资源</strong></span><input id="staticEnabled" type="checkbox" checked><i aria-hidden="true"></i></label>

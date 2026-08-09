@@ -14,6 +14,7 @@ import {
   configureManagedSsh,
   inspectNode,
   inspectProtocolRoutes,
+  locateStaticRouteDiagnostic,
   normalizeDefine,
   normalizeNode,
   normalizePeer,
@@ -463,8 +464,9 @@ async function mutateAndApply(mutator, nodeIdsForDraft) {
       const nodes = nodeIds.map((nodeId) => findNode(inventory, nodeId));
 
       for (const node of nodes) {
-        const validation = await stageAndValidate(node, configForNode(inventory, node));
-        if (!validation.ok) fail(422, validation.stderr || `${node.name} 的 BIRD 语法检查失败`);
+        const config = configForNode(inventory, node);
+        const validation = await stageAndValidate(node, config);
+        if (!validation.ok) fail(422, staticValidationError(config, validation.stderr || validation.stdout, `${node.name} 的 BIRD 语法检查失败`));
       }
       if (nodes.length) journal = await beginDeploymentJournal(current, inventory, nodeIds, nodes);
       for (const node of nodes) {
@@ -547,8 +549,21 @@ async function preflightStaticProtocol(stateInput, resourceId) {
   resource.enabled = true;
   const state = validateInventory(probe);
   const node = findNode(state, resource.nodeId);
-  const validation = await stageAndValidate(node, configForNode(state, node));
-  if (!validation.ok) fail(422, validation.stderr || `${resource.name} 的 BIRD 语法检查失败`);
+  const config = configForNode(state, node);
+  const validation = await stageAndValidate(node, config);
+  if (!validation.ok) fail(422, staticValidationError(config, validation.stderr || validation.stdout, `${resource.name} 的 BIRD 语法检查失败`));
+}
+
+function staticValidationError(config, diagnostic, fallback) {
+  const detail = String(diagnostic ?? "").trim();
+  const source = locateStaticRouteDiagnostic(config, detail);
+  if (!source) return detail || fallback;
+  const section = source.section === "custom"
+    ? "自定义 per-route 源码"
+    : source.section === "operation"
+      ? `快捷操作 ${source.operationIndex + 1}`
+      : "路由定义";
+  return `Static CIDR ${source.prefix} ${section}的 BIRD 语法检查失败：${detail || fallback}`;
 }
 
 function protocolFor(runtime, protocolName) {

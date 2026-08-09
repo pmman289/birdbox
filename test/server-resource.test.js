@@ -156,6 +156,10 @@ exit 0
       nodeId: "local", label: "Test Static", name: "test_static", family: "ipv4",
       defineId: "define_static", action: "blackhole",
       routeActions: { "192.0.2.0/24": "blackhole", "198.51.100.0/24": "via 192.0.2.254" },
+      routeFilters: {
+        "192.0.2.0/24": { operations: [{ type: "set", attribute: "preference", value: 150 }], custom: "" },
+        "198.51.100.0/24": { operations: [], custom: "bgp_med = 50;" },
+      },
       import: "none", export: "all", raw: "", enabled: true,
     }),
   });
@@ -166,6 +170,10 @@ exit 0
   assert.deepEqual(
     createdStatic.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeActions,
     { "192.0.2.0/24": "blackhole", "198.51.100.0/24": "via 192.0.2.254" },
+  );
+  assert.equal(
+    createdStatic.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeFilters["192.0.2.0/24"].operations[0].attribute,
+    "preference",
   );
 
   const updatedStatic = await authenticatedRequest(`/api/statics/${staticId}`, {
@@ -185,6 +193,10 @@ exit 0
     updatedStaticDefine.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeActions,
     { "203.0.113.0/24": "reject" },
   );
+  assert.deepEqual(
+    updatedStaticDefine.body.inventory.staticProtocols.find((resource) => resource.id === staticId).routeFilters,
+    { "203.0.113.0/24": { operations: [], custom: "" } },
+  );
 
   const rejectedStaticMove = await authenticatedRequest(`/api/statics/${staticId}`, {
     method: "PUT",
@@ -201,7 +213,7 @@ exit 0
     }),
   });
   assert.equal(conflictingStatic.status, 400);
-  assert.match(conflictingStatic.body.error, /冲突的静态路由动作/);
+  assert.match(conflictingStatic.body.error, /冲突的静态路由定义/);
   const afterStaticConflict = await authenticatedRequest("/api/dashboard");
   assert.deepEqual(afterStaticConflict.body.inventory.staticProtocols.map((resource) => resource.id), [staticId]);
 

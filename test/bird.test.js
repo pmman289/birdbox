@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   checkIncludeNodeAccess,
   configureManagedSsh,
+  locateStaticRouteDiagnostic,
   makeStaticProtocolName,
   normalizeNode,
   normalizeDefine,
@@ -143,7 +144,7 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.equal(normalizeSession(sessions[1]).channels.ipv4.static, undefined);
   assert.deepEqual(normalizeStaticProtocol(staticProtocols[1]), {
     id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp", family: "ipv4",
-    defineId: "prefix_ix", action: "reject", routeActions: {}, import: "all", export: "none", raw: "",
+    defineId: "prefix_ix", action: "reject", routeActions: {}, routeFilters: {}, import: "all", export: "none", raw: "",
     enabled: true,
   });
   assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
@@ -468,7 +469,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
       sessions: [],
       staticProtocols: [staticProtocols[0], { ...staticProtocols[1], defineId: "prefix_transit" }],
     }),
-    /冲突的静态路由动作/,
+    /冲突的静态路由定义/,
   );
   const matchingActions = validateInventory({
     nodes: [node], peers: [], defines: [cidrDefines[0]], sessions: [],
@@ -478,6 +479,17 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
     ],
   });
   assert.equal(matchingActions.staticProtocols.length, 2);
+  const perRoute = {
+    ...staticProtocols[0],
+    routeFilters: { "10.1.0.0/24": { operations: [{ type: "set", attribute: "preference", value: 150 }], custom: "" } },
+  };
+  assert.throws(
+    () => validateInventory({
+      nodes: [node], peers: [], defines: [cidrDefines[0]], sessions: [],
+      staticProtocols: [perRoute, { ...staticProtocols[0], id: "static_route_conflict", name: "static_route_conflict" }],
+    }),
+    /冲突的静态路由定义/,
+  );
   assert.throws(
     () => validateInventory({
       nodes: [node],
@@ -547,6 +559,62 @@ test("renders per-CIDR Static actions and follows Define entry changes", () => {
   const changedConfig = renderBirdConfig(node, [], [], [], [], [changedDefine], [], [customized]);
   assert.match(changedConfig, /route 203\.0\.113\.0\/24 blackhole;/);
   assert.doesNotMatch(changedConfig, /route 198\.51\.100\.0\/24\+/);
+});
+
+test("renders structured per-route Static filter operations and maps diagnostics", async (context) => {
+  const customized = {
+    ...staticProtocols[0],
+    routeActions: { "10.1.0.0/24": "reject" },
+    routeFilters: {
+      "10.1.0.0/24": {
+        operations: [
+          { type: "set", attribute: "preference", value: 150 },
+          { type: "community", list: "standard", operation: "add", value: [65000, 100] },
+          { type: "community", list: "large", operation: "add", value: [65000, 1, 2] },
+          { type: "prepend", asn: 65000, count: 2 },
+        ],
+        custom: "bgp_med = 50;",
+      },
+    },
+  };
+  const normalized = normalizeStaticProtocol(customized);
+  assert.equal(normalized.routeFilters["10.1.0.0/24"].operations.length, 4);
+  const config = renderBirdConfig(node, peers, sessions, [], [], cidrDefines, [], [normalized]);
+  assert.match(config, /route 10\.1\.0\.0\/24 reject \{/);
+  assert.match(config, /preference = 150;/);
+  assert.match(config, /bgp_community\.add\(\(65000, 100\)\);/);
+  assert.match(config, /bgp_large_community\.add\(\(65000, 1, 2\)\);/);
+  assert.equal((config.match(/bgp_path\.prepend\(65000\);/g) ?? []).length, 2);
+  assert.match(config, /bgp_med = 50;/);
+  const customLine = config.split("\n").findIndex((line) => line.includes(" custom")) + 2;
+  const diagnostic = locateStaticRouteDiagnostic(config, `/tmp/bird.conf:${customLine}:5 syntax error`);
+  assert.deepEqual(diagnostic && {
+    resourceId: diagnostic.resourceId,
+    prefix: diagnostic.prefix,
+    section: diagnostic.section,
+    operationIndex: diagnostic.operationIndex,
+  }, {
+    resourceId: normalized.id,
+    prefix: "10.1.0.0/24",
+    section: "custom",
+    operationIndex: null,
+  });
+  assert.throws(() => normalizeStaticProtocol({
+    ...customized,
+    routeFilters: { "10.0.0.0/8+": { operations: [], custom: "" } },
+  }), /完整 CIDR/);
+  assert.throws(() => normalizeStaticProtocol({
+    ...customized,
+    routeFilters: { "10.1.0.0/24": { operations: [{ type: "community", list: "standard", operation: "add", value: [70000, 1] }], custom: "" } },
+  }), /超出范围/);
+  const nativeBinary = "/usr/sbin/bird";
+  try { await fs.access(nativeBinary); } catch { return context.skip("BIRD binary is unavailable"); }
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-native-static-filter-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const configPath = path.join(root, "bird.conf");
+  await fs.writeFile(configPath, config);
+  const result = await execFileAsync(nativeBinary, ["-p", "-c", configPath]);
+  assert.equal(result.stderr, "");
 });
 
 test("does not render a disabled session but keeps independent node Static resources", () => {
@@ -714,7 +782,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 19);
+  assert.equal(state.version, 20);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({

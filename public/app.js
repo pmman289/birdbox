@@ -42,6 +42,7 @@ let state = null;
 let busy = false;
 let autoPreviewTimer = null;
 let lastPreviewSignature = null;
+let lastPreviewFailureSignature = null;
 let policyActionContext = null;
 let authMonitorTimer = null;
 let dashboardRequestId = 0;
@@ -55,6 +56,8 @@ let resourceMutationBusy = false;
 let sessionApplyInFlight = false;
 let unknownOutcomeRefreshTimer = null;
 let staticRouteActionState = {};
+let staticRouteFilterState = {};
+let staticSelectedPrefix = null;
 let accountSessionsRequestId = 0;
 let routeDialogContext = null;
 let routeDetailsRequestId = 0;
@@ -406,11 +409,19 @@ function familyErrorFields(message, suffix) {
 }
 
 function formErrorField(form, message) {
-  const staticRouteMatch = /Static CIDR (.+?) 动作/.exec(message);
+  const staticRouteMatch = /Static CIDR (\S+) (?:动作|快捷操作|自定义|per-route|路由定义)/.exec(message);
   if (staticRouteMatch) {
     const row = $$("#staticRouteActionList [data-static-route-prefix]")
       .find((item) => item.dataset.staticRoutePrefix === staticRouteMatch[1]);
-    if (row) return row.querySelector(message.includes("via 地址") ? "[data-static-route-via]" : "[data-static-route-action]");
+    if (row) {
+      collectStaticRouteDetail();
+      staticSelectedPrefix = staticRouteMatch[1];
+      renderStaticRouteActions();
+      const operationMatch = /快捷操作 (\d+)/.exec(message);
+      if (operationMatch) return $$("#staticFilterOperationList [data-static-operation-index]")[Number(operationMatch[1]) - 1]?.querySelector("input, select") ?? $("#staticFilterOperationList");
+      if (message.includes("自定义 per-route")) return $("#staticRouteCustom");
+      return message.includes("via 地址") ? $("#staticRouteVia") : $("#staticRouteAction");
+    }
   }
   const mappings = [
     [/协议名称只能|协议名称与 Birdbox/, ["protocolName"]],
@@ -467,18 +478,20 @@ function formErrorField(form, message) {
   return null;
 }
 
-function presentFormError(form, error) {
+function presentFormError(form, error, { focus = true } = {}) {
   const message = error?.message || "表单提交失败";
   const control = formErrorField(form, message);
   if (control) {
     form.classList.add("validation-attempted");
     control.setAttribute("aria-invalid", "true");
     control.closest(".field, .channel-enable-row, .toggle-row")?.classList.add("field-invalid");
-    revealInvalidControl(control);
-    requestAnimationFrame(() => {
-      control.scrollIntoView({ behavior: "smooth", block: "center" });
-      control.focus({ preventScroll: true });
-    });
+    if (focus) {
+      revealInvalidControl(control);
+      requestAnimationFrame(() => {
+        control.scrollIntoView({ behavior: "smooth", block: "center" });
+        control.focus({ preventScroll: true });
+      });
+    }
   }
   toast(message, "error");
 }
@@ -1284,6 +1297,7 @@ function renderSessionForm() {
   elements.removeSession.hidden = !peer.session;
   updatePairSummary();
   lastPreviewSignature = JSON.stringify(sessionPayload());
+  lastPreviewFailureSignature = null;
   updateSessionActionState();
 }
 
@@ -1644,6 +1658,31 @@ function syncPolicyControls(family, direction) {
   }
 }
 
+function isLinkLocalIpv6Address(address) {
+  const base = String(address ?? "").trim().split("%", 1)[0];
+  if (!base.includes(":")) return false;
+  const firstHextet = Number.parseInt(base.split(":", 1)[0], 16);
+  return Number.isInteger(firstHextet) && firstHextet >= 0xfe80 && firstHextet <= 0xfebf;
+}
+
+function hasAddressScope(address) {
+  return String(address ?? "").trim().includes("%");
+}
+
+function syncLinkLocalInterfaceRequirement() {
+  const interfaceField = $("#bgpInterface");
+  const peerAddress = currentPeer()?.address ?? "";
+  const localAddress = value("sessionLocalAddress");
+  const usesLinkLocal = isLinkLocalIpv6Address(peerAddress) || isLinkLocalIpv6Address(localAddress);
+  const direct = value("connectionMode") === "direct";
+  const scopeProvided = hasAddressScope(peerAddress) || hasAddressScope(localAddress);
+  const required = usesLinkLocal && direct && !scopeProvided;
+  interfaceField.required = required;
+  interfaceField.setCustomValidity(required && !interfaceField.value.trim()
+    ? "IPv6 Link-local 会话必须指定接口，或在地址中填写 %接口"
+    : "");
+}
+
 function syncConnectionMode() {
   const multihop = value("connectionMode") === "multihop";
   $("#multihopTtl").disabled = !multihop;
@@ -1657,6 +1696,7 @@ function syncConnectionMode() {
     if (value("checkLink") === "on") $("#checkLink").value = "default";
   }
   for (const family of CHANNEL_FAMILIES) syncChannelRequirementControls(family);
+  syncLinkLocalInterfaceRequirement();
 }
 
 function syncBfdMode() {
@@ -2018,7 +2058,7 @@ function renderResourceManagement() {
   $("#managementStaticRows").innerHTML = (state.inventory.staticProtocols ?? []).length
     ? state.inventory.staticProtocols.map((resource) => {
         const standardRoute = resource.defineId
-          ? `${defineNames.get(resource.defineId) ?? resource.defineId} · ${Object.keys(resource.routeActions ?? {}).length} 条 CIDR`
+          ? `${defineNames.get(resource.defineId) ?? resource.defineId} · ${Object.keys(resource.routeActions ?? {}).length} 条 CIDR · ${Object.values(resource.routeFilters ?? {}).filter((filter) => (filter.operations?.length ?? 0) || filter.custom).length} 条有 per-route 块`
           : "仅自定义指令";
         return `<tr>
           <td><strong>${escapeHtml(resource.label)}</strong><small>${escapeHtml(resource.name)} · ${escapeHtml(resource.id)}</small></td>
@@ -2150,6 +2190,8 @@ async function previewSession({ silent = false, signature = null } = {}) {
   if (!valid) return false;
   const context = currentSessionContext();
   if (!context) return false;
+  const payload = sessionPayload();
+  const requestSignature = signature ?? JSON.stringify(payload);
   const requestId = ++previewRequestId;
   previewAbortController?.abort();
   const controller = new AbortController();
@@ -2160,7 +2202,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
   try {
     const result = await api("/api/sessions/preview", {
       method: "POST",
-      body: JSON.stringify(sessionPayload()),
+      body: JSON.stringify(payload),
       signal: controller.signal,
       mutationWait: !silent,
     });
@@ -2168,14 +2210,16 @@ async function previewSession({ silent = false, signature = null } = {}) {
     $("#localConfig").textContent = result.config;
     state.events = result.events;
     renderEvents();
-    lastPreviewSignature = signature ?? JSON.stringify(sessionPayload());
+    lastPreviewSignature = requestSignature;
+    lastPreviewFailureSignature = null;
     if (!silent) toast("节点候选配置检查通过", "success");
     return true;
   } catch (error) {
     if (error.name === "AbortError" || requestId !== previewRequestId || !sameSessionContext(context)) return false;
     if (error.data?.config) $("#localConfig").textContent = error.data.config;
     if (error.data?.events) { state.events = error.data.events; renderEvents(); }
-    presentFormError(elements.sessionForm, error);
+    lastPreviewFailureSignature = requestSignature;
+    presentFormError(elements.sessionForm, error, { focus: !silent });
     return false;
   } finally {
     if (requestId === previewRequestId) {
@@ -2190,6 +2234,7 @@ async function previewSession({ silent = false, signature = null } = {}) {
 function sessionFormValid(report = false) {
   const atLeastOneChannel = CHANNEL_FAMILIES.some((family) => checked(`${family}Enabled`));
   $("#ipv4Enabled").setCustomValidity(atLeastOneChannel ? "" : "请至少启用 IPv4 或 IPv6 Channel");
+  syncLinkLocalInterfaceRequirement();
   return report ? validateForm(elements.sessionForm) : elements.sessionForm.checkValidity();
 }
 
@@ -2201,9 +2246,9 @@ function scheduleAutoPreview() {
       scheduleAutoPreview();
       return;
     }
-    if (!currentPeer() || !elements.sessionForm.checkValidity()) return;
+    if (!currentPeer() || !sessionFormValid(false)) return;
     const signature = JSON.stringify(sessionPayload());
-    if (signature === lastPreviewSignature) return;
+    if (signature === lastPreviewSignature || signature === lastPreviewFailureSignature) return;
     await previewSession({ silent: true, signature });
   }, 180);
 }
@@ -2452,27 +2497,155 @@ function staticExactCidrEntries(resource) {
   return (resource?.entries ?? []).filter((entry) => /^.+\/\d{1,3}$/.test(entry));
 }
 
-function collectStaticRouteActions({ visibleOnly = false } = {}) {
-  const actions = visibleOnly ? {} : { ...staticRouteActionState };
-  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => {
-    const prefix = row.dataset.staticRoutePrefix;
-    const action = row.querySelector("[data-static-route-action]")?.value ?? "";
-    const via = row.querySelector("[data-static-route-via]")?.value.trim() ?? "";
-    if (prefix && action) actions[prefix] = action === "via" ? `via ${via}` : action;
-  });
-  return actions;
+function emptyStaticRouteFilter() {
+  return { operations: [], custom: "" };
 }
 
-function syncStaticRouteRow(row) {
-  const action = row.querySelector("[data-static-route-action]");
-  const via = row.querySelector("[data-static-route-via]");
-  if (!action || !via) return;
-  const viaMode = action.value === "via";
-  via.hidden = !viaMode;
-  via.required = viaMode;
-  via.setCustomValidity(viaMode && !via.value.trim() ? "请输入 via 地址" : "");
-  const prefix = row.dataset.staticRoutePrefix;
-  if (prefix && action.value) staticRouteActionState[prefix] = action.value === "via" ? `via ${via.value.trim()}` : action.value;
+function cloneStaticRouteFilter(filter) {
+  return {
+    operations: (filter?.operations ?? []).map((operation) => ({
+      ...operation,
+      value: Array.isArray(operation.value) ? [...operation.value] : operation.value,
+    })),
+    custom: filter?.custom ?? "",
+  };
+}
+
+function staticRouteFilter(prefix) {
+  staticRouteFilterState[prefix] ??= emptyStaticRouteFilter();
+  return staticRouteFilterState[prefix];
+}
+
+function staticActionParts(action) {
+  const match = /^via(?:\s+(.*))?$/i.exec(action ?? "");
+  return { action: match ? "via" : (action || "blackhole"), via: match?.[1] ?? "" };
+}
+
+function staticRouteEntries() {
+  const define = (state?.inventory?.defines ?? []).find((resource) => resource.id === value("staticDefineId"));
+  return staticExactCidrEntries(define);
+}
+
+function staticOperationFromRow(row) {
+  const type = row.querySelector("[data-static-operation-type]")?.value;
+  if (type === "set") {
+    const attribute = row.querySelector("[data-static-operation-attribute]")?.value ?? "preference";
+    const input = row.querySelector("[data-static-operation-value]");
+    return { type, attribute, value: attribute === "bgp_origin" ? (input?.value ?? "igp") : (input?.value === "" ? null : Number(input?.value)) };
+  }
+  if (type === "community") {
+    const list = row.querySelector("[data-static-operation-list]")?.value ?? "standard";
+    const operation = row.querySelector("[data-static-community-operation]")?.value ?? "add";
+    if (operation === "empty") return { type, list, operation };
+    return {
+      type,
+      list,
+      operation,
+      value: [...row.querySelectorAll("[data-static-community-part]")].map((input) => input.value === "" ? null : Number(input.value)),
+    };
+  }
+  return {
+    type: "prepend",
+    asn: Number(row.querySelector("[data-static-operation-asn]")?.value ?? 0),
+    count: Number(row.querySelector("[data-static-operation-count]")?.value ?? 0),
+  };
+}
+
+function collectStaticRouteDetail() {
+  if (!staticSelectedPrefix || $("#staticRouteDetail").hidden) return;
+  const action = value("staticRouteAction");
+  const via = value("staticRouteVia");
+  staticRouteActionState[staticSelectedPrefix] = action === "via" ? `via ${via}` : action;
+  staticRouteFilterState[staticSelectedPrefix] = {
+    operations: $$("#staticFilterOperationList [data-static-operation-index]").map(staticOperationFromRow),
+    custom: $("#staticRouteCustom").value,
+  };
+}
+
+function defaultStaticOperation(type) {
+  if (type === "community") return { type, list: "standard", operation: "add", value: [65000, 100] };
+  if (type === "prepend") return { type, asn: 65000, count: 1 };
+  return { type: "set", attribute: "preference", value: 100 };
+}
+
+function staticOperationSummary(filter) {
+  const count = filter?.operations?.length ?? 0;
+  return `${count ? `${count} 项` : "无快捷操作"}${filter?.custom ? " · 自定义" : ""}`;
+}
+
+function staticOperationFields(operation, index) {
+  if (operation.type === "set") {
+    const origin = operation.attribute === "bgp_origin";
+    return `<select data-static-operation-attribute aria-label="第 ${index + 1} 项属性"><option value="preference" ${operation.attribute === "preference" ? "selected" : ""}>Preference</option><option value="igp_metric" ${operation.attribute === "igp_metric" ? "selected" : ""}>IGP Metric</option><option value="bgp_local_pref" ${operation.attribute === "bgp_local_pref" ? "selected" : ""}>BGP Local Pref</option><option value="bgp_med" ${operation.attribute === "bgp_med" ? "selected" : ""}>BGP MED</option><option value="bgp_origin" ${origin ? "selected" : ""}>BGP Origin</option></select>${origin
+      ? `<select data-static-operation-value aria-label="第 ${index + 1} 项值"><option value="igp" ${operation.value === "igp" ? "selected" : ""}>IGP</option><option value="egp" ${operation.value === "egp" ? "selected" : ""}>EGP</option><option value="incomplete" ${operation.value === "incomplete" ? "selected" : ""}>INCOMPLETE</option></select>`
+      : `<input data-static-operation-value type="number" min="0" max="4294967295" required value="${escapeHtml(operation.value ?? "")}" aria-label="第 ${index + 1} 项值">`}`;
+  }
+  if (operation.type === "community") {
+    const large = operation.list === "large";
+    const values = operation.value ?? (large ? [65000, 1, 2] : [65000, 100]);
+    return `<select data-static-operation-list aria-label="第 ${index + 1} 项 Community 类型"><option value="standard" ${!large ? "selected" : ""}>Standard</option><option value="large" ${large ? "selected" : ""}>Large</option></select><select data-static-community-operation aria-label="第 ${index + 1} 项 Community 动作"><option value="add" ${operation.operation === "add" ? "selected" : ""}>add</option><option value="delete" ${operation.operation === "delete" ? "selected" : ""}>delete</option><option value="empty" ${operation.operation === "empty" ? "selected" : ""}>empty</option></select>${operation.operation === "empty" ? "" : values.map((part, partIndex) => `<input data-static-community-part type="number" min="0" max="${large ? 4294967295 : 65535}" required value="${escapeHtml(part ?? "")}" aria-label="第 ${index + 1} 项 Community 第 ${partIndex + 1} 段">`).join("")}`;
+  }
+  return `<input data-static-operation-asn type="number" min="1" max="4294967295" required value="${escapeHtml(operation.asn ?? "")}" aria-label="第 ${index + 1} 项 ASN"><input data-static-operation-count type="number" min="1" max="20" required value="${escapeHtml(operation.count ?? 1)}" aria-label="第 ${index + 1} 项次数">`;
+}
+
+function renderStaticFilterOperations() {
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  $("#staticFilterOperationList").innerHTML = filter.operations.length
+    ? filter.operations.map((operation, index) => `<div class="static-filter-operation-row" data-static-operation-index="${index}"><code class="static-filter-operation-index">${index + 1}</code><select data-static-operation-type aria-label="第 ${index + 1} 项快捷操作"><option value="set" ${operation.type === "set" ? "selected" : ""}>设置属性</option><option value="community" ${operation.type === "community" ? "selected" : ""}>Community</option><option value="prepend" ${operation.type === "prepend" ? "selected" : ""}>AS prepend</option></select><div class="static-filter-operation-fields">${staticOperationFields(operation, index)}</div><div class="static-filter-operation-actions"><button type="button" class="compact-icon" title="应用到全部条目" aria-label="应用第 ${index + 1} 项到全部条目" data-static-operation-apply-all>↳</button><button type="button" class="compact-icon" title="上移" aria-label="上移第 ${index + 1} 项" data-static-operation-move="up">↑</button><button type="button" class="compact-icon" title="下移" aria-label="下移第 ${index + 1} 项" data-static-operation-move="down">↓</button><button type="button" class="compact-icon" title="删除" aria-label="删除第 ${index + 1} 项" data-static-operation-remove>×</button></div></div>`).join("")
+    : '<p class="static-filter-empty">暂无快捷操作</p>';
+}
+
+function renderStaticRoutePreview() {
+  if (!staticSelectedPrefix) return;
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  const { action, via } = staticActionParts(staticRouteActionState[staticSelectedPrefix]);
+  const routeAction = action === "via" ? `via ${via}` : action;
+  const hasBlock = filter.operations.length || filter.custom;
+  const lines = [`route ${staticSelectedPrefix} ${routeAction}${hasBlock ? " {" : ";"}`];
+  for (const operation of filter.operations) {
+    if (operation.type === "set") lines.push(`  ${operation.attribute} = ${operation.attribute === "bgp_origin" ? `ORIGIN_${String(operation.value ?? "igp").toUpperCase()}` : operation.value};`);
+    else if (operation.type === "community") {
+      const attribute = operation.list === "large" ? "bgp_large_community" : "bgp_community";
+      lines.push(operation.operation === "empty" ? `  ${attribute}.empty;` : `  ${attribute}.${operation.operation}((${(operation.value ?? []).join(", ")}));`);
+    } else for (let count = 0; count < (operation.count || 0); count += 1) lines.push(`  bgp_path.prepend(${operation.asn});`);
+  }
+  if (filter.custom) lines.push(...filter.custom.split("\n").map((line) => `  ${line}`));
+  if (hasBlock) lines.push("};");
+  $("#staticRoutePreview").textContent = lines.join("\n");
+}
+
+function renderStaticRouteReferences() {
+  const nodeId = value("staticNodeId");
+  const query = value("staticReferenceSearch").toLocaleLowerCase();
+  const nodeNames = new Map((state?.inventory?.nodes ?? []).map((node) => [node.id, node.name]));
+  const resources = [
+    ...(state?.inventory?.defines ?? []).filter((item) => item.enabled && (item.nodeId === null || item.nodeId === nodeId)).map((item) => ({ ...item, kind: "Define", symbol: item.name, insertion: item.name })),
+    ...(state?.inventory?.functions ?? []).filter((item) => item.enabled && item.callable && (item.nodeId === null || item.nodeId === nodeId)).map((item) => ({ ...item, kind: "Function", symbol: `${item.name}()`, insertion: `${item.name}()` })),
+  ];
+  const filtered = resources.filter((resource) => !query || [resource.label, resource.name, resource.kind, resource.symbol, nodeNames.get(resource.nodeId) ?? "global"].join(" ").toLocaleLowerCase().includes(query));
+  $("#staticReferenceCount").textContent = query ? `${filtered.length} / ${resources.length} 项` : `${resources.length} 项`;
+  $("#staticReferences").innerHTML = filtered.length
+    ? `<section class="code-reference-group"><div class="code-reference-list">${filtered.map((resource) => `<button class="code-reference-button" type="button" data-static-reference-insert="${escapeHtml(resource.insertion)}"><span class="code-reference-copy"><strong>${escapeHtml(resource.label ?? resource.name)}</strong><code>${escapeHtml(resource.symbol)}</code></span><span class="code-reference-meta"><span>${resource.kind}</span><span>${resource.nodeId === null ? "所有节点" : escapeHtml(nodeNames.get(resource.nodeId) ?? resource.nodeId)}</span></span></button>`).join("")}</div></section>`
+    : '<span class="code-reference-empty">没有匹配的资源</span>';
+}
+
+function renderStaticRouteDetail() {
+  const detail = $("#staticRouteDetail");
+  if (!staticSelectedPrefix) { detail.hidden = true; return; }
+  detail.hidden = false;
+  $("#staticRouteDetailPrefix").textContent = staticSelectedPrefix;
+  const action = staticActionParts(staticRouteActionState[staticSelectedPrefix]);
+  $("#staticRouteAction").value = action.action;
+  $("#staticRouteVia").value = action.via;
+  $("#staticRouteViaField").hidden = action.action !== "via";
+  $("#staticRouteVia").required = action.action === "via";
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  $("#staticRouteCustom").value = filter.custom;
+  $("#staticFilterOperationsTitle").textContent = `${staticOperationSummary(filter)} · 按列表顺序执行`;
+  $("#staticRouteDetailStatus").textContent = staticOperationSummary(filter);
+  renderStaticFilterOperations();
+  renderStaticRoutePreview();
+  renderStaticRouteReferences();
 }
 
 function syncStaticBulkAction() {
@@ -2490,41 +2663,32 @@ function renderStaticRouteActions() {
   if (!defineId) {
     section.hidden = true;
     list.replaceChildren();
+    $("#staticRouteDetail").hidden = true;
+    staticSelectedPrefix = null;
     return;
   }
-  const define = (state?.inventory?.defines ?? []).find((resource) => resource.id === defineId);
-  const entries = staticExactCidrEntries(define);
+  const entries = staticRouteEntries();
   section.hidden = false;
   $("#staticRouteActionSummary").textContent = entries.length
-    ? `已筛选 ${entries.length} 条完整 CIDR；BIRD 扩展前缀不会生成 Static 路由`
-    : "该 Define 没有完整 CIDR 条目，BIRD 扩展前缀不会生成 Static 路由";
+    ? `已筛选 ${entries.length} 条完整 CIDR`
+    : "该 Define 没有完整 CIDR 条目";
   if (!entries.length) {
     list.innerHTML = '<p class="static-route-empty">没有可编辑的完整 CIDR 条目</p>';
+    $("#staticRouteDetail").hidden = true;
+    staticSelectedPrefix = null;
     return;
   }
-  const fallback = value("staticAction") || "blackhole";
-  list.innerHTML = entries.map((prefix) => {
-    const configured = staticRouteActionState[prefix] ?? fallback;
-    const viaMatch = /^via\s+(.+)$/i.exec(configured);
-    const action = viaMatch ? "via" : configured;
-    const via = viaMatch ? viaMatch[1] : "";
-    return `<div class="static-route-row" role="listitem" data-static-route-prefix="${escapeHtml(prefix)}">
-      <code class="static-route-prefix">${escapeHtml(prefix)}</code>
-      <select data-static-route-action aria-label="${escapeHtml(prefix)} 的 Static 动作">
-        <option value="blackhole" ${action === "blackhole" ? "selected" : ""}>blackhole</option>
-        <option value="reject" ${action === "reject" ? "selected" : ""}>reject</option>
-        <option value="unreachable" ${action === "unreachable" ? "selected" : ""}>unreachable</option>
-        <option value="prohibit" ${action === "prohibit" ? "selected" : ""}>prohibit</option>
-        <option value="via" ${action === "via" ? "selected" : ""}>via</option>
-      </select>
-      <input class="static-route-via" data-static-route-via value="${escapeHtml(via)}" placeholder="via 地址" aria-label="${escapeHtml(prefix)} 的 via 地址"${action === "via" ? "" : " hidden"}>
-    </div>`;
-  }).join("");
-  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => syncStaticRouteRow(row));
+  for (const prefix of entries) {
+    staticRouteActionState[prefix] ??= value("staticAction") || "blackhole";
+    staticRouteFilterState[prefix] = cloneStaticRouteFilter(staticRouteFilterState[prefix]);
+  }
+  staticSelectedPrefix = entries.includes(staticSelectedPrefix) ? staticSelectedPrefix : entries[0];
+  list.innerHTML = entries.map((prefix) => `<button class="static-route-row${prefix === staticSelectedPrefix ? " active" : ""}" type="button" role="option" aria-selected="${prefix === staticSelectedPrefix}" data-static-route-prefix="${escapeHtml(prefix)}"><code class="static-route-prefix">${escapeHtml(prefix)}</code><small>${escapeHtml(staticRouteActionState[prefix])}</small><span>${staticOperationSummary(staticRouteFilterState[prefix])}</span></button>`).join("");
+  renderStaticRouteDetail();
 }
 
 function syncStaticDefines(preferredDefineId = value("staticDefineId")) {
-  staticRouteActionState = collectStaticRouteActions();
+  collectStaticRouteDetail();
   const nodeId = value("staticNodeId");
   const type = value("staticFamily") === "ipv6" ? "cidr6" : "cidr4";
   const compatible = (state?.inventory?.defines ?? []).filter((resource) =>
@@ -2541,14 +2705,16 @@ function syncStaticEditor() {
   const hasDefine = Boolean(value("staticDefineId"));
   const action = $("#staticAction");
   if (!hasDefine) action.value = "";
+  else if (!action.value) action.value = "blackhole";
   action.disabled = !hasDefine;
-  staticRouteActionState = collectStaticRouteActions();
+  collectStaticRouteDetail();
   syncStaticBulkAction();
-  const exactRouteCount = $$("#staticRouteActionList [data-static-route-prefix]").length;
+  const exactRouteCount = staticRouteEntries().length;
   $("#staticDefineId").setCustomValidity(hasDefine && !exactRouteCount && !value("staticRaw")
     ? "所选 CIDR Define 没有可用于 Static 的完整 CIDR 条目"
     : "");
   $("#staticRaw").setCustomValidity(!hasDefine && !value("staticRaw") ? "请配置标准路由或填写自定义 Static 指令" : "");
+  renderStaticRoutePreview();
 }
 
 function openStaticDialog(resource = null) {
@@ -2571,6 +2737,8 @@ function openStaticDialog(resource = null) {
   $("#staticFamily").value = resource?.family ?? "ipv4";
   $("#staticRouteActionList").replaceChildren();
   staticRouteActionState = { ...(resource?.routeActions ?? {}) };
+  staticRouteFilterState = Object.fromEntries(Object.entries(resource?.routeFilters ?? {}).map(([prefix, filter]) => [prefix, cloneStaticRouteFilter(filter)]));
+  staticSelectedPrefix = null;
   const defaultRouteAction = resource?.action ?? Object.values(resource?.routeActions ?? {})[0] ?? (resource?.defineId ? "blackhole" : "");
   const defaultViaMatch = /^via\s+(.+)$/i.exec(defaultRouteAction);
   $("#staticAction").value = defaultRouteAction;
@@ -2604,7 +2772,8 @@ async function saveStatic(event) {
     family: value("staticFamily"),
     defineId: value("staticDefineId") || null,
     action: value("staticAction") || null,
-    routeActions: value("staticDefineId") ? collectStaticRouteActions({ visibleOnly: true }) : {},
+    routeActions: value("staticDefineId") ? { ...staticRouteActionState } : {},
+    routeFilters: value("staticDefineId") ? Object.fromEntries(staticRouteEntries().map((prefix) => [prefix, cloneStaticRouteFilter(staticRouteFilter(prefix))])) : {},
     import: value("staticImport"),
     export: value("staticExport"),
     raw: $("#staticRaw").value,
@@ -2638,12 +2807,29 @@ function applyStaticBulkAction() {
   const via = value("staticBulkVia");
   if (action === "via" && !$("#staticBulkVia").reportValidity()) return;
   const configuredAction = action === "via" ? `via ${via}` : action;
+  const entries = staticRouteEntries();
+  if (!window.confirm(`将统一修改 ${entries.length} 条 CIDR 的转发动作，继续吗？`)) return;
   $("#staticAction").value = configuredAction;
-  $$("#staticRouteActionList [data-static-route-prefix]").forEach((row) => {
-    row.querySelector("[data-static-route-action]").value = action;
-    row.querySelector("[data-static-route-via]").value = action === "via" ? via : "";
-    syncStaticRouteRow(row);
-  });
+  for (const prefix of entries) staticRouteActionState[prefix] = configuredAction;
+  renderStaticRouteActions();
+  syncStaticEditor();
+}
+
+function copyStaticRouteBlockToAll() {
+  collectStaticRouteDetail();
+  const entries = staticRouteEntries();
+  if (!staticSelectedPrefix || !window.confirm(`将当前 per-route 块复制到 ${entries.length} 条 CIDR，继续吗？`)) return;
+  const source = cloneStaticRouteFilter(staticRouteFilter(staticSelectedPrefix));
+  for (const prefix of entries) staticRouteFilterState[prefix] = cloneStaticRouteFilter(source);
+  renderStaticRouteActions();
+  syncStaticEditor();
+}
+
+function clearStaticRouteBlocks() {
+  const entries = staticRouteEntries();
+  if (!window.confirm(`将清空 ${entries.length} 条 CIDR 的快捷操作和自定义块，继续吗？`)) return;
+  for (const prefix of entries) staticRouteFilterState[prefix] = emptyStaticRouteFilter();
+  renderStaticRouteActions();
   syncStaticEditor();
 }
 
@@ -3256,17 +3442,84 @@ $("#staticDefineId").addEventListener("change", () => {
 $("#staticBulkAction").addEventListener("change", syncStaticBulkAction);
 $("#staticBulkVia").addEventListener("input", syncStaticBulkAction);
 $("#applyStaticBulkActionButton").addEventListener("click", applyStaticBulkAction);
-$("#staticRouteActionList").addEventListener("change", (event) => {
+$("#copyStaticRouteBlockButton").addEventListener("click", copyStaticRouteBlockToAll);
+$("#clearStaticRouteBlocksButton").addEventListener("click", clearStaticRouteBlocks);
+$("#staticRouteActionList").addEventListener("click", (event) => {
   const row = event.target.closest("[data-static-route-prefix]");
   if (!row) return;
-  syncStaticRouteRow(row);
-  syncStaticEditor();
+  collectStaticRouteDetail();
+  staticSelectedPrefix = row.dataset.staticRoutePrefix;
+  renderStaticRouteActions();
 });
-$("#staticRouteActionList").addEventListener("input", (event) => {
-  const row = event.target.closest("[data-static-route-prefix]");
-  if (!row) return;
-  syncStaticRouteRow(row);
-  syncStaticEditor();
+$("#staticRouteAction").addEventListener("change", () => {
+  collectStaticRouteDetail();
+  renderStaticRouteActions();
+});
+$("#staticRouteVia").addEventListener("input", () => { collectStaticRouteDetail(); renderStaticRoutePreview(); });
+$("#staticRouteCustom").addEventListener("input", () => { collectStaticRouteDetail(); renderStaticRoutePreview(); });
+$("#addStaticFilterOperationButton").addEventListener("click", () => {
+  collectStaticRouteDetail();
+  if (!staticSelectedPrefix) return;
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  if (filter.operations.length >= 32) { toast("每条 CIDR 最多 32 项快捷操作", "error"); return; }
+  filter.operations.push(defaultStaticOperation(value("staticAddOperationType")));
+  renderStaticRouteDetail();
+});
+$("#staticFilterOperationList").addEventListener("change", (event) => {
+  const row = event.target.closest("[data-static-operation-index]");
+  if (!row || !staticSelectedPrefix) return;
+  const index = Number(row.dataset.staticOperationIndex);
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  if (event.target.matches("[data-static-operation-type]")) filter.operations[index] = defaultStaticOperation(event.target.value);
+  else if (event.target.matches("[data-static-operation-attribute]")) filter.operations[index] = { ...filter.operations[index], attribute: event.target.value, value: event.target.value === "bgp_origin" ? "igp" : 100 };
+  else if (event.target.matches("[data-static-operation-list]")) filter.operations[index] = { ...filter.operations[index], list: event.target.value, value: event.target.value === "large" ? [65000, 1, 2] : [65000, 100] };
+  else if (event.target.matches("[data-static-community-operation]")) filter.operations[index] = { ...filter.operations[index], operation: event.target.value };
+  else filter.operations[index] = staticOperationFromRow(row);
+  renderStaticRouteDetail();
+});
+$("#staticFilterOperationList").addEventListener("input", (event) => {
+  const row = event.target.closest("[data-static-operation-index]");
+  if (!row || !staticSelectedPrefix) return;
+  staticRouteFilter(staticSelectedPrefix).operations[Number(row.dataset.staticOperationIndex)] = staticOperationFromRow(row);
+  renderStaticRoutePreview();
+});
+$("#staticFilterOperationList").addEventListener("click", (event) => {
+  const row = event.target.closest("[data-static-operation-index]");
+  if (!row || !staticSelectedPrefix) return;
+  const index = Number(row.dataset.staticOperationIndex);
+  const filter = staticRouteFilter(staticSelectedPrefix);
+  if (event.target.closest("[data-static-operation-remove]")) filter.operations.splice(index, 1);
+  else if (event.target.closest("[data-static-operation-move]")) {
+    const target = event.target.closest("[data-static-operation-move]").dataset.staticOperationMove === "up" ? index - 1 : index + 1;
+    if (target < 0 || target >= filter.operations.length) return;
+    [filter.operations[index], filter.operations[target]] = [filter.operations[target], filter.operations[index]];
+  } else if (event.target.closest("[data-static-operation-apply-all]")) {
+    const entries = staticRouteEntries();
+    const targets = entries.filter((prefix) => prefix !== staticSelectedPrefix);
+    if (!targets.length) { toast("当前 Define 只有一个可编辑 CIDR", "error"); return; }
+    if (!window.confirm(`将第 ${index + 1} 项快捷操作追加到其余 ${targets.length} 条 CIDR，继续吗？`)) return;
+    const fullPrefix = targets.find((prefix) => staticRouteFilter(prefix).operations.length >= 32);
+    if (fullPrefix) { toast(`${fullPrefix} 已达到 32 项上限`, "error"); return; }
+    const operation = cloneStaticRouteFilter({ operations: [filter.operations[index]], custom: "" }).operations[0];
+    for (const prefix of targets) {
+      const targetFilter = staticRouteFilter(prefix);
+      targetFilter.operations.push(cloneStaticRouteFilter({ operations: [operation], custom: "" }).operations[0]);
+    }
+  } else return;
+  renderStaticRouteActions();
+});
+$("#staticReferenceSearch").addEventListener("input", renderStaticRouteReferences);
+$("#staticReferences").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-static-reference-insert]");
+  if (!button) return;
+  const editor = $("#staticRouteCustom");
+  const insertion = button.dataset.staticReferenceInsert;
+  const start = editor.selectionStart ?? editor.value.length;
+  const end = editor.selectionEnd ?? start;
+  editor.setRangeText(insertion, start, end, "end");
+  editor.focus();
+  collectStaticRouteDetail();
+  renderStaticRoutePreview();
 });
 $("#staticRaw").addEventListener("input", syncStaticEditor);
 $("#rpkiForm").addEventListener("submit", saveRPKI);
@@ -3311,6 +3564,7 @@ elements.sessionForm.addEventListener("change", (event) => {
 });
 elements.sessionForm.addEventListener("input", (event) => {
   if (["holdTime", "keepaliveTime", "minHoldTime", "minKeepaliveTime"].includes(event.target.id)) syncTimerConstraints();
+  if (["sessionLocalAddress", "bgpInterface"].includes(event.target.id)) syncLinkLocalInterfaceRequirement();
 });
 elements.sessionForm.addEventListener("focusout", (event) => {
   if (event.target.matches("input, select, textarea")) scheduleAutoPreview();

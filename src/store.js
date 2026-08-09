@@ -12,7 +12,7 @@ import {
 } from "./bird.js";
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 19;
+const CURRENT_INVENTORY_VERSION = 20;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version) {
@@ -169,7 +169,7 @@ function upgradeInventory(input) {
       functions: upgradeResourceOrder(input.functions),
       filters: upgradeResourceOrder(input.filters),
       rpki: (input.rpki ?? []).map((item) => ({ ...item })),
-      staticProtocols: migrated.staticProtocols,
+      staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
       sessions: migrated.sessions,
     };
   }
@@ -234,7 +234,7 @@ function upgradeInventory(input) {
     functions: upgradeResourceOrder(input.functions),
     filters: upgradeResourceOrder(input.filters),
     rpki: (input.rpki ?? []).map((item) => ({ ...item })),
-    staticProtocols: migrated.staticProtocols,
+    staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
     sessions: migrated.sessions,
   };
 }
