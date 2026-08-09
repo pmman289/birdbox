@@ -1,3 +1,16 @@
+FROM node:24-alpine AS web-build
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY tsconfig.base.json ./
+COPY tsconfig.server.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY public ./public
+COPY src ./src
+RUN npm run build
+
 FROM node:24-alpine
 
 ARG BIRDBOX_VERSION=dev
@@ -28,8 +41,8 @@ RUN apk add --no-cache ca-certificates openssh-client tini \
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY src ./src
-COPY public ./public
+COPY --from=web-build /app/dist ./dist
+COPY --from=web-build /app/public ./public
 COPY README.md ./README.md
 
 RUN chown -R birdbox:birdbox /app /var/lib/birdbox
@@ -42,4 +55,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + process.env.BIRDBOX_PORT + '/api/health').then(r => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "src/server.js"]
+CMD ["node", "dist/src/server.js"]

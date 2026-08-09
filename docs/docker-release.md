@@ -6,7 +6,7 @@
 ## 发布约定
 
 `package.json` 的 `version` 是默认发布 tag。版本 tag 必须是 Docker 合法的
-tag 字符串，例如 `0.01a`、`0.02` 或 `2026.07.31`。预发布版本不要覆盖
+tag 字符串，例如 `0.02a`、`0.03a` 或 `2026.07.31`。预发布版本不要覆盖
 `latest`；只有明确的稳定版本才可以额外创建 `latest`。
 
 一个 tag 发布后视为不可变版本。修复同一版本时应递增版本号，而不是覆盖
@@ -120,7 +120,7 @@ docker buildx imagetools inspect "pmman/birdbox:${VERSION}"
 
 输出应包含 `linux/amd64` 和 `linux/arm64`。记录 digest，生产环境推荐将
 `.env` 中的 `BIRDBOX_IMAGE_TAG` 设置为例如
-`0.01a@sha256:...`，从而避免 tag 被意外替换。
+`0.02a@sha256:...`，从而避免 tag 被意外替换。
 
 如果明确只发布当前宿主机架构，也可以使用传统 push 流程：
 

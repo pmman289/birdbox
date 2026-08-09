@@ -1,9 +1,13 @@
 node_modules/
+dist/
+public/migrated/
 .env
 .env.*
 !.env.example
 data/
 artifacts/
+playwright-report/
+test-results/
 config/nodes.json
 .DS_Store
 npm-debug.log*

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createMutationWaitController, resetFormPending, setFormPending } from "../public/interaction-state.js";
+import { createMutationWaitController, resetFormPending, setFormPending } from "../apps/web/src/shared/interaction-state.ts";
 
 function fakeForm(inert = false) {
   const attributes = new Map(inert ? [["inert", ""]] : []);

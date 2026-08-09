@@ -91,7 +91,7 @@ exit 0
   await fs.writeFile(path.join(dataDir, "inventory.json"), `${JSON.stringify(state)}\n`);
 
   const port = 38000 + Math.floor(Math.random() * 1000);
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, ["src/server.ts"], {
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,

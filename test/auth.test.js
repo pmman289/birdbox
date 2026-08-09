@@ -66,7 +66,7 @@ test("supports password setup and manages multiple active admin sessions", async
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
   const port = 39000 + Math.floor(Math.random() * 1000);
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, ["src/server.ts"], {
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,
@@ -101,6 +101,12 @@ test("supports password setup and manages multiple active admin sessions", async
   const unauthorizedSessions = await requestJson(port, "/api/auth/sessions");
   assert.equal(unauthorizedSessions.status, 401);
   assert.equal(unauthorizedSessions.body.code, "AUTH_REQUIRED");
+  const unauthorizedMutation = await requestJson(port, "/api/nodes/setup-script", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  assert.equal(unauthorizedMutation.status, 401);
+  assert.equal(unauthorizedMutation.body.code, "AUTH_REQUIRED");
 
   const weak = await requestJson(port, "/api/auth/setup", {
     method: "POST",
@@ -271,7 +277,7 @@ test("supports password setup and manages multiple active admin sessions", async
 });
 
 test("rejects an invalid listen port before startup", async () => {
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, ["src/server.ts"], {
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,
@@ -316,7 +322,7 @@ test("refuses to rotate a missing controller SSH identity for an existing manage
     }],
     peers: [], defines: [], functions: [], filters: [], rpki: [], sessions: [],
   }));
-  const child = spawn(process.execPath, ["src/server.js"], {
+  const child = spawn(process.execPath, ["src/server.ts"], {
     cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
     env: {
       ...process.env,

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   availablePolicySourceReferences,
   policySourceReferenceInsertion,
-} from "../public/policy-references.js";
+} from "../apps/web/src/shared/policy-references.ts";
 
 const inventory = {
   defines: [

@@ -818,6 +818,7 @@ dialog form { padding: 22px; }
 .account-section-heading span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
 .account-section-heading .secondary-button { min-height: 32px; padding: 5px 10px; font-size: 11px; }
 .account-session-section > .auth-error { margin-top: 12px; }
+.account-session-retry { min-height: 30px; margin-top: 8px; padding: 4px 9px; font-size: 10px; }
 .account-session-list { margin-top: 13px; border-top: 1px solid var(--line); }
 .account-session-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .account-session-row:last-child { border-bottom: 0; padding-bottom: 0; }

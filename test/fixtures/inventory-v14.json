@@ -1,0 +1,65 @@
+{
+  "version": 14,
+  "nodes": [
+    {
+      "id": "local",
+      "name": "Legacy Router",
+      "transport": "local",
+      "routerId": "192.0.2.1",
+      "listenPort": 11790
+    }
+  ],
+  "peers": [
+    {
+      "id": "peer_one",
+      "nodeId": "local",
+      "name": "Documentation Peer",
+      "address": "192.0.2.2",
+      "asn": 65002,
+      "port": 179
+    }
+  ],
+  "defines": [
+    {
+      "id": "prefix_one",
+      "nodeId": null,
+      "label": "Legacy Exports",
+      "name": "PL_EXPORTS",
+      "type": "cidr",
+      "entries": ["198.51.100.0/24"],
+      "enabled": true
+    }
+  ],
+  "functions": [],
+  "filters": [],
+  "sessions": [
+    {
+      "id": "session_one",
+      "nodeId": "local",
+      "peerId": "peer_one",
+      "exportDefineId": "prefix_one",
+      "protocolName": "legacy_peer",
+      "localAddress": "192.0.2.1",
+      "localAsn": 65001,
+      "localPort": 11790,
+      "routeAction": "blackhole",
+      "importPolicy": {
+        "mode": "form",
+        "steps": [],
+        "filterId": null,
+        "formAction": "all"
+      },
+      "exportPolicy": {
+        "mode": "form",
+        "steps": [],
+        "filterId": null
+      },
+      "bgp": {
+        "connectionMode": "direct",
+        "multihopTtl": 10
+      },
+      "ipv4": {},
+      "enabled": true
+    }
+  ]
+}
