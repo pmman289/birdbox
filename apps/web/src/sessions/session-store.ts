@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import type { SessionMutationRequest } from "@birdbox/contracts/api";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
+import { isEbgpDashboardPeer } from "../dashboard/peer-kind";
 import { createSessionDraft, toSessionMutationRequest, type SessionDraft } from "./session-draft";
 
 const { dashboard, loadGeneration } = useDashboardStore();
@@ -16,13 +17,15 @@ const lastPreviewFailureSignature = ref<string | null>(null);
 
 const contextKey = computed(() => {
   const value = dashboard.value;
-  return value?.node && value.selectedPeer ? `${value.node.id}:${value.selectedPeer.id}` : null;
+  return value?.node && isEbgpDashboardPeer(value.selectedPeer) ? `${value.node.id}:${value.selectedPeer.id}` : null;
 });
 
 const draftSignature = computed(() => draft.value ? JSON.stringify(draft.value) : null);
 
 function resetDraft(): void {
-  draft.value = dashboard.value ? createSessionDraft(dashboard.value) : null;
+  draft.value = dashboard.value && isEbgpDashboardPeer(dashboard.value.selectedPeer)
+    ? createSessionDraft(dashboard.value)
+    : null;
   dirty.value = false;
   previewConfig.value = null;
   lastPreviewSignature.value = draftSignature.value;
@@ -42,7 +45,7 @@ function mutateDraft(mutator: (value: SessionDraft) => void): void {
 
 function sessionPayload(): SessionMutationRequest | null {
   const peer = dashboard.value?.selectedPeer;
-  if (!draft.value || !peer) return null;
+  if (!draft.value || !isEbgpDashboardPeer(peer)) return null;
   return toSessionMutationRequest(draft.value, peer);
 }
 

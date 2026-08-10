@@ -5,6 +5,7 @@ import type { DashboardPeer } from "@birdbox/contracts/api";
 
 import type { ResourceWorkspaceTarget } from "../shared/events";
 import { useDashboardStore } from "./dashboard-store";
+import { isEbgpDashboardPeer } from "./peer-kind";
 import { protocolPresentation as presentProtocol } from "./presentation";
 
 const { dashboard, loading, updatedAt } = useDashboardStore();
@@ -35,9 +36,7 @@ const compactCanvas = ref(canvasMedia.matches);
 let suppressPeerClick = false;
 
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
-const peers = computed(() => (dashboard.value?.peers ?? []).filter((peer) =>
-  peer.managedBy?.kind !== "ibgp-domain" && peer.session?.sessionType !== "ibgp",
-));
+const peers = computed(() => (dashboard.value?.peers ?? []).filter(isEbgpDashboardPeer));
 const node = computed(() => dashboard.value?.node ?? null);
 const selectedNodeId = computed(() => dashboard.value?.selection.nodeId ?? "");
 const selectedPeerId = computed(() => {

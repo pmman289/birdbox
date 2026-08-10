@@ -67,14 +67,17 @@ export function summarizeInventoryHealth(state: Inventory, runtimes: NodeRuntime
   };
 }
 
-function chooseSelection(
+export function chooseEbgpSelection(
   state: Inventory,
   requestedNodeId: string | null,
   requestedPeerId: string | null,
 ): { node: ManagedNode | null; peer: Peer | null; peers: Peer[] } {
   const node = state.nodes.find((item) => item.id === requestedNodeId) ?? state.nodes[0];
   if (!node) return { node: null, peer: null, peers: [] };
-  const peers = nodePeers(state, node.id);
+  const peers = nodePeers(state, node.id).filter((peer) => {
+    const session = state.sessions.find((item) => item.nodeId === node.id && item.peerId === peer.id);
+    return peer.managedBy?.kind !== "ibgp-domain" && session?.sessionType !== "ibgp";
+  });
   const peer = peers.find((item) => item.id === requestedPeerId) ?? peers[0] ?? null;
   return { node, peer, peers };
 }
@@ -91,7 +94,7 @@ export class DashboardService {
     requestedNodeId: string | null,
     requestedPeerId: string | null,
   ): Promise<DashboardResponse> {
-    const selection = chooseSelection(state, requestedNodeId, requestedPeerId);
+    const selection = chooseEbgpSelection(state, requestedNodeId, requestedPeerId);
     if (!selection.node) {
       return {
         inventory: state,

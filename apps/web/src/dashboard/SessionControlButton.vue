@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 
 import { loadDashboard, useDashboardStore } from "./dashboard-store";
+import { isEbgpDashboardPeer } from "./peer-kind";
 import { api } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
 
@@ -11,7 +12,10 @@ interface SessionControlResponse {
 
 const { dashboard, loading } = useDashboardStore();
 const pending = ref(false);
-const peer = computed(() => dashboard.value?.selectedPeer ?? null);
+const peer = computed(() => {
+  const selected = dashboard.value?.selectedPeer;
+  return isEbgpDashboardPeer(selected) ? selected : null;
+});
 const session = computed(() => peer.value?.session ?? null);
 const manuallyDisabled = computed(() => peer.value?.protocol?.disabled === true);
 const label = computed(() => manuallyDisabled.value ? "启动当前会话" : "停止当前会话");

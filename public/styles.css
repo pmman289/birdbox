@@ -903,9 +903,6 @@ dialog form { padding: 22px; }
 }
 
 .ibgp-workspace { padding-top: 4px; }
-.domain-managed-notice { display: grid; gap: 5px; margin: 14px 0; padding: 14px; color: var(--ink-soft); background: color-mix(in srgb, var(--green) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line)); border-radius: 6px; }
-.domain-managed-notice strong { color: var(--ink); font-size: 13px; }
-.domain-managed-notice span { color: var(--muted); font-size: 12px; }
 .ibgp-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ibgp-toolbar select { min-width: 180px; }
 .ibgp-layout { display: grid; gap: 24px; }
