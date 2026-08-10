@@ -186,6 +186,22 @@ export interface IbgpDomainMutationResponse {
   events?: ChangeEvent[];
 }
 
+export interface IbgpPreviewSide {
+  side: "left" | "right";
+  nodeId: string;
+  nodeName: string;
+  session: BgpSession;
+  config: string;
+  validation: NodeCommandResponse;
+}
+
+export interface IbgpDomainPreviewResponse {
+  valid: boolean;
+  domain: IbgpDomain;
+  sessions: BgpSession[];
+  sides: IbgpPreviewSide[];
+}
+
 export interface RouteDetail {
   prefix: string;
   summary: string;

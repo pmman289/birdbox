@@ -7,29 +7,47 @@ const dataDir = path.join(root, "data");
 const nodesFile = path.join(root, "nodes.json");
 
 await fs.mkdir(dataDir, { recursive: true });
-await fs.writeFile(nodesFile, JSON.stringify([{
-  id: "local",
-  name: "E2E Router",
-  transport: "local",
-  routerId: "192.0.2.1",
-  listenPort: 179,
-}]));
-await fs.writeFile(path.join(dataDir, "session.json"), JSON.stringify({
-  name: "e2e_peer",
-  local: {
-    nodeId: "local",
-    address: "192.0.2.1",
-    asn: 64512,
-    advertisePrefix: "198.51.100.0/24",
-  },
-  remote: {
-    name: "Documentation Peer",
-    address: "192.0.2.2",
-    asn: 64513,
-    port: 179,
-  },
-  multihop: false,
-}));
+await fs.writeFile(
+  nodesFile,
+  JSON.stringify([
+    {
+      id: "local",
+      name: "E2E Router",
+      transport: "local",
+      routerId: "192.0.2.1",
+      listenPort: 179,
+    },
+    {
+      id: "edge",
+      name: "E2E Edge",
+      transport: "ssh",
+      sshHost: "192.0.2.22",
+      sshPort: 22,
+      sshUser: "birdbox",
+      routerId: "192.0.2.22",
+      listenPort: 179,
+    },
+  ]),
+);
+await fs.writeFile(
+  path.join(dataDir, "session.json"),
+  JSON.stringify({
+    name: "e2e_peer",
+    local: {
+      nodeId: "local",
+      address: "192.0.2.1",
+      asn: 64512,
+      advertisePrefix: "198.51.100.0/24",
+    },
+    remote: {
+      name: "Documentation Peer",
+      address: "192.0.2.2",
+      asn: 64513,
+      port: 179,
+    },
+    multihop: false,
+  }),
+);
 
 process.env.NODE_ENV = "test";
 process.env.BIRDBOX_DATABASE_URL = "memory:";

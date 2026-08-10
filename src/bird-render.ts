@@ -17,7 +17,7 @@ import type {
 } from "../packages/contracts/src/inventory.js";
 import {
   assertValidation,
-  channelUsesCrossFamilyTransport,
+  channelRequiresExtendedNextHop,
   ipFamily,
   isLinkLocalIPv6,
   normalizeNode,
@@ -352,8 +352,8 @@ function normalizeActiveSessions(
     for (const family of FAMILIES) {
       const channel = session.channels[family];
       assertValidation(
-        !channel.enabled || !channelUsesCrossFamilyTransport(peer.address, family) || session.bgp.capabilities !== "off",
-        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Channel 使用跨地址族邻居时不能关闭 BGP Capabilities`,
+        !channel.enabled || !channelRequiresExtendedNextHop(peer.address, family) || session.bgp.capabilities !== "off",
+        `会话 ${session.protocolName} 的 IPv4 Channel 通过 IPv6 邻居传输时不能关闭 BGP Capabilities`,
       );
       const expectedType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
@@ -468,7 +468,7 @@ export function renderBirdConfig(
     for (const family of FAMILIES) {
       const channel = session.channels[family];
       if (!channel.enabled) continue;
-      const effectiveChannel = channelUsesCrossFamilyTransport(peer.address, family)
+      const effectiveChannel = channelRequiresExtendedNextHop(peer.address, family)
         ? { ...channel, extendedNextHop: true }
         : channel;
       config += `  ${family} {\n` +

@@ -27,7 +27,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(page.locator("#nodeSetupScript")).toContainText("birdbox");
   await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
 
-  await page.locator("#managementNodeRows .row-edit-button").click();
+  await page.getByRole("button", { name: "编辑节点 E2E Router" }).click();
   await expect(page.locator("#nodeDialog")).toBeVisible();
   await expect(page.locator("#nodeEditorRouterId")).toHaveValue("192.0.2.1");
   await page.locator('#nodeDialog [data-close="nodeDialog"]').click();

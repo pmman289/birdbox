@@ -285,15 +285,9 @@ export interface BgpSession {
   managedBy?: BgpManagedBy;
 }
 
-export type IbgpTopology = "full-mesh" | "route-reflector" | "manual";
-export type IbgpMemberRole = "member" | "reflector" | "client";
-
 export interface IbgpMember {
   nodeId: string;
-  address4: string | null;
-  address6: string | null;
-  role: IbgpMemberRole;
-  clusterId: string | null;
+  address: string;
 }
 
 export interface IbgpAdjacency {
@@ -309,16 +303,13 @@ export interface IbgpDomain {
   id: string;
   name: string;
   asn: number;
-  topology: IbgpTopology;
-  families: AddressFamily[];
-  defaultClusterId: string | null;
   members: IbgpMember[];
   adjacencies: IbgpAdjacency[];
   layout: Record<string, TopologyPosition>;
 }
 
 export interface Inventory {
-  version: 21;
+  version: 23;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];

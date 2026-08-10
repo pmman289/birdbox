@@ -120,8 +120,8 @@ export function ipFamily(value: unknown): number {
   return net.isIP(splitScopedIPAddress(value).base);
 }
 
-export function channelUsesCrossFamilyTransport(peerAddress: string, family: "ipv4" | "ipv6"): boolean {
-  return ipFamily(peerAddress) !== (family === "ipv4" ? 4 : 6);
+export function channelRequiresExtendedNextHop(peerAddress: string, family: "ipv4" | "ipv6"): boolean {
+  return ipFamily(peerAddress) === 6 && family === "ipv4";
 }
 
 export function isLinkLocalIPv6(value: unknown): boolean {

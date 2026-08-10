@@ -12,34 +12,40 @@ const nodes = [
   { id: "client", kind: "managed-node", name: "Client", transport: "ssh", sshHost: "192.0.2.2", sshUser: "bird", routerId: "192.0.2.2", listenPort: 179 },
 ];
 
-test("expands a route-reflector iBGP adjacency into equal-ASN sessions", () => {
+test("expands a manual iBGP adjacency into independently configurable equal-ASN sessions", () => {
   const domain = normalizeIbgpDomain({
     id: "core",
     name: "Core iBGP",
     asn: 65000,
-    topology: "manual",
-    families: ["ipv4"],
-    defaultClusterId: "192.0.2.254",
     members: [
-      { nodeId: "rr", address4: "192.0.2.1", role: "reflector" },
-      { nodeId: "client", address4: "192.0.2.2", role: "client" },
+      { nodeId: "rr", address: "192.0.2.1" },
+      { nodeId: "client", address: "192.0.2.2" },
     ],
     adjacencies: [{ id: "core_rr_client", leftNodeId: "rr", rightNodeId: "client", leftSessionId: "core_left", rightSessionId: "core_right" }],
   });
+  assert.deepEqual(domain.members.map((member) => member.address), ["192.0.2.1", "192.0.2.2"]);
   const expanded = expandIbgpDomain(domain, nodes);
   assert.equal(expanded.sessions.length, 2);
   assert.equal(expanded.sessions[0].sessionType, "ibgp");
   assert.equal(expanded.sessions[0].localAsn, expanded.peers[0].asn);
-  assert.equal(expanded.sessions[0].bgp.rrClient, true);
+  assert.equal(expanded.sessions[0].bgp.rrClient, false);
   assert.equal(expanded.sessions[1].bgp.rrClient, false);
-  const inventory = validateInventory({ version: 21, nodes, peers: expanded.peers, defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: expanded.sessions, ibgpDomains: [domain] });
-  const config = renderBirdConfig(nodes[0], expanded.peers.filter((peer) => peer.nodeId === "rr"), expanded.sessions.filter((session) => session.nodeId === "rr"));
+  expanded.sessions[0].bgp.rrClient = true;
+  expanded.sessions[0].bgp.rrClusterId = "192.0.2.254";
+  const configured = expandIbgpDomain(domain, nodes, expanded.sessions);
+  const inventory = validateInventory({ version: 23, nodes, peers: configured.peers, defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: configured.sessions, ibgpDomains: [domain] });
+  const config = renderBirdConfig(nodes[0], configured.peers.filter((peer) => peer.nodeId === "rr"), configured.sessions.filter((session) => session.nodeId === "rr"));
   assert.match(config, /local 192\.0\.2\.1 port 179 as 65000;/);
   assert.match(config, /neighbor 192\.0\.2\.2 port 179 as 65000;/);
   assert.match(config, /rr client;/);
+  assert.match(config, /rr cluster id 192\.0\.2\.254;/);
+  configured.sessions[0].bgp.rrClient = false;
+  const clusterOnlyConfig = renderBirdConfig(nodes[0], configured.peers.filter((peer) => peer.nodeId === "rr"), configured.sessions.filter((session) => session.nodeId === "rr"));
+  assert.doesNotMatch(clusterOnlyConfig, /rr client;/);
+  assert.match(clusterOnlyConfig, /rr cluster id 192\.0\.2\.254;/);
   const directory = mkdtempSync(path.join(tmpdir(), "birdbox-ibgp-"));
   const configPath = path.join(directory, "bird.conf");
-  writeFileSync(configPath, config);
+  writeFileSync(configPath, clusterOnlyConfig);
   const result = spawnSync("bird", ["-p", "-c", configPath], { encoding: "utf8" });
   rmSync(directory, { recursive: true, force: true });
   assert.equal(result.status, 0, result.stderr || result.stdout);

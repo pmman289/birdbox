@@ -43,7 +43,7 @@ test("clones an existing session without mutating the dashboard snapshot", () =>
   assert.equal(session.channels.ipv4.enabled, true);
 });
 
-test("forces Extended Next Hop for a cross-family channel in the API payload", () => {
+test("forces Extended Next Hop for IPv4 over an IPv6 neighbor", () => {
   const value = inventory();
   const dashboard = { inventory: value, node: value.nodes[0], selectedPeer: value.peers[0] };
   const draft = createSessionDraft(dashboard);
@@ -52,4 +52,8 @@ test("forces Extended Next Hop for a cross-family channel in the API payload", (
   const payload = toSessionMutationRequest(draft, value.peers[0]);
   assert.equal(payload.channels.ipv4.extendedNextHop, true);
   assert.equal(payload.channels.ipv6.extendedNextHop, false);
+
+  const ipv4Peer = { ...value.peers[0], address: "192.0.2.2" };
+  const ipv4TransportPayload = toSessionMutationRequest(draft, ipv4Peer);
+  assert.equal(ipv4TransportPayload.channels.ipv6.extendedNextHop, false);
 });

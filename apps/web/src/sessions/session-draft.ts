@@ -181,12 +181,8 @@ export function createSessionDraft(dashboard: DashboardResponse): SessionDraft |
   };
 }
 
-function addressFamily(address: string): AddressFamily {
-  return address.includes(":") ? "ipv6" : "ipv4";
-}
-
-export function channelUsesCrossFamilyTransport(peer: Peer, family: AddressFamily): boolean {
-  return addressFamily(peer.address) !== family;
+export function channelRequiresExtendedNextHop(peer: Peer, family: AddressFamily): boolean {
+  return peer.address.includes(":") && family === "ipv4";
 }
 
 export function toSessionMutationRequest(draft: SessionDraft, peer: Peer): SessionMutationRequest {
@@ -194,7 +190,7 @@ export function toSessionMutationRequest(draft: SessionDraft, peer: Peer): Sessi
   if (draft.localPort === null || !Number.isSafeInteger(draft.localPort)) throw new Error("本地端口不能为空");
   const payload = structuredClone(toRaw(draft)) as SessionMutationRequest;
   for (const family of ["ipv4", "ipv6"] as const) {
-    if (payload.channels[family].enabled && channelUsesCrossFamilyTransport(peer, family)) {
+    if (payload.channels[family].enabled && channelRequiresExtendedNextHop(peer, family)) {
       payload.channels[family].extendedNextHop = true;
     }
   }

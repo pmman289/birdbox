@@ -350,7 +350,7 @@ test("renders IPv6-only and dual-stack BGP channels independently", () => {
   assert.throws(() => validateInventory({ nodes: [node], peers: [peerV6], defines: [], sessions: [{ ...sessionV6, localAddress: "192.0.2.1" }] }), /同一地址族/);
 });
 
-test("automatically enables Extended Next Hop for cross-family BGP transport", () => {
+test("automatically enables Extended Next Hop only for IPv4 over IPv6 transport", () => {
   const peerV6 = { id: "peer_transport_v6", nodeId: "local", name: "IPv6 transport", address: "2001:db8::2", asn: 65002, port: 179 };
   const ipv4OverV6 = {
     id: "session_ipv4_over_v6", nodeId: "local", peerId: peerV6.id, protocolName: "ipv4_over_v6",
@@ -369,7 +369,7 @@ test("automatically enables Extended Next Hop for cross-family BGP transport", (
     channels: { ipv4: { enabled: false }, ipv6: { enabled: true, extendedNextHop: false } },
   };
   const ipv6OverV4Config = renderBirdConfig(node, [peerV4], [ipv6OverV4]);
-  assert.match(ipv6OverV4Config, /ipv6 \{[\s\S]*?extended next hop on;[\s\S]*?\};/);
+  assert.doesNotMatch(ipv6OverV4Config, /extended next hop on;/);
 
   const sameFamilyConfig = renderBirdConfig(node, [peerV4], [{ ...ipv4OverV6, peerId: peerV4.id, localAddress: "192.0.2.1" }]);
   assert.doesNotMatch(sameFamilyConfig, /extended next hop on;/);
@@ -782,7 +782,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 21);
+  assert.equal(state.version, 23);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({
@@ -1026,7 +1026,7 @@ test("native BIRD 2 parses automatic local binding and configurable Static chann
   await execFileAsync(available[0], ["-p", "-c", configPath]);
 });
 
-test("native BIRD 2 parses automatic Extended Next Hop in both transport directions", async (context) => {
+test("native BIRD 2 parses IPv4-over-IPv6 ENH and IPv6-over-IPv4 without ENH", async (context) => {
   let binary = null;
   for (const candidate of ["/usr/sbin/bird", "/usr/bin/bird"]) {
     try { await fs.access(candidate); binary = candidate; break; } catch {}
@@ -1053,7 +1053,10 @@ test("native BIRD 2 parses automatic Extended Next Hop in both transport directi
       channels: { ipv4: { enabled: false }, ipv6: { enabled: true } },
     },
   ];
-  await fs.writeFile(configPath, renderBirdConfig(node, [peerV6, peerV4], crossFamilySessions));
+  const config = renderBirdConfig(node, [peerV6, peerV4], crossFamilySessions);
+  assert.match(config, /protocol bgp native_v4_via_v6[\s\S]*?extended next hop on;/);
+  assert.doesNotMatch(config.match(/protocol bgp native_v6_via_v4[\s\S]*?\n\}/)?.[0] ?? "", /extended next hop on;/);
+  await fs.writeFile(configPath, config);
   await execFileAsync(binary, ["-p", "-c", configPath]);
 });
 

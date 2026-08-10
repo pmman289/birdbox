@@ -28,7 +28,19 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#globalState")).not.toHaveText("正在连接");
   await expect(page.locator("#dashboardOverviewApp #topologyTitle")).toHaveText("BGP 会话拓扑");
   await expect(page.locator("#dashboardOverviewApp #nodeSelect")).toContainText("E2E Router");
-  await expect(page.locator("#dashboardOverviewApp .peer-card")).toContainText("Documentation Peer");
+  await expect(page.locator("#dashboardOverviewApp .ebgp-canvas")).toBeVisible();
+  await expect(page.locator("#dashboardOverviewApp .ebgp-local-node")).toContainText("E2E Router");
+  const peerCanvasNode = page.locator("#dashboardOverviewApp .ebgp-peer-node");
+  await expect(peerCanvasNode).toContainText("Documentation Peer");
+  const peerBox = await peerCanvasNode.boundingBox();
+  if (peerBox) {
+    await page.mouse.move(peerBox.x + 20, peerBox.y + 20);
+    await page.mouse.down();
+    await page.mouse.move(peerBox.x + 55, peerBox.y + 45, { steps: 4 });
+    await page.mouse.up();
+    const movedPeerBox = await peerCanvasNode.boundingBox();
+    expect(movedPeerBox?.x).not.toBe(peerBox.x);
+  }
   await expect(page.locator("#dashboardRuntimeApp .protocol-table-wrap")).toContainText("e2e_peer");
   await expect(page.locator("#sessionEditorApp #protocolName")).toHaveValue("e2e_peer");
   await expect(page.locator('#sessionEditorApp [data-field="localAsn"] input')).toHaveValue("64512");
@@ -47,7 +59,7 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#dashboardRuntimeApp #localConfig")).toHaveClass(/active/);
   await page.locator("#resourceWorkspaceTab").click();
   await expect(page.locator("#managementNodeRows")).toContainText("E2E Router");
-  await page.locator("#managementNodeRows .row-edit-button").click();
+  await page.getByRole("button", { name: "编辑节点 E2E Router" }).click();
   await expect(page.locator("#nodeDialog")).toBeVisible();
   await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
   await page.locator("#resourceDefinesTab").click();

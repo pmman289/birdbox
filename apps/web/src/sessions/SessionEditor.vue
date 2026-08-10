@@ -21,7 +21,7 @@ import { dispatchToast } from "../shared/events";
 import BgpOptionsEditor from "./BgpOptionsEditor.vue";
 import ChannelEditor from "./ChannelEditor.vue";
 import PolicyActionDialog from "./PolicyActionDialog.vue";
-import { channelUsesCrossFamilyTransport } from "./session-draft";
+import { channelRequiresExtendedNextHop } from "./session-draft";
 import { useSessionStore } from "./session-store";
 
 interface SessionErrorData {
@@ -139,8 +139,8 @@ function validateDraft(report: boolean): boolean {
     && !hasScope(peer.value.address) && !hasScope(value.localAddress) && !value.bgp.interface) {
     return fail("IPv6 Link-local 会话必须指定接口，或在地址中填写 %接口", "interface");
   }
-  if (families.some((family) => value.channels[family].enabled && channelUsesCrossFamilyTransport(peer.value!, family)) && value.bgp.capabilities === "off") {
-    return fail("跨地址族 Channel 需要 BGP Capabilities 协商", "capabilities");
+  if (families.some((family) => value.channels[family].enabled && channelRequiresExtendedNextHop(peer.value!, family)) && value.bgp.capabilities === "off") {
+    return fail("IPv4 Channel 通过 IPv6 邻居传输时需要 BGP Capabilities 协商", "capabilities");
   }
   for (const family of families) {
     const channel = value.channels[family];

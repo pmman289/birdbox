@@ -321,9 +321,9 @@ onBeforeUnmount(() => {
 
   <main id="appMain" :hidden="!authenticated">
     <nav class="workspace-tabs" role="tablist" aria-label="Birdbox 工作区">
-      <button id="sessionWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'sessionWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'sessionWorkspace'" aria-controls="sessionWorkspace" data-workspace="sessionWorkspace" :tabindex="activeWorkspace === 'sessionWorkspace' ? 0 : -1" @click="activateWorkspace('sessionWorkspace')" @keydown="moveWorkspaceTab($event, 0)">会话与拓扑</button>
-      <button id="resourceWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'resourceWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'resourceWorkspace'" aria-controls="resourceWorkspace" data-workspace="resourceWorkspace" :tabindex="activeWorkspace === 'resourceWorkspace' ? 0 : -1" @click="activateWorkspace('resourceWorkspace')" @keydown="moveWorkspaceTab($event, 1)">资源管理</button>
-      <button id="ibgpWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'ibgpWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'ibgpWorkspace'" aria-controls="ibgpWorkspace" data-workspace="ibgpWorkspace" :tabindex="activeWorkspace === 'ibgpWorkspace' ? 0 : -1" @click="activateWorkspace('ibgpWorkspace')" @keydown="moveWorkspaceTab($event, 2)">iBGP 域</button>
+      <button id="sessionWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'sessionWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'sessionWorkspace'" aria-controls="sessionWorkspace" data-workspace="sessionWorkspace" :tabindex="activeWorkspace === 'sessionWorkspace' ? 0 : -1" @click="activateWorkspace('sessionWorkspace')" @keydown="moveWorkspaceTab($event, 0)">eBGP 管理</button>
+      <button id="ibgpWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'ibgpWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'ibgpWorkspace'" aria-controls="ibgpWorkspace" data-workspace="ibgpWorkspace" :tabindex="activeWorkspace === 'ibgpWorkspace' ? 0 : -1" @click="activateWorkspace('ibgpWorkspace')" @keydown="moveWorkspaceTab($event, 1)">iBGP 管理</button>
+      <button id="resourceWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'resourceWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'resourceWorkspace'" aria-controls="resourceWorkspace" data-workspace="resourceWorkspace" :tabindex="activeWorkspace === 'resourceWorkspace' ? 0 : -1" @click="activateWorkspace('resourceWorkspace')" @keydown="moveWorkspaceTab($event, 2)">资源管理</button>
     </nav>
 
     <div id="sessionWorkspace" class="workspace-panel" role="tabpanel" aria-labelledby="sessionWorkspaceTab" :hidden="activeWorkspace !== 'sessionWorkspace'">
@@ -337,11 +337,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <section id="resourceWorkspace" class="workspace-panel resource-workspace" role="tabpanel" aria-labelledby="resourceWorkspaceTab" :hidden="activeWorkspace !== 'resourceWorkspace'">
-      <div id="resourceWorkspaceApp"><ResourceWorkspace /></div>
-    </section>
     <section id="ibgpWorkspace" class="workspace-panel ibgp-workspace-panel" role="tabpanel" aria-labelledby="ibgpWorkspaceTab" :hidden="activeWorkspace !== 'ibgpWorkspace'">
       <IbgpWorkspace />
+    </section>
+    <section id="resourceWorkspace" class="workspace-panel resource-workspace" role="tabpanel" aria-labelledby="resourceWorkspaceTab" :hidden="activeWorkspace !== 'resourceWorkspace'">
+      <div id="resourceWorkspaceApp"><ResourceWorkspace /></div>
     </section>
   </main>
 

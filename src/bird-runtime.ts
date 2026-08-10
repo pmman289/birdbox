@@ -435,9 +435,7 @@ export async function loadSeedNodes(nodesPath: string): Promise<ManagedNode[]> {
   const content = await fs.readFile(nodesPath, "utf8");
   const input = JSON.parse(content) as unknown;
   assertValidation(Array.isArray(input), "受管节点配置必须是数组");
-  const nodes = input.map(normalizeNode);
-  assertValidation(nodes.length >= 1, "至少需要配置一个受管节点");
-  return nodes;
+  return input.map(normalizeNode);
 }
 
 export async function saveJsonAtomic(filePath: string, value: unknown): Promise<void> {

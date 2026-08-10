@@ -14,7 +14,7 @@ import type {
 import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import OptionalTextInput from "../shared/OptionalTextInput.vue";
 import PolicyEditor from "./PolicyEditor.vue";
-import { channelUsesCrossFamilyTransport } from "./session-draft";
+import { channelRequiresExtendedNextHop } from "./session-draft";
 
 const props = defineProps<{
   family: AddressFamily;
@@ -35,7 +35,7 @@ const label = computed(() => props.family === "ipv4" ? "IPv4" : "IPv6");
 const disabled = computed(() => !model.value.enabled);
 const capabilitiesEnabled = computed(() => props.bgp.capabilities !== "off");
 const multihop = computed(() => props.bgp.connectionMode === "multihop");
-const automaticExtendedNextHop = computed(() => model.value.enabled && channelUsesCrossFamilyTransport(props.peer, props.family));
+const automaticExtendedNextHop = computed(() => model.value.enabled && channelRequiresExtendedNextHop(props.peer, props.family));
 const extendedNextHopLabel = computed(() => automaticExtendedNextHop.value ? "Extended Next Hop · 自动" : "Extended Next Hop");
 
 watch(automaticExtendedNextHop, (automatic) => {

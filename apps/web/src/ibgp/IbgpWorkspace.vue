@@ -2,65 +2,68 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 
 import type {
+  IbgpDomainPreviewResponse,
+  IbgpPreviewSide,
+} from "@birdbox/contracts/api";
+import type {
   AddressFamily,
   BgpSession,
+  ChannelPolicy,
   IbgpAdjacency,
   IbgpDomain,
   IbgpMember,
+  Inventory,
   ManagedNode,
+  Peer,
+  PolicyFunction,
 } from "@birdbox/contracts/inventory";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
+import { uniqueBirdName } from "../shared/resource-names";
+import PolicyActionDialog from "../sessions/PolicyActionDialog.vue";
+import { defaultBgpOptions, defaultChannel } from "../sessions/session-draft";
+import IbgpSessionSideEditor from "./IbgpSessionSideEditor.vue";
 
 const { dashboard } = useDashboardStore();
 const domains = ref<IbgpDomain[]>([]);
 const selectedDomainId = ref<string | null>(null);
 const selectedNodeId = ref<string | null>(null);
+const selectedAdjacencyId = ref<string | null>(null);
 const draft = ref<IbgpDomain | null>(null);
 const sessionDrafts = ref<Record<string, BgpSession>>({});
 const loading = ref(false);
 const saving = ref(false);
 const layoutSaving = ref(false);
 const error = ref("");
+const connectionSearch = ref("");
 const canvas = ref<HTMLElement | null>(null);
 const dragging = ref<{ nodeId: string; dx: number; dy: number } | null>(null);
-const activeSide = ref<"left" | "right">("left");
+const previewPending = ref(false);
+const previewValid = ref<boolean | null>(null);
+const previewError = ref("");
+const previewSides = ref<IbgpPreviewSide[]>([]);
+const inventorySnapshot = ref<Inventory | null>(null);
+const policyActionDialog = ref<InstanceType<typeof PolicyActionDialog> | null>(
+  null,
+);
+const policyActionContext = ref<{
+  sessionId: string;
+  family: AddressFamily;
+  direction: "import" | "export";
+} | null>(null);
+let previewTimer: number | null = null;
+let previewQueued = false;
+let adjacencySequence = 0;
 
+const currentInventory = computed<Inventory | null>(
+  () => dashboard.value?.inventory ?? inventorySnapshot.value,
+);
 const nodes = computed<ManagedNode[]>(
-  () => dashboard.value?.inventory.nodes ?? [],
+  () => currentInventory.value?.nodes ?? [],
 );
 const selectedNode = computed(
   () => nodes.value.find((node) => node.id === selectedNodeId.value) ?? null,
-);
-const selectedAdjacency = computed(
-  () =>
-    draft.value?.adjacencies.find(
-      (item) =>
-        item.leftNodeId === selectedNodeId.value ||
-        item.rightNodeId === selectedNodeId.value,
-    ) ?? null,
-);
-const selectedPairSessions = computed(() => {
-  const adjacency = selectedAdjacency.value;
-  if (!adjacency) return { left: null, right: null };
-  return {
-    left:
-      sessionDrafts.value[adjacency.leftSessionId] ??
-      dashboard.value?.inventory.sessions.find(
-        (item) => item.id === adjacency.leftSessionId,
-      ) ??
-      null,
-    right:
-      sessionDrafts.value[adjacency.rightSessionId] ??
-      dashboard.value?.inventory.sessions.find(
-        (item) => item.id === adjacency.rightSessionId,
-      ) ??
-      null,
-  };
-});
-const activeSession = computed(
-  () => selectedPairSessions.value[activeSide.value],
 );
 const selectedMember = computed(
   () =>
@@ -68,8 +71,88 @@ const selectedMember = computed(
       (member) => member.nodeId === selectedNodeId.value,
     ) ?? null,
 );
-const activeFamily = ref<AddressFamily>("ipv4");
-const activePolicyDirection = ref<"import" | "export">("import");
+const selectedAdjacency = computed(
+  () =>
+    draft.value?.adjacencies.find(
+      (item) => item.id === selectedAdjacencyId.value,
+    ) ?? null,
+);
+const selectedPairSessions = computed(() => {
+  const adjacency = selectedAdjacency.value;
+  if (!adjacency) return { left: null, right: null };
+  return {
+    left: sessionDrafts.value[adjacency.leftSessionId] ?? null,
+    right: sessionDrafts.value[adjacency.rightSessionId] ?? null,
+  };
+});
+const leftSession = computed(() => selectedPairSessions.value.left);
+const rightSession = computed(() => selectedPairSessions.value.right);
+const policySession = computed(() => {
+  const sessionId = policyActionContext.value?.sessionId;
+  return sessionId ? sessionDrafts.value[sessionId] ?? null : null;
+});
+const inventoryDefines = computed(() => currentInventory.value?.defines ?? []);
+const inventoryFunctions = computed(() => currentInventory.value?.functions ?? []);
+const inventoryFilters = computed(() => currentInventory.value?.filters ?? []);
+const connectionCandidates = computed(() => {
+  const domain = draft.value;
+  if (!domain || !selectedNodeId.value) return [];
+  const query = connectionSearch.value.trim().toLowerCase();
+  return domainNodes(domain).filter((node) => {
+    if (node.id === selectedNodeId.value) return false;
+    if (!query) return true;
+    const address = domain.members.find((member) => member.nodeId === node.id)?.address ?? "";
+    return `${node.name} ${node.id} ${address}`.toLowerCase().includes(query);
+  });
+});
+
+function peerForSide(side: "left" | "right"): Peer | null {
+  const domain = draft.value;
+  const adjacency = selectedAdjacency.value;
+  const session = selectedPairSessions.value[side];
+  if (!domain || !adjacency || !session) return null;
+  const remoteNodeId =
+    side === "left" ? adjacency.rightNodeId : adjacency.leftNodeId;
+  const remote = domain.members.find(
+    (member) => member.nodeId === remoteNodeId,
+  );
+  const remoteNode = nodes.value.find((node) => node.id === remoteNodeId);
+  if (!remote) return null;
+  return {
+    id: session.peerId,
+    nodeId: session.nodeId,
+    name: remoteNode?.name ?? remoteNodeId,
+    address: remote.address,
+    asn: domain.asn,
+    port: remoteNode?.listenPort ?? 179,
+    managedBy: session.managedBy,
+  };
+}
+
+const leftPeer = computed(() => peerForSide("left"));
+const rightPeer = computed(() => peerForSide("right"));
+const leftNode = computed(() =>
+  nodes.value.find((node) => node.id === selectedAdjacency.value?.leftNodeId) ?? null,
+);
+const rightNode = computed(() =>
+  nodes.value.find((node) => node.id === selectedAdjacency.value?.rightNodeId) ?? null,
+);
+const selectedPreviewSides = computed(() =>
+  previewSides.value.filter(
+    (item) => item.session.managedBy?.adjacencyId === selectedAdjacencyId.value,
+  ),
+);
+
+function previewForSession(sessionId: string): IbgpPreviewSide | null {
+  return selectedPreviewSides.value.find((item) => item.session.id === sessionId) ?? null;
+}
+
+const leftPreview = computed(() =>
+  leftSession.value ? previewForSession(leftSession.value.id) : null,
+);
+const rightPreview = computed(() =>
+  rightSession.value ? previewForSession(rightSession.value.id) : null,
+);
 
 function clone<T>(value: T): T {
   return structuredClone(toRaw(value as object)) as T;
@@ -78,49 +161,6 @@ function clone<T>(value: T): T {
 function domainNodes(domain: IbgpDomain): ManagedNode[] {
   const memberIds = new Set(domain.members.map((member) => member.nodeId));
   return nodes.value.filter((node) => memberIds.has(node.id));
-}
-
-function defaultLayout(
-  nodeId: string,
-  index: number,
-): { x: number; y: number; locked: boolean } {
-  return (
-    draft.value?.layout[nodeId] ?? {
-      x: 36 + (index % 4) * 190,
-      y: 40 + Math.floor(index / 4) * 140,
-      locked: false,
-    }
-  );
-}
-
-function makeDraft(): IbgpDomain {
-  const members = nodes.value.map(
-    (node, index): IbgpMember => ({
-      nodeId: node.id,
-      address4: node.routerId,
-      address6: null,
-      role: "member",
-      clusterId: null,
-    }),
-  );
-  const layout = Object.fromEntries(
-    members.map((member, index) => [member.nodeId, defaultLayoutFor(index)]),
-  );
-  return {
-    id: "",
-    name: "新 iBGP 域",
-    asn: members.length
-      ? (dashboard.value?.inventory.sessions.find(
-          (session) => session.nodeId === members[0]?.nodeId,
-        )?.localAsn ?? 65000)
-      : 65000,
-    topology: "full-mesh",
-    families: ["ipv4"],
-    defaultClusterId: null,
-    members,
-    adjacencies: [],
-    layout,
-  };
 }
 
 function defaultLayoutFor(index: number): {
@@ -135,74 +175,113 @@ function defaultLayoutFor(index: number): {
   };
 }
 
-function domainPayload(value: IbgpDomain): Record<string, unknown> {
+function layoutFor(
+  nodeId: string,
+  index: number,
+): { x: number; y: number; locked: boolean } {
+  return draft.value?.layout[nodeId] ?? defaultLayoutFor(index);
+}
+
+function makeDraft(): IbgpDomain {
+  const members = nodes.value.map(
+    (node): IbgpMember => ({
+      nodeId: node.id,
+      address: node.routerId,
+    }),
+  );
   return {
-    ...clone(value),
-    sessionUpdates: Object.values(sessionDrafts.value).map((session) => ({
-      id: session.id,
-      protocolName: session.protocolName,
-      localAddress: session.localAddress,
-      localPort: session.localPort,
-      bgp: session.bgp,
-      channels: session.channels,
-    })),
+    id: "",
+    name: "新 iBGP 域",
+    asn: members.length
+      ? (currentInventory.value?.sessions.find(
+          (session) => session.nodeId === members[0]?.nodeId,
+        )?.localAsn ?? 65000)
+      : 65000,
+    members,
+    adjacencies: [],
+    layout: Object.fromEntries(
+      members.map((member, index) => [member.nodeId, defaultLayoutFor(index)]),
+    ),
   };
 }
 
-function rebuildLocalAdjacencies(): void {
-  if (!draft.value || draft.value.topology === "manual") return;
-  const pairs: Array<{ leftNodeId: string; rightNodeId: string }> = [];
-  if (draft.value.topology === "full-mesh") {
-    draft.value.members.forEach((left, index) =>
-      draft.value?.members
-        .slice(index + 1)
-        .forEach((right) =>
-          pairs.push({ leftNodeId: left.nodeId, rightNodeId: right.nodeId }),
-        ),
-    );
-  } else {
-    const reflectors = draft.value.members.filter(
-      (member) => member.role === "reflector",
-    );
-    const clients = draft.value.members.filter(
-      (member) => member.role !== "reflector",
-    );
-    reflectors.forEach((left) =>
-      clients
-        .filter((right) => right.nodeId !== left.nodeId)
-        .forEach((right) =>
-          pairs.push({ leftNodeId: left.nodeId, rightNodeId: right.nodeId }),
-        ),
-    );
+function makeSession(
+  adjacency: IbgpAdjacency,
+  side: "left" | "right",
+): BgpSession {
+  const domain = draft.value!;
+  const nodeId = side === "left" ? adjacency.leftNodeId : adjacency.rightNodeId;
+  const localNode = nodes.value.find((node) => node.id === nodeId);
+  const localMember = domain.members.find(
+    (member) => member.nodeId === nodeId,
+  )!;
+  const remoteNodeId =
+    side === "left" ? adjacency.rightNodeId : adjacency.leftNodeId;
+  const remoteNode = nodes.value.find((node) => node.id === remoteNodeId);
+  const sessionId =
+    side === "left" ? adjacency.leftSessionId : adjacency.rightSessionId;
+  const peerId = `${adjacency.id}_peer_${side}`;
+  return {
+    id: sessionId,
+    nodeId,
+    peerId,
+    protocolName: uniqueBirdName(
+      currentInventory.value ?? {
+        version: 23,
+        nodes: [],
+        peers: [],
+        defines: [],
+        functions: [],
+        filters: [],
+        rpki: [],
+        staticProtocols: [],
+        sessions: [],
+        ibgpDomains: [],
+      },
+      "ibgp",
+      `${domain.name} ${remoteNode?.name ?? remoteNodeId}`,
+      [],
+      48,
+    ),
+    localAddress: localMember.address,
+    localAsn: domain.asn,
+    localPort: localNode?.listenPort ?? 179,
+    bgp: { ...defaultBgpOptions(), connectionMode: "multihop" },
+    channels: {
+      ipv4: defaultChannel(),
+      ipv6: defaultChannel(),
+    },
+    enabled: adjacency.enabled,
+    sessionType: "ibgp",
+    managedBy: {
+      kind: "ibgp-domain",
+      domainId: domain.id || "ibgp_preview",
+      adjacencyId: adjacency.id,
+    },
+  };
+}
+
+function ensureAdjacencySessions(adjacency: IbgpAdjacency): void {
+  for (const side of ["left", "right"] as const) {
+    const id =
+      side === "left" ? adjacency.leftSessionId : adjacency.rightSessionId;
+    sessionDrafts.value[id] ??= makeSession(adjacency, side);
   }
-  const old = new Map(
-    draft.value.adjacencies.map((item) => [
-      `${item.leftNodeId}:${item.rightNodeId}`,
-      item,
-    ]),
-  );
-  draft.value.adjacencies = pairs.map((pair, index) => {
-    const prior =
-      old.get(`${pair.leftNodeId}:${pair.rightNodeId}`) ??
-      old.get(`${pair.rightNodeId}:${pair.leftNodeId}`);
-    const id = prior?.id ?? `${draft.value?.id || "ibgp_new"}_adj_${index + 1}`;
-    return (
-      prior ?? {
-        id,
-        ...pair,
-        enabled: true,
-        leftSessionId: `${id}_left`,
-        rightSessionId: `${id}_right`,
-      }
-    );
-  });
+}
+
+function domainPayload(value: IbgpDomain): Record<string, unknown> {
+  return {
+    ...clone(value),
+    sessionUpdates: Object.values(sessionDrafts.value).map(clone),
+  };
 }
 
 async function loadDomains(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    const response = await api<{ domains: IbgpDomain[] }>("/api/ibgp-domains");
+    const response = await api<{ domains: IbgpDomain[]; inventory: Inventory }>("/api/ibgp-domains");
+    inventorySnapshot.value = response.inventory;
     domains.value = response.domains;
     if (
       selectedDomainId.value &&
@@ -223,21 +302,29 @@ function selectDomain(domainId: string): void {
   selectedDomainId.value = domainId;
   draft.value = clone(domain);
   selectedNodeId.value = domain.members[0]?.nodeId ?? null;
+  selectedAdjacencyId.value = domain.adjacencies[0]?.id ?? null;
+  const authoritativeSessions = inventorySnapshot.value?.sessions
+    ?? dashboard.value?.inventory.sessions
+    ?? [];
   sessionDrafts.value = Object.fromEntries(
-    (dashboard.value?.inventory.sessions ?? [])
+    authoritativeSessions
       .filter((session) => session.managedBy?.domainId === domainId)
       .map((session) => [session.id, clone(session)]),
   );
-  activeSide.value = "left";
-  rebuildLocalAdjacencies();
+  for (const adjacency of draft.value.adjacencies)
+    ensureAdjacencySessions(adjacency);
+  connectionSearch.value = "";
 }
 
 function newDomain(): void {
   selectedDomainId.value = null;
   draft.value = makeDraft();
   selectedNodeId.value = draft.value.members[0]?.nodeId ?? null;
+  selectedAdjacencyId.value = null;
   sessionDrafts.value = {};
-  rebuildLocalAdjacencies();
+  connectionSearch.value = "";
+  previewSides.value = [];
+  previewValid.value = null;
 }
 
 async function saveDomain(): Promise<void> {
@@ -248,7 +335,7 @@ async function saveDomain(): Promise<void> {
     const path = selectedDomainId.value
       ? `/api/ibgp-domains/${selectedDomainId.value}`
       : "/api/ibgp-domains";
-    const response = await api<{ domain: IbgpDomain }>(path, {
+    const response = await api<{ domain: IbgpDomain; inventory: Inventory }>(path, {
       method: selectedDomainId.value ? "PUT" : "POST",
       body: JSON.stringify(domainPayload(draft.value)),
     });
@@ -257,7 +344,9 @@ async function saveDomain(): Promise<void> {
           domain.id === response.domain.id ? response.domain : domain,
         )
       : [...domains.value, response.domain];
-    selectDomain(response.domain.id);
+    selectedDomainId.value = response.domain.id;
+    draft.value = clone(response.domain);
+    inventorySnapshot.value = response.inventory;
     window.dispatchEvent(
       new CustomEvent("birdbox:dashboard-selection", {
         detail: { nodeId: selectedNodeId.value, peerId: null },
@@ -273,7 +362,7 @@ async function saveDomain(): Promise<void> {
 async function removeDomain(): Promise<void> {
   if (
     !selectedDomainId.value ||
-    !window.confirm("删除该 iBGP 域及其生成的双向会话？")
+    !window.confirm("删除该 iBGP 域及其全部双向会话？")
   )
     return;
   saving.value = true;
@@ -294,10 +383,10 @@ async function removeDomain(): Promise<void> {
 }
 
 async function saveLayout(): Promise<void> {
-  if (!draft.value?.id) return;
+  if (!selectedDomainId.value || !draft.value) return;
   layoutSaving.value = true;
   try {
-    await api(`/api/ibgp-domains/${draft.value.id}/layout`, {
+    await api(`/api/ibgp-domains/${selectedDomainId.value}/layout`, {
       method: "PATCH",
       body: JSON.stringify({ layout: draft.value.layout }),
     });
@@ -308,16 +397,23 @@ async function saveLayout(): Promise<void> {
   }
 }
 
+function selectNode(nodeId: string): void {
+  selectedNodeId.value = nodeId;
+  const adjacency = draft.value?.adjacencies.find(
+    (item) => item.leftNodeId === nodeId || item.rightNodeId === nodeId,
+  );
+  if (adjacency) selectedAdjacencyId.value = adjacency.id;
+}
+
 function startDrag(event: PointerEvent, nodeId: string): void {
   if (!draft.value || draft.value.layout[nodeId]?.locked) return;
-  const target = event.currentTarget as HTMLElement;
-  const rect = target.getBoundingClientRect();
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
   dragging.value = {
     nodeId,
     dx: event.clientX - rect.left,
     dy: event.clientY - rect.top,
   };
-  target.setPointerCapture(event.pointerId);
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
 }
 
 function dragNode(event: PointerEvent): void {
@@ -336,188 +432,171 @@ function stopDrag(): void {
   void saveLayout();
 }
 
-function toggleConnection(nodeId: string): void {
+function connectionTo(nodeId: string): IbgpAdjacency | null {
+  if (!draft.value || !selectedNodeId.value) return null;
+  return (
+    draft.value.adjacencies.find(
+      (item) =>
+        (item.leftNodeId === selectedNodeId.value &&
+          item.rightNodeId === nodeId) ||
+        (item.leftNodeId === nodeId &&
+          item.rightNodeId === selectedNodeId.value),
+    ) ?? null
+  );
+}
+
+function makeClientAdjacencyId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  const fallback = `${Date.now().toString(36)}_${(adjacencySequence += 1).toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  return `ibgp_adj_${(uuid ?? fallback).replaceAll("-", "").slice(0, 24)}`;
+}
+
+function connectNode(nodeId: string): void {
   if (!draft.value || !selectedNodeId.value || selectedNodeId.value === nodeId)
     return;
-  const existing = draft.value.adjacencies.find(
-    (item) =>
-      (item.leftNodeId === selectedNodeId.value &&
-        item.rightNodeId === nodeId) ||
-      (item.leftNodeId === nodeId && item.rightNodeId === selectedNodeId.value),
-  );
-  if (existing) existing.enabled = !existing.enabled;
-  else {
-    const id = `${draft.value.id || "ibgp_new"}_adj_${draft.value.adjacencies.length + 1}`;
-    draft.value.adjacencies.push({
-      id,
-      leftNodeId: selectedNodeId.value,
-      rightNodeId: nodeId,
-      enabled: true,
-      leftSessionId: `${id}_left`,
-      rightSessionId: `${id}_right`,
-    });
+  const existing = connectionTo(nodeId);
+  if (existing) {
+    selectedAdjacencyId.value = existing.id;
+    return;
   }
+  const id = makeClientAdjacencyId();
+  const adjacency: IbgpAdjacency = {
+    id,
+    leftNodeId: selectedNodeId.value,
+    rightNodeId: nodeId,
+    enabled: true,
+    leftSessionId: `${id}_left`,
+    rightSessionId: `${id}_right`,
+  };
+  draft.value.adjacencies.push(adjacency);
+  ensureAdjacencySessions(adjacency);
+  selectedAdjacencyId.value = adjacency.id;
+}
+
+function removeConnection(adjacency: IbgpAdjacency): void {
+  if (!draft.value) return;
+  draft.value.adjacencies = draft.value.adjacencies.filter(
+    (item) => item.id !== adjacency.id,
+  );
+  delete sessionDrafts.value[adjacency.leftSessionId];
+  delete sessionDrafts.value[adjacency.rightSessionId];
+  if (selectedAdjacencyId.value === adjacency.id)
+    selectedAdjacencyId.value = draft.value.adjacencies[0]?.id ?? null;
 }
 
 function setMember<K extends keyof IbgpMember>(
   key: K,
   value: IbgpMember[K],
 ): void {
-  if (selectedMember.value) selectedMember.value[key] = value;
-  if (key === "role") rebuildLocalAdjacencies();
+  if (!selectedMember.value) return;
+  selectedMember.value[key] = value;
+  if (key !== "address") return;
+  for (const session of Object.values(sessionDrafts.value)) {
+    if (session.nodeId === selectedMember.value.nodeId) {
+      session.localAddress = String(value);
+    }
+  }
 }
 
-function updateSessionField<K extends keyof BgpSession>(
-  key: K,
-  value: BgpSession[K],
-): void {
-  const session = activeSession.value;
-  if (session) sessionDrafts.value[session.id] = { ...session, [key]: value };
-}
-
-function updateSessionBgp<K extends keyof BgpSession["bgp"]>(
-  key: K,
-  value: BgpSession["bgp"][K],
-): void {
-  const session = activeSession.value;
-  if (session)
-    sessionDrafts.value[session.id] = {
-      ...session,
-      bgp: { ...session.bgp, [key]: value },
-    };
-}
-
-function updatePolicy(
+function openPolicyAction(
+  sessionId: string,
+  family: AddressFamily,
   direction: "import" | "export",
-  value: "all" | "none" | "cidr",
 ): void {
-  const session = activeSession.value;
-  if (!session) return;
-  const family = session.channels[activeFamily.value];
-  const policy =
-    direction === "import" ? family.importPolicy : family.exportPolicy;
-  const next = {
-    ...policy,
-    mode: "form" as const,
-    formAction: value,
-    steps: [],
-    filterId: null,
-  };
-  const exportDefineId =
-    direction === "export" && value === "cidr"
-      ? (family.exportDefineId ??
-        dashboard.value?.cidrDefines[activeFamily.value][0]?.id ??
-        null)
-      : family.exportDefineId;
-  const channels = {
-    ...session.channels,
-    [activeFamily.value]: {
-      ...family,
-      exportDefineId,
-      [direction === "import" ? "importPolicy" : "exportPolicy"]: next,
-    },
-  };
-  sessionDrafts.value[session.id] = { ...session, channels };
+  policyActionContext.value = { sessionId, family, direction };
+  policyActionDialog.value?.open(family, direction);
 }
 
-function updatePolicyMode(
-  direction: "import" | "export",
-  mode: "form" | "combined" | "custom",
-): void {
-  const session = activeSession.value;
-  if (!session) return;
-  const family = session.channels[activeFamily.value];
-  const key = direction === "import" ? "importPolicy" : "exportPolicy";
-  const policy = family[key];
-  const next =
-    mode === "custom"
-      ? {
-          ...policy,
-          mode,
-          steps: [],
-          filterId: dashboard.value?.filters[0]?.id ?? null,
-        }
-      : mode === "combined"
-        ? {
-            ...policy,
-            mode,
-            steps: policy.steps.length
-              ? policy.steps
-              : [{ type: "form" as const }],
-            filterId: null,
-          }
-        : { ...policy, mode, steps: [], filterId: null };
-  sessionDrafts.value[session.id] = {
-    ...session,
-    channels: {
-      ...session.channels,
-      [activeFamily.value]: { ...family, [key]: next },
-    },
-  };
-}
-
-function addPolicyFunction(
-  direction: "import" | "export",
-  functionId: string,
-): void {
-  if (!functionId) return;
-  const session = activeSession.value;
-  if (!session) return;
-  const family = session.channels[activeFamily.value];
-  const key = direction === "import" ? "importPolicy" : "exportPolicy";
-  const policy = family[key];
+function insertPolicyFunction(resource: PolicyFunction): void {
+  const context = policyActionContext.value;
+  const session = context ? sessionDrafts.value[context.sessionId] : null;
+  if (!session || !context) return;
+  const { family, direction } = context;
+  const channel = session.channels[family];
+  const policyKey = direction === "import" ? "importPolicy" : "exportPolicy";
+  const policy: ChannelPolicy = channel[policyKey];
   if (
     policy.steps.some(
-      (step) => step.type === "function" && step.functionId === functionId,
+      (step) => step.type === "function" && step.functionId === resource.id,
     )
   )
     return;
-  const formIndex = policy.steps.findIndex((step) => step.type === "form");
   const steps = [...policy.steps];
+  const formIndex = steps.findIndex((step) => step.type === "form");
   steps.splice(formIndex < 0 ? steps.length : formIndex, 0, {
-    type: "function" as const,
-    functionId,
-    action: "execute" as const,
+    type: "function",
+    functionId: resource.id,
+    action: "execute",
   });
-  if (!steps.some((step) => step.type === "form"))
-    steps.push({ type: "form" as const });
-  sessionDrafts.value[session.id] = {
-    ...session,
-    channels: {
-      ...session.channels,
-      [activeFamily.value]: {
-        ...family,
-        [key]: { ...policy, mode: "combined", steps, filterId: null },
-      },
-    },
-  };
+  if (!steps.some((step) => step.type === "form")) steps.push({ type: "form" });
+  channel[policyKey] = { ...policy, mode: "combined", steps, filterId: null };
+  policyActionContext.value = null;
 }
 
-function updatePolicyFilter(
-  direction: "import" | "export",
-  filterId: string,
-): void {
-  const session = activeSession.value;
-  if (!session) return;
-  const family = session.channels[activeFamily.value];
-  const key = direction === "import" ? "importPolicy" : "exportPolicy";
-  sessionDrafts.value[session.id] = {
-    ...session,
-    channels: {
-      ...session.channels,
-      [activeFamily.value]: {
-        ...family,
-        [key]: {
-          ...family[key],
-          mode: "custom",
-          steps: [],
-          filterId: filterId || null,
-        },
-      },
-    },
-  };
+const previewSignature = computed(() => {
+  if (!draft.value || !draft.value.adjacencies.length) return null;
+  const { layout: _layout, ...domain } = draft.value;
+  return JSON.stringify({
+    ...domain,
+    sessionUpdates: Object.values(sessionDrafts.value),
+  });
+});
+
+function schedulePreview(): void {
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  if (!previewSignature.value) {
+    previewSides.value = [];
+    previewValid.value = null;
+    previewError.value = "";
+    return;
+  }
+  previewTimer = window.setTimeout(() => void runPreview(), 650);
 }
 
+async function runPreview(): Promise<void> {
+  if (!draft.value) return;
+  if (previewPending.value) {
+    previewQueued = true;
+    return;
+  }
+  const signature = previewSignature.value;
+  if (!signature) return;
+  previewPending.value = true;
+  previewError.value = "";
+  try {
+    const response = await api<IbgpDomainPreviewResponse>(
+      "/api/ibgp-domains/preview",
+      {
+        method: "POST",
+        body: signature,
+        mutationWait: false,
+      },
+    );
+    if (signature !== previewSignature.value) {
+      previewQueued = true;
+      return;
+    }
+    if (!draft.value.id) draft.value.id = response.domain.id;
+    draft.value.adjacencies = response.domain.adjacencies;
+    sessionDrafts.value = Object.fromEntries(
+      response.sessions.map((session) => [session.id, clone(session)]),
+    );
+    previewSides.value = response.sides;
+    previewValid.value = response.valid;
+  } catch (cause) {
+    previewValid.value = false;
+    previewError.value =
+      cause instanceof Error ? cause.message : "iBGP 双端候选配置预检失败";
+  } finally {
+    previewPending.value = false;
+    if (previewQueued) {
+      previewQueued = false;
+      schedulePreview();
+    }
+  }
+}
+
+watch(previewSignature, schedulePreview);
 watch(
   () => dashboard.value?.inventory.nodes,
   () => {
@@ -531,12 +610,10 @@ function handleAppReady(): void {
   void loadDomains();
 }
 
-onMounted(() => {
-  window.addEventListener("birdbox:app-ready", handleAppReady);
-});
-
+onMounted(() => window.addEventListener("birdbox:app-ready", handleAppReady));
 onBeforeUnmount(() => {
   window.removeEventListener("birdbox:app-ready", handleAppReady);
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
 });
 </script>
 
@@ -545,9 +622,9 @@ onBeforeUnmount(() => {
     <div class="section-heading">
       <div>
         <p class="eyebrow">INTERNAL BGP</p>
-        <h2 id="ibgpTitle">iBGP 域管理</h2>
+        <h2 id="ibgpTitle">iBGP 管理</h2>
         <p class="section-note">
-          用一个域维护 ASN、拓扑、节点角色和双向邻接配置。
+          域内节点默认不建立连接；请在画布中选择节点并手工建立双向邻接。
         </p>
       </div>
       <div class="ibgp-toolbar">
@@ -559,17 +636,22 @@ onBeforeUnmount(() => {
           <option :value="null">选择域</option>
           <option v-for="domain in domains" :key="domain.id" :value="domain.id">
             {{ domain.name }} · AS{{ domain.asn }}
-          </option></select
-        ><button class="secondary-button" type="button" @click="newDomain">
-          新建域</button
-        ><button
+          </option>
+        </select>
+        <button class="secondary-button" type="button" @click="newDomain">
+          新建域
+        </button>
+        <button
           class="primary-button"
           type="button"
-          :disabled="saving || !draft"
+          :disabled="
+            saving || previewPending || previewValid === false || !draft
+          "
           @click="saveDomain"
         >
-          {{ saving ? "正在保存" : "保存域" }}</button
-        ><button
+          {{ saving ? "正在保存" : "保存域" }}
+        </button>
+        <button
           v-if="selectedDomainId"
           class="text-danger-button"
           type="button"
@@ -588,72 +670,9 @@ onBeforeUnmount(() => {
         创建第一个域
       </button>
     </div>
-    <div v-else class="ibgp-grid">
+    <div v-else class="ibgp-layout">
       <section class="ibgp-canvas-panel">
-        <div class="panel-head">
-          <div>
-            <h3>域拓扑画布</h3>
-            <small
-              >{{
-                draft.topology === "full-mesh"
-                  ? "全网状"
-                  : draft.topology === "route-reflector"
-                    ? "Route Reflector"
-                    : "手工邻接"
-              }}
-              · {{ draft.members.length }} 个节点</small
-            >
-          </div>
-          <button
-            class="secondary-button compact-button"
-            type="button"
-            :disabled="layoutSaving || !draft.id"
-            @click="saveLayout"
-          >
-            {{ layoutSaving ? "保存中" : "保存位置" }}
-          </button>
-        </div>
-        <div
-          ref="canvas"
-          class="ibgp-canvas"
-          @pointermove="dragNode"
-          @pointerup="stopDrag"
-          @pointercancel="stopDrag"
-        >
-          <svg class="ibgp-edges" aria-hidden="true">
-            <line
-              v-for="edge in draft.adjacencies.filter((item) => item.enabled)"
-              :key="edge.id"
-              :x1="(draft.layout[edge.leftNodeId]?.x ?? 0) + 72"
-              :y1="(draft.layout[edge.leftNodeId]?.y ?? 0) + 34"
-              :x2="(draft.layout[edge.rightNodeId]?.x ?? 0) + 72"
-              :y2="(draft.layout[edge.rightNodeId]?.y ?? 0) + 34"
-            />
-          </svg>
-          <button
-            v-for="(node, index) in domainNodes(draft)"
-            :key="node.id"
-            class="ibgp-node"
-            :class="{ selected: selectedNodeId === node.id }"
-            type="button"
-            :style="{
-              left: `${defaultLayout(node.id, index).x}px`,
-              top: `${defaultLayout(node.id, index).y}px`,
-            }"
-            @pointerdown="startDrag($event, node.id)"
-            @click="selectedNodeId = node.id"
-          >
-            <strong>{{ node.name }}</strong
-            ><span>{{
-              draft.members.find((member) => member.nodeId === node.id)?.role ??
-              "member"
-            }}</span
-            ><small>{{ node.routerId }}</small>
-          </button>
-        </div>
-      </section>
-      <aside class="ibgp-editor-panel">
-        <div class="ibgp-form-grid">
+        <div class="ibgp-domain-strip">
           <div class="field">
             <label for="ibgpName">域名称</label
             ><input id="ibgpName" v-model.trim="draft.name" maxlength="80" />
@@ -668,378 +687,248 @@ onBeforeUnmount(() => {
               max="4294967295"
             />
           </div>
-          <div class="field">
-            <label>拓扑模式</label
-            ><select v-model="draft.topology" @change="rebuildLocalAdjacencies">
-              <option value="full-mesh">Full Mesh</option>
-              <option value="route-reflector">Route Reflector</option>
-              <option value="manual">Manual</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>地址族</label>
-            <div class="check-row">
-              <label
-                ><input v-model="draft.families" type="checkbox" value="ipv4" />
-                IPv4</label
-              ><label
-                ><input v-model="draft.families" type="checkbox" value="ipv6" />
-                IPv6</label
-              >
-            </div>
-          </div>
-          <div class="field full-width">
-            <label for="ibgpCluster">默认 Cluster ID</label
-            ><input
-              id="ibgpCluster"
-              v-model.trim="draft.defaultClusterId"
-              placeholder="可选，例如 10.0.0.254"
-            />
-          </div>
         </div>
-        <section v-if="selectedNode" class="ibgp-subsection">
-          <div class="subsection-head">
-            <h3>节点角色与地址</h3>
-            <span>{{ selectedNode.name }}</span>
-          </div>
-          <div class="ibgp-form-grid">
-            <div class="field">
-              <label>角色</label
-              ><select
-                :value="selectedMember?.role"
-                @change="
-                  setMember(
-                    'role',
-                    ($event.target as HTMLSelectElement)
-                      .value as IbgpMember['role'],
-                  )
-                "
-              >
-                <option value="member">普通成员</option>
-                <option value="reflector">Route Reflector</option>
-                <option value="client">RR Client</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>IPv4 地址</label
-              ><input
-                :value="selectedMember?.address4 ?? ''"
-                placeholder="自动使用 Router ID"
-                @input="
-                  setMember(
-                    'address4',
-                    ($event.target as HTMLInputElement).value || null,
-                  )
-                "
-              />
-            </div>
-            <div class="field">
-              <label>IPv6 地址</label
-              ><input
-                :value="selectedMember?.address6 ?? ''"
-                placeholder="可选"
-                @input="
-                  setMember(
-                    'address6',
-                    ($event.target as HTMLInputElement).value || null,
-                  )
-                "
-              />
-            </div>
-            <div class="field">
-              <label>节点 Cluster ID</label
-              ><input
-                :value="selectedMember?.clusterId ?? ''"
-                placeholder="继承域默认"
-                @input="
-                  setMember(
-                    'clusterId',
-                    ($event.target as HTMLInputElement).value || null,
-                  )
-                "
-              />
-            </div>
-          </div>
-        </section>
-        <section class="ibgp-subsection">
-          <div class="subsection-head">
-            <h3>快速选择邻接</h3>
-            <span>点击其它节点切换连接</span>
-          </div>
-          <div class="quick-node-list">
-            <button
-              v-for="node in domainNodes(draft)"
-              :key="node.id"
-              class="quick-node"
-              :class="{
-                active: draft.adjacencies.some(
-                  (item) =>
-                    item.enabled &&
-                    ((item.leftNodeId === selectedNodeId &&
-                      item.rightNodeId === node.id) ||
-                      (item.rightNodeId === selectedNodeId &&
-                        item.leftNodeId === node.id)),
-                ),
-              }"
-              type="button"
-              :disabled="node.id === selectedNodeId"
-              @click="toggleConnection(node.id)"
+        <div class="panel-head">
+          <div>
+            <h3>手工邻接画布</h3>
+            <small
+              >{{ draft.members.length }} 个节点 ·
+              {{ draft.adjacencies.length }} 条双向连接</small
             >
-              {{ node.name
-              }}<span>{{
-                node.id === selectedNodeId
-                  ? "当前节点"
-                  : draft.adjacencies.some(
-                        (item) =>
-                          item.enabled &&
-                          ((item.leftNodeId === selectedNodeId &&
-                            item.rightNodeId === node.id) ||
-                            (item.rightNodeId === selectedNodeId &&
-                              item.leftNodeId === node.id)),
-                      )
-                    ? "已连接"
-                    : "未连接"
-              }}</span>
-            </button>
           </div>
-        </section>
-        <section v-if="selectedAdjacency" class="ibgp-subsection">
+          <button
+            class="secondary-button compact-button"
+            type="button"
+            :disabled="layoutSaving || !selectedDomainId"
+            @click="saveLayout"
+          >
+            {{ layoutSaving ? "保存中" : "保存位置" }}
+          </button>
+        </div>
+        <div
+          ref="canvas"
+          class="ibgp-canvas"
+          @pointermove="dragNode"
+          @pointerup="stopDrag"
+          @pointercancel="stopDrag"
+        >
+          <svg class="ibgp-edges" aria-hidden="true">
+            <line
+              v-for="edge in draft.adjacencies"
+              :key="edge.id"
+              :class="{ selected: selectedAdjacencyId === edge.id }"
+              :x1="(draft.layout[edge.leftNodeId]?.x ?? 0) + 72"
+              :y1="(draft.layout[edge.leftNodeId]?.y ?? 0) + 34"
+              :x2="(draft.layout[edge.rightNodeId]?.x ?? 0) + 72"
+              :y2="(draft.layout[edge.rightNodeId]?.y ?? 0) + 34"
+            />
+          </svg>
+          <button
+            v-for="(node, index) in domainNodes(draft)"
+            :key="node.id"
+            class="ibgp-node"
+            :class="{ selected: selectedNodeId === node.id }"
+            type="button"
+            :style="{
+              left: `${layoutFor(node.id, index).x}px`,
+              top: `${layoutFor(node.id, index).y}px`,
+            }"
+            @pointerdown="startDrag($event, node.id)"
+            @click="selectNode(node.id)"
+          >
+            <strong>{{ node.name }}</strong
+            ><span
+              >{{
+                draft.adjacencies.filter(
+                  (item) =>
+                    item.leftNodeId === node.id || item.rightNodeId === node.id,
+                ).length
+              }}
+              条连接</span
+            ><small>{{
+              draft.members.find((member) => member.nodeId === node.id)?.address
+            }}</small>
+          </button>
+        </div>
+      </section>
+
+      <section class="ibgp-connection-panel">
+        <div class="ibgp-connection-controls">
           <div class="subsection-head">
-            <h3>双向会话编辑</h3>
-            <div class="side-tabs">
-              <button
-                type="button"
-                :class="{ active: activeSide === 'left' }"
-                @click="activeSide = 'left'"
-              >
-                {{
-                  nodes.find(
-                    (node) => node.id === selectedAdjacency?.leftNodeId,
-                  )?.name
-                }}
-                本端</button
-              ><button
-                type="button"
-                :class="{ active: activeSide === 'right' }"
-                @click="activeSide = 'right'"
-              >
-                {{
-                  nodes.find(
-                    (node) => node.id === selectedAdjacency?.rightNodeId,
-                  )?.name
-                }}
-                本端
-              </button>
+            <div>
+              <h3>手工连接</h3>
+              <span v-if="selectedNode">从 {{ selectedNode.name }} 选择对端节点</span>
+              <span v-else>请先在画布中选择节点</span>
             </div>
           </div>
-          <div v-if="activeSession" class="ibgp-form-grid">
-            <div class="field">
-              <label>协议名称</label
+          <div v-if="selectedNode" class="field ibgp-transport-field">
+            <label>节点连接地址</label
               ><input
-                :value="activeSession.protocolName"
+                :value="selectedMember?.address ?? ''"
+                placeholder="IPv4 或 IPv6 地址"
                 @input="
-                  updateSessionField(
-                    'protocolName',
+                  setMember(
+                    'address',
                     ($event.target as HTMLInputElement).value,
                   )
                 "
               />
-            </div>
-            <div class="field">
-              <label>本地地址</label
-              ><input
-                :value="activeSession.localAddress ?? ''"
-                placeholder="自动选择"
-                @input="
-                  updateSessionField(
-                    'localAddress',
-                    ($event.target as HTMLInputElement).value || null,
-                  )
-                "
-              />
-            </div>
-            <div class="field">
-              <label>连接方式</label
-              ><select
-                :value="activeSession.bgp.connectionMode"
-                @change="
-                  updateSessionBgp(
-                    'connectionMode',
-                    ($event.target as HTMLSelectElement)
-                      .value as BgpSession['bgp']['connectionMode'],
-                  )
-                "
-              >
-                <option value="multihop">Multihop</option>
-                <option value="direct">Direct</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>Route Reflector</label
-              ><label class="toggle-line"
-                ><input
-                  type="checkbox"
-                  :checked="activeSession.bgp.rrClient"
-                  @change="
-                    updateSessionBgp(
-                      'rrClient',
-                      ($event.target as HTMLInputElement).checked,
-                    )
-                  "
-                />
-                rr client</label
-              >
-            </div>
-            <div class="field">
-              <label>Cluster ID</label
-              ><input
-                :value="activeSession.bgp.rrClusterId ?? ''"
-                @input="
-                  updateSessionBgp(
-                    'rrClusterId',
-                    ($event.target as HTMLInputElement).value || null,
-                  )
-                "
-              />
-            </div>
-            <div class="field">
-              <label>地址族</label
-              ><select v-model="activeFamily">
-                <option value="ipv4">IPv4</option>
-                <option value="ipv6">IPv6</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>策略方向</label
-              ><select v-model="activePolicyDirection">
-                <option value="import">Import</option>
-                <option value="export">Export</option>
-              </select>
-            </div>
-            <div class="field">
-              <label>策略模式</label
-              ><select
-                :value="
-                  activeSession.channels[activeFamily][
-                    activePolicyDirection === 'import'
-                      ? 'importPolicy'
-                      : 'exportPolicy'
-                  ].mode
-                "
-                @change="
-                  updatePolicyMode(
-                    activePolicyDirection,
-                    ($event.target as HTMLSelectElement).value as
-                      | 'form'
-                      | 'combined'
-                      | 'custom',
-                  )
-                "
-              >
-                <option value="form">表单</option>
-                <option value="combined">Function + 表单</option>
-                <option value="custom">Filter</option>
-              </select>
-            </div>
-            <div class="field">
-              <label
-                >{{
-                  activePolicyDirection === "import" ? "Import" : "Export"
-                }}
-                动作</label
-              ><select
-                :value="
-                  activeSession.channels[activeFamily][
-                    activePolicyDirection === 'import'
-                      ? 'importPolicy'
-                      : 'exportPolicy'
-                  ].formAction
-                "
-                @change="
-                  updatePolicy(
-                    activePolicyDirection,
-                    ($event.target as HTMLSelectElement).value as
-                      | 'all'
-                      | 'none',
-                  )
-                "
-              >
-                <option value="all">all</option>
-                <option value="none">none</option>
-                <option v-if="activePolicyDirection === 'export'" value="cidr">
-                  CIDR Define
-                </option>
-              </select>
-            </div>
+          </div>
+          <div class="field ibgp-connection-search">
+            <label for="ibgpConnectionSearch">搜索节点</label>
+            <input
+              id="ibgpConnectionSearch"
+              v-model.trim="connectionSearch"
+              type="search"
+              placeholder="名称、ID 或连接地址"
+              :disabled="!selectedNode"
+            />
+          </div>
+        </div>
+        <div class="quick-node-list" role="list" aria-label="可连接节点">
             <div
-              v-if="
-                activeSession.channels[activeFamily][
-                  activePolicyDirection === 'import'
-                    ? 'importPolicy'
-                    : 'exportPolicy'
-                ].mode === 'combined'
-              "
-              class="field full-width"
+              v-for="node in connectionCandidates"
+              :key="node.id"
+              class="connection-list-row"
+              role="listitem"
             >
-              <label>快捷加入 Function</label
-              ><select
-                @change="
-                  addPolicyFunction(
-                    activePolicyDirection,
-                    ($event.target as HTMLSelectElement).value,
-                  )
-                "
+              <button
+                class="quick-node"
+                :class="{
+                  active: connectionTo(node.id)?.id === selectedAdjacencyId,
+                }"
+                type="button"
+                @click="connectNode(node.id)"
               >
-                <option value="">选择 Function</option>
-                <option
-                  v-for="item in dashboard?.functions ?? []"
-                  :key="item.id"
-                  :value="item.id"
-                >
-                  {{ item.name }}
-                </option>
-              </select>
+                <span><strong>{{ node.name }}</strong><small>{{
+                  draft.members.find((member) => member.nodeId === node.id)?.address
+                }}</small></span>
+                <span>{{
+                  connectionTo(node.id) ? "编辑双端配置" : "建立连接"
+                }}</span></button
+              ><button
+                v-if="connectionTo(node.id)"
+                class="compact-icon text-danger-button"
+                type="button"
+                title="移除连接"
+                aria-label="移除连接"
+                @click="removeConnection(connectionTo(node.id)!)"
+              >
+                ×
+              </button>
             </div>
-            <div
-              v-if="
-                activeSession.channels[activeFamily][
-                  activePolicyDirection === 'import'
-                    ? 'importPolicy'
-                    : 'exportPolicy'
-                ].mode === 'custom'
-              "
-              class="field full-width"
-            >
-              <label>Filter</label
-              ><select
-                :value="
-                  activeSession.channels[activeFamily][
-                    activePolicyDirection === 'import'
-                      ? 'importPolicy'
-                      : 'exportPolicy'
-                  ].filterId ?? ''
-                "
-                @change="
-                  updatePolicyFilter(
-                    activePolicyDirection,
-                    ($event.target as HTMLSelectElement).value,
-                  )
-                "
-              >
-                <option value="">选择 Filter</option>
-                <option
-                  v-for="item in dashboard?.filters ?? []"
-                  :key="item.id"
-                  :value="item.id"
-                >
-                  {{ item.name }}
-                </option>
-              </select>
+            <div v-if="selectedNode && !connectionCandidates.length" class="empty-cell">
+              没有匹配的节点
             </div>
           </div>
-          <p v-else class="field-help">该邻接尚未生成会话，请先保存域。</p>
-        </section>
-      </aside>
+      </section>
+
+      <section v-if="selectedAdjacency" class="ibgp-pair-workspace">
+        <div class="subsection-head ibgp-pair-heading">
+          <div>
+            <h3>双端会话配置</h3>
+            <span>{{ leftNode?.name }} ↔ {{ rightNode?.name }}</span>
+          </div>
+          <span
+            :class="{
+              'preview-valid': previewValid,
+              'preview-invalid': previewValid === false,
+            }"
+            >{{
+              previewPending
+                ? "正在实时预检"
+                : previewValid === true
+                  ? "双方检查通过"
+                  : previewValid === false
+                    ? "候选配置有误"
+                    : "等待预检"
+            }}</span
+          >
+        </div>
+        <p v-if="previewError" class="form-error" role="alert">
+          {{ previewError }}
+        </p>
+        <div class="ibgp-session-grid">
+          <div v-if="leftSession && leftPeer && leftNode" class="ibgp-side-column">
+            <IbgpSessionSideEditor
+              :model-value="leftSession"
+              :node-name="leftNode.name"
+              :peer="leftPeer"
+              :defines="inventoryDefines"
+              :functions="inventoryFunctions"
+              :filters="inventoryFilters"
+              @update:model-value="
+                sessionDrafts[selectedAdjacency.leftSessionId] = $event
+              "
+              @open-policy-action="
+                openPolicyAction(
+                  selectedAdjacency.leftSessionId,
+                  $event.family,
+                  $event.direction,
+                )
+              "
+            />
+            <section class="ibgp-preview-section">
+              <div class="tabs ibgp-preview-tabs" role="tablist">
+                <button class="tab active" type="button" role="tab" aria-selected="true">
+                  节点配置
+                </button>
+                <span>{{ leftPreview?.validation.ok ? "检查通过" : "等待检查" }}</span>
+              </div>
+              <div class="tab-panels ibgp-preview-panels">
+                <pre class="tab-panel active">{{ leftPreview?.config || "# 正在生成候选配置" }}</pre>
+              </div>
+              <small v-if="leftPreview && !leftPreview.validation.ok" class="ibgp-preview-error">{{
+                leftPreview.validation.stderr || leftPreview.validation.stdout
+              }}</small>
+            </section>
+          </div>
+
+          <div v-if="rightSession && rightPeer && rightNode" class="ibgp-side-column">
+            <IbgpSessionSideEditor
+              :model-value="rightSession"
+              :node-name="rightNode.name"
+              :peer="rightPeer"
+              :defines="inventoryDefines"
+              :functions="inventoryFunctions"
+              :filters="inventoryFilters"
+              @update:model-value="
+                sessionDrafts[selectedAdjacency.rightSessionId] = $event
+              "
+              @open-policy-action="
+                openPolicyAction(
+                  selectedAdjacency.rightSessionId,
+                  $event.family,
+                  $event.direction,
+                )
+              "
+            />
+            <section class="ibgp-preview-section">
+              <div class="tabs ibgp-preview-tabs" role="tablist">
+                <button class="tab active" type="button" role="tab" aria-selected="true">
+                  节点配置
+                </button>
+                <span>{{ rightPreview?.validation.ok ? "检查通过" : "等待检查" }}</span>
+              </div>
+              <div class="tab-panels ibgp-preview-panels">
+                <pre class="tab-panel active">{{ rightPreview?.config || "# 正在生成候选配置" }}</pre>
+              </div>
+              <small v-if="rightPreview && !rightPreview.validation.ok" class="ibgp-preview-error">{{
+                rightPreview.validation.stderr || rightPreview.validation.stdout
+              }}</small>
+            </section>
+          </div>
+        </div>
+        <p v-if="!leftSession || !rightSession" class="field-help">
+          正在生成双方会话草稿…
+        </p>
+      </section>
     </div>
   </section>
+  <PolicyActionDialog
+    ref="policyActionDialog"
+    :local-asn="draft?.asn ?? null"
+    :node-id="policySession?.nodeId ?? null"
+    @saved="insertPolicyFunction"
+  />
 </template>

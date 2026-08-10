@@ -8,7 +8,7 @@ import type {
 import { birdIdentifiers } from "./bird-identifiers.js";
 import {
   assertValidation,
-  channelUsesCrossFamilyTransport,
+  channelRequiresExtendedNextHop,
   ipFamily,
   isLinkLocalIPv6,
   normalizeNode,
@@ -179,8 +179,8 @@ export function validateInventory(inputValue: unknown): Inventory {
     for (const family of FAMILIES) {
       const channel = session.channels[family];
       assertValidation(
-        !channel.enabled || !channelUsesCrossFamilyTransport(peer.address, family) || session.bgp.capabilities !== "off",
-        `会话 ${session.protocolName} 的 ${family.toUpperCase()} Channel 使用跨地址族邻居时不能关闭 BGP Capabilities`,
+        !channel.enabled || !channelRequiresExtendedNextHop(peer.address, family) || session.bgp.capabilities !== "off",
+        `会话 ${session.protocolName} 的 IPv4 Channel 通过 IPv6 邻居传输时不能关闭 BGP Capabilities`,
       );
       const expectedDefineType = family === "ipv4" ? "cidr4" : "cidr6";
       const exportDefine = channel.exportDefineId === null ? null : defineMap.get(channel.exportDefineId);
@@ -249,7 +249,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   }
 
   return {
-    version: 21,
+    version: 23,
     nodes,
     peers,
     defines,

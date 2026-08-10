@@ -1,4 +1,4 @@
-import type { ChangeEvent } from "../packages/contracts/src/api.js";
+import type { ChangeEvent, IbgpPreviewSide } from "../packages/contracts/src/api.js";
 import type {
   BgpSession,
   Inventory,
@@ -30,7 +30,7 @@ import {
 } from "./inventory-domain.js";
 import type { NodeOnboardingService } from "./node-onboarding-service.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
-import { desiredAdjacencies, expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
+import { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
 import type { SessionApplicationService } from "./session-application-service.js";
 import type { InventoryStore } from "./store.js";
 
@@ -68,27 +68,23 @@ export function createResourceApplicationService(
     const base = { ...(previous ?? {}), ...input } as Record<string, unknown>;
     const members = Array.isArray(base.members) ? base.members : previous?.members ?? [];
     const requested = Array.isArray(base.adjacencies) ? base.adjacencies : [];
-    const topology = base.topology ?? previous?.topology ?? "full-mesh";
     const seed = normalizeIbgpDomain({
       ...base,
       id: previous?.id ?? base.id ?? makeId("ibgp"),
       members,
-      topology,
       adjacencies: [],
     });
     const previousByPair = new Map((previous?.adjacencies ?? []).map((adjacency) => [
       `${adjacency.leftNodeId}:${adjacency.rightNodeId}`,
       adjacency,
     ]));
-    const pairs = topology === "manual"
-      ? requested
-      : desiredAdjacencies(seed);
+    const pairs = requested;
     const adjacencies = pairs.map((value, index) => {
       const pair = value as Record<string, unknown>;
       const leftNodeId = String(pair.leftNodeId ?? "");
       const rightNodeId = String(pair.rightNodeId ?? "");
       const old = previousByPair.get(`${leftNodeId}:${rightNodeId}`) ?? previousByPair.get(`${rightNodeId}:${leftNodeId}`);
-      const rawId = old?.id ?? makeId("ibgp_adj");
+      const rawId = old?.id ?? pair.id ?? makeId("ibgp_adj");
       const id = String(rawId || `${seed.id}_adj_${index + 1}`);
       return {
         id,
@@ -110,9 +106,49 @@ export function createResourceApplicationService(
       const item = value as Record<string, unknown>;
       const id = String(item.id ?? "");
       const previous = byId.get(id);
-      if (previous) byId.set(id, normalizeSession({ ...previous, ...item, id }));
+      if (previous) {
+        byId.set(id, normalizeSession({
+          ...previous,
+          ...item,
+          id,
+          nodeId: previous.nodeId,
+          peerId: previous.peerId,
+          localAsn: previous.localAsn,
+          sessionType: "ibgp",
+          managedBy: previous.managedBy,
+        }));
+      }
     }
     return [...byId.values()];
+  }
+
+  function expandDomainWithUpdates(
+    domain: IbgpDomain,
+    nodes: ManagedNode[],
+    body: Record<string, unknown>,
+    existing: BgpSession[] = [],
+  ) {
+    const initial = expandIbgpDomain(domain, nodes, existing);
+    return expandIbgpDomain(domain, nodes, sessionUpdates(body, initial.sessions));
+  }
+
+  function bgpProtocolBlock(config: string, protocolName: string): string {
+    const marker = `protocol bgp ${protocolName} {`;
+    const start = config.indexOf(marker);
+    if (start < 0) return "";
+    let depth = 0;
+    let opened = false;
+    for (let index = start; index < config.length; index += 1) {
+      const character = config[index];
+      if (character === "{") {
+        depth += 1;
+        opened = true;
+      } else if (character === "}") {
+        depth -= 1;
+        if (opened && depth === 0) return config.slice(start, index + 1);
+      }
+    }
+    return config.slice(start);
   }
 
   async function preflightPolicyResource(
@@ -464,11 +500,64 @@ export function createResourceApplicationService(
     return { status: 200, payload: { domains: state.ibgpDomains, inventory: state } };
   },
 
+  async previewIbgpDomain(body) {
+    return withDeploymentLock(async () => {
+      const current = await store.read();
+      const requestedId = body.id === undefined || body.id === "" ? null : String(body.id);
+      const previous = requestedId === null ? null : current.ibgpDomains.find((item) => item.id === requestedId) ?? null;
+      const domain = materializeDomain({ ...body, ...(previous ? { id: previous.id } : { id: requestedId ?? makeId("ibgp") }) }, previous);
+      assertDomainUnique(current, domain.id, domain.name, previous?.id ?? null);
+      const oldSessions = previous
+        ? current.sessions.filter((session) => session.managedBy?.domainId === domain.id)
+        : [];
+      const candidate = structuredClone(current);
+      const domainIndex = candidate.ibgpDomains.findIndex((item) => item.id === domain.id);
+      if (domainIndex >= 0) candidate.ibgpDomains.splice(domainIndex, 1);
+      candidate.peers = candidate.peers.filter((peer) => peer.managedBy?.domainId !== domain.id);
+      candidate.sessions = candidate.sessions.filter((session) => session.managedBy?.domainId !== domain.id);
+      const expanded = expandDomainWithUpdates(domain, candidate.nodes, body, oldSessions);
+      candidate.ibgpDomains.push(domain);
+      candidate.peers.push(...expanded.peers);
+      candidate.sessions.push(...expanded.sessions);
+      const inventory = validateInventory(candidate);
+      const configs = new Map<string, { config: string; validation: Awaited<ReturnType<typeof stageAndValidate>> }>();
+      for (const nodeId of domainNodeIds(domain)) {
+        const node = findNode(inventory, nodeId);
+        const config = configForNode(inventory, node);
+        const validation = await stageAndValidate(node, config);
+        configs.set(node.id, { config, validation });
+      }
+      const sides: IbgpPreviewSide[] = expanded.sessions.map((session) => {
+        const node = findNode(inventory, session.nodeId);
+        const entry = configs.get(node.id);
+        const adjacency = domain.adjacencies.find((item) => item.id === session.managedBy?.adjacencyId);
+        const side = adjacency?.leftSessionId === session.id ? "left" : "right";
+        return {
+          side,
+          nodeId: node.id,
+          nodeName: node.name,
+          session,
+          config: bgpProtocolBlock(entry?.config ?? "", session.protocolName),
+          validation: entry?.validation ?? { ok: false, stdout: "", stderr: "未执行配置检查", code: "VALIDATION_NOT_RUN" },
+        };
+      });
+      return {
+        status: 200,
+        payload: {
+          valid: [...configs.values()].every((entry) => entry.validation.ok),
+          domain,
+          sessions: expanded.sessions,
+          sides,
+        },
+      };
+    });
+  },
+
   async createIbgpDomain(body) {
     const domain = materializeDomain({ ...body, id: body.id ?? makeId("ibgp") });
     const { state, deployment } = await mutateAndApply((draft) => {
       assertDomainUnique(draft, domain.id, domain.name);
-      const expanded = expandIbgpDomain(domain, draft.nodes);
+      const expanded = expandDomainWithUpdates(domain, draft.nodes, body);
       draft.ibgpDomains.push(domain);
       draft.peers.push(...expanded.peers);
       draft.sessions.push(...expanded.sessions);
@@ -491,7 +580,7 @@ export function createResourceApplicationService(
       const preserved = sessionUpdates(body, oldSessions);
       draft.peers = draft.peers.filter((peer) => peer.managedBy?.domainId !== domainId);
       draft.sessions = draft.sessions.filter((session) => session.managedBy?.domainId !== domainId);
-      const expanded = expandIbgpDomain(updated, draft.nodes, preserved);
+      const expanded = expandDomainWithUpdates(updated, draft.nodes, body, preserved);
       draft.ibgpDomains[index] = updated;
       draft.peers.push(...expanded.peers);
       draft.sessions.push(...expanded.sessions);

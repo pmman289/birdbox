@@ -50,7 +50,7 @@ function normalizeInventory(value: unknown): Inventory {
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 21;
+const CURRENT_INVENTORY_VERSION = 23;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -83,6 +83,19 @@ function upgradeResourceOrder(resources: unknown): LegacyRecord[] {
       const { order, ...upgraded } = resource;
       return upgraded;
     });
+}
+
+function upgradeIbgpDomains(domainsInput: unknown, sourceVersion: unknown): LegacyRecord[] {
+  return recordArray(domainsInput, "iBGP 域").map((domain) => {
+    const members = recordArray(domain.members, "iBGP 域成员").map((member) => {
+      if (Number(sourceVersion) >= 23) return { ...member };
+      const { address4, address6, ...rest } = member;
+      return { ...rest, address: member.address ?? address4 ?? address6 };
+    });
+    if (Number(sourceVersion) >= 23) return { ...domain, members };
+    const { families, ...rest } = domain;
+    return { ...rest, members };
+  });
 }
 
 function upgradeChannel(channel: unknown, defaults: LegacyRecord = {}): LegacyRecord {
@@ -223,7 +236,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
       rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
       staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
       sessions: migrated.sessions,
-      ibgpDomains: recordArray(source.ibgpDomains, "iBGP 域").map((item) => ({ ...item })),
+      ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
     };
   }
   const prefixLists: LegacyRecord[] = recordArray(source.prefixLists, "历史 Prefix List").map((item) => ({
@@ -289,7 +302,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
     rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
     staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
     sessions: migrated.sessions,
-    ibgpDomains: recordArray(source.ibgpDomains, "iBGP 域").map((item) => ({ ...item })),
+    ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
   };
 }
 

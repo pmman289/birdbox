@@ -96,6 +96,7 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.delete<{ Params: { sessionId: string } }>("/api/sessions/:sessionId", async (request, reply) => jsonReply(reply, await options.service.deleteSession(validId(request.params.sessionId))));
 
   app.get("/api/ibgp-domains", async (_request, reply) => jsonReply(reply, await options.service.listIbgpDomains()));
+  app.post("/api/ibgp-domains/preview", async (request, reply) => jsonReply(reply, await options.service.previewIbgpDomain(jsonBody(request))));
   app.post("/api/ibgp-domains", async (request, reply) => jsonReply(reply, await options.service.createIbgpDomain(jsonBody(request))));
   app.put<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.updateIbgpDomain(validId(request.params.domainId), jsonBody(request))));
   app.delete<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteIbgpDomain(validId(request.params.domainId))));
