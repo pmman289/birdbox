@@ -365,12 +365,11 @@ form.validation-attempted .channel-enable-row.field-invalid h3 { color: var(--re
 .ebgp-canvas-node:active { cursor: grabbing; }
 .ebgp-local-node { width: 248px; height: 116px; }
 .ebgp-local-node.online { border-color: var(--green-border); box-shadow: 0 0 0 3px rgba(24, 114, 72, .07), var(--shadow-soft); }
-.ebgp-peer-node { width: 240px; height: 104px; }
+.ebgp-peer-node { width: 260px; height: 144px; }
 .ebgp-peer-node:hover, .ebgp-peer-node.selected { border-color: var(--green); background: var(--surface-hover); box-shadow: 0 0 0 2px rgba(25, 113, 73, .09); }
 .ebgp-canvas-node-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ebgp-canvas-node strong { display: block; overflow-wrap: anywhere; font-size: 13px; line-height: 1.25; }
 .ebgp-canvas-node small { display: block; color: var(--muted); font: 10px/1.25 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-.ebgp-peer-node strong { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .topology-empty, .ebgp-canvas-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; pointer-events: none; }
 .ebgp-canvas-empty { left: 310px; }
 

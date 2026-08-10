@@ -40,7 +40,7 @@ await fs.writeFile(
       advertisePrefix: "198.51.100.0/24",
     },
     remote: {
-      name: "Documentation Peer",
+      name: "Documentation Peer With An Intentionally Long Remote Name",
       address: "192.0.2.2",
       asn: 64513,
       port: 179,

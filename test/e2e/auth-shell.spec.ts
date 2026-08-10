@@ -31,7 +31,13 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#dashboardOverviewApp .ebgp-canvas")).toBeVisible();
   await expect(page.locator("#dashboardOverviewApp .ebgp-local-node")).toContainText("E2E Router");
   const peerCanvasNode = page.locator("#dashboardOverviewApp .ebgp-peer-node");
-  await expect(peerCanvasNode).toContainText("Documentation Peer");
+  await expect(peerCanvasNode).toContainText("Documentation Peer With An Intentionally Long Remote Name");
+  const peerNameLayout = await peerCanvasNode.locator("strong").evaluate((element) => ({
+    clipped: element.scrollHeight > element.clientHeight,
+    lineClamp: getComputedStyle(element).webkitLineClamp,
+  }));
+  expect(peerNameLayout.clipped).toBe(false);
+  expect(peerNameLayout.lineClamp).toBe("none");
   const peerBox = await peerCanvasNode.boundingBox();
   if (peerBox) {
     await page.mouse.move(peerBox.x + 20, peerBox.y + 20);

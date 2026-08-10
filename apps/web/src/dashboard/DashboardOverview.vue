@@ -24,6 +24,9 @@ interface CanvasDrag {
 }
 
 const ROOT_KEY = "__local__";
+const PEER_CARD_WIDTH = 260;
+const PEER_CARD_HEIGHT = 144;
+const PEER_ROW_HEIGHT = 164;
 const board = ref<HTMLElement | null>(null);
 const canvasLayout = ref<Record<string, CanvasPosition>>({});
 const dragging = ref<CanvasDrag | null>(null);
@@ -32,17 +35,22 @@ const compactCanvas = ref(canvasMedia.matches);
 let suppressPeerClick = false;
 
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
-const peers = computed(() => dashboard.value?.peers ?? []);
+const peers = computed(() => (dashboard.value?.peers ?? []).filter((peer) =>
+  peer.managedBy?.kind !== "ibgp-domain" && peer.session?.sessionType !== "ibgp",
+));
 const node = computed(() => dashboard.value?.node ?? null);
 const selectedNodeId = computed(() => dashboard.value?.selection.nodeId ?? "");
-const selectedPeerId = computed(() => dashboard.value?.selection.peerId ?? "");
-const selectedPeer = computed(() => dashboard.value?.selectedPeer ?? null);
+const selectedPeerId = computed(() => {
+  const peerId = dashboard.value?.selection.peerId ?? "";
+  return peers.value.some((peer) => peer.id === peerId) ? peerId : "";
+});
+const selectedPeer = computed(() => peers.value.find((peer) => peer.id === selectedPeerId.value) ?? null);
 const boardWidth = computed(() => compactCanvas.value
   ? 360
-  : Math.max(760, 360 + Math.min(Math.max(peers.value.length, 1), 4) * 265));
+  : Math.max(760, 360 + Math.min(Math.max(peers.value.length, 1), 4) * 285));
 const boardHeight = computed(() => compactCanvas.value
-  ? Math.max(410, 175 + peers.value.length * 128)
-  : Math.max(410, 70 + Math.ceil(Math.max(peers.value.length, 1) / 4) * 128));
+  ? Math.max(410, 175 + peers.value.length * PEER_ROW_HEIGHT)
+  : Math.max(410, 70 + Math.ceil(Math.max(peers.value.length, 1) / 4) * PEER_ROW_HEIGHT));
 const nodeOnline = computed(() => Boolean(dashboard.value?.runtime?.reachable && dashboard.value.runtime.bird2));
 const updatedAtLabel = computed(() => updatedAt.value === null
   ? "尚未刷新"
@@ -93,18 +101,18 @@ function defaultPosition(key: string, index: number): CanvasPosition {
   if (compactCanvas.value) {
     return key === ROOT_KEY
       ? { x: Math.round((boardWidth.value - 248) / 2), y: 28 }
-      : { x: Math.round((boardWidth.value - 240) / 2), y: 174 + index * 128 };
+      : { x: Math.round((boardWidth.value - PEER_CARD_WIDTH) / 2), y: 174 + index * PEER_ROW_HEIGHT };
   }
   if (key === ROOT_KEY) return { x: 42, y: Math.max(42, Math.round(boardHeight.value / 2 - 58)) };
   return {
-    x: 350 + (index % 4) * 265,
-    y: 42 + Math.floor(index / 4) * 128,
+    x: 350 + (index % 4) * 285,
+    y: 42 + Math.floor(index / 4) * PEER_ROW_HEIGHT,
   };
 }
 
 function clampPosition(key: string, value: CanvasPosition): CanvasPosition {
-  const width = key === ROOT_KEY ? 248 : 240;
-  const height = key === ROOT_KEY ? 116 : 104;
+  const width = key === ROOT_KEY ? 248 : PEER_CARD_WIDTH;
+  const height = key === ROOT_KEY ? 116 : PEER_CARD_HEIGHT;
   return {
     x: Math.max(8, Math.min(Math.round(value.x), boardWidth.value - width - 8)),
     y: Math.max(8, Math.min(Math.round(value.y), boardHeight.value - height - 8)),
@@ -263,8 +271,8 @@ onBeforeUnmount(() => canvasMedia.removeEventListener("change", handleCanvasMedi
               }"
               :x1="positionFor(ROOT_KEY).x + 124"
               :y1="positionFor(ROOT_KEY).y + 58"
-              :x2="positionFor(peer.id, index).x + 120"
-              :y2="positionFor(peer.id, index).y + 52"
+              :x2="positionFor(peer.id, index).x + PEER_CARD_WIDTH / 2"
+              :y2="positionFor(peer.id, index).y + PEER_CARD_HEIGHT / 2"
             />
           </svg>
 
