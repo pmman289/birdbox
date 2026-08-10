@@ -35,4 +35,9 @@ export interface MutationService {
   previewSession(body: Record<string, unknown>): Promise<MutationResult>;
   applySession(body: Record<string, unknown>): Promise<MutationResult>;
   deleteSession(sessionId: string): Promise<MutationResult>;
+  listIbgpDomains(): Promise<MutationResult>;
+  createIbgpDomain(body: Record<string, unknown>): Promise<MutationResult>;
+  updateIbgpDomain(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
+  deleteIbgpDomain(domainId: string): Promise<MutationResult>;
+  updateIbgpDomainLayout(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
 }

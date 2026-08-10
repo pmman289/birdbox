@@ -928,3 +928,52 @@ dialog form { padding: 22px; }
     transition-duration: .01ms !important;
   }
 }
+
+.ibgp-workspace { padding-top: 4px; }
+.domain-managed-notice { display: grid; gap: 5px; margin: 14px 0; padding: 14px; color: var(--ink-soft); background: color-mix(in srgb, var(--green) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line)); border-radius: 6px; }
+.domain-managed-notice strong { color: var(--ink); font-size: 13px; }
+.domain-managed-notice span { color: var(--muted); font-size: 12px; }
+.ibgp-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ibgp-toolbar select { min-width: 180px; }
+.ibgp-grid { display: grid; grid-template-columns: minmax(440px, 1.1fr) minmax(420px, .9fr); gap: 22px; align-items: start; }
+.ibgp-canvas-panel, .ibgp-editor-panel { min-width: 0; border-top: 1px solid var(--line); padding-top: 16px; }
+.ibgp-canvas-panel { position: sticky; top: 18px; }
+.panel-head, .subsection-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.panel-head h3, .subsection-head h3 { margin: 0; font-size: 15px; }
+.panel-head small, .subsection-head span { color: var(--muted); font-size: 11px; }
+.compact-button { min-height: 30px; padding: 0 10px; }
+.ibgp-canvas { position: relative; min-height: 480px; margin-top: 14px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background-color: var(--surface-soft); background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 22px 22px; }
+.ibgp-edges { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.ibgp-edges line { stroke: var(--green); stroke-width: 2; stroke-opacity: .45; }
+.ibgp-node { position: absolute; z-index: 1; width: 144px; min-height: 68px; display: grid; gap: 3px; align-content: center; padding: 10px 12px; text-align: left; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 3px 12px rgb(0 0 0 / 10%); cursor: grab; touch-action: none; }
+.ibgp-node:active { cursor: grabbing; }
+.ibgp-node.selected { border-color: var(--green); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 25%, transparent); }
+.ibgp-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ibgp-node span { color: var(--green); font-size: 11px; text-transform: capitalize; }
+.ibgp-node small { color: var(--muted); font-size: 10px; }
+.ibgp-editor-panel { display: grid; gap: 18px; }
+.ibgp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ibgp-form-grid .full-width { grid-column: 1 / -1; }
+.ibgp-subsection { padding-top: 15px; border-top: 1px solid var(--line); }
+.subsection-head { margin-bottom: 12px; }
+.check-row { display: flex; align-items: center; gap: 12px; min-height: 38px; }
+.check-row label, .toggle-line { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: 12px; }
+.quick-node-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.quick-node { display: flex; justify-content: space-between; gap: 8px; padding: 9px 10px; color: var(--ink-soft); text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+.quick-node:hover:not(:disabled), .quick-node.active { color: var(--ink); border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
+.quick-node:disabled { opacity: .55; cursor: default; }
+.quick-node span { color: var(--muted); font-size: 10px; }
+.side-tabs { display: flex; gap: 4px; }
+.side-tabs button { padding: 5px 8px; color: var(--muted); background: transparent; border: 0; border-bottom: 2px solid transparent; cursor: pointer; font-size: 11px; }
+.side-tabs button.active { color: var(--ink); border-bottom-color: var(--green); }
+
+@media (max-width: 980px) {
+  .ibgp-grid { grid-template-columns: 1fr; }
+  .ibgp-canvas-panel { position: static; }
+}
+@media (max-width: 620px) {
+  .ibgp-form-grid { grid-template-columns: 1fr; }
+  .ibgp-form-grid .full-width { grid-column: 1; }
+  .ibgp-canvas { min-height: 420px; overflow: auto; }
+  .quick-node-list { grid-template-columns: 1fr; }
+}

@@ -200,6 +200,10 @@ function normalizeBgpOptions(inputValue: unknown, legacyMultihop: unknown): BgpO
   const localRole = normalizeEnum(input.localRole, LOCAL_ROLES, "", "本地 BGP Role");
   const requireRoles = input.requireRoles === true;
   assertValidation(!requireRoles || localRole !== "", "Require Roles 必须设置 Local Role");
+  const rrClient = input.rrClient === true;
+  const rrClusterId = input.rrClusterId === null || input.rrClusterId === undefined || input.rrClusterId === ""
+    ? null
+    : normalizeIPv4(input.rrClusterId, "Route Reflector Cluster ID");
   return {
     connectionMode,
     multihopTtl,
@@ -273,6 +277,8 @@ function normalizeBgpOptions(inputValue: unknown, legacyMultihop: unknown): BgpO
     defaultLocalPref: normalizeOptionalInteger(input.defaultLocalPref, "默认 Local Preference"),
     localRole,
     requireRoles,
+    rrClient,
+    rrClusterId,
     raw: normalizeBirdBlockSource(input.raw, "额外 BGP 协议指令"),
   };
 }
@@ -373,6 +379,17 @@ export function normalizeSession(inputValue: unknown): BgpSession {
   };
   assertValidation(channels.ipv4.enabled || channels.ipv6.enabled, "IPv4 与 IPv6 Channel 至少启用一个");
   const bgp = normalizeBgpOptions(input.bgp, input.multihop);
+  const sessionType = normalizeEnum(input.sessionType, new Set(["ebgp", "ibgp"] as const), "ebgp", "BGP 会话类型");
+  const managedByInput = input.managedBy && typeof input.managedBy === "object" && !Array.isArray(input.managedBy)
+    ? input.managedBy as UnknownRecord
+    : null;
+  const managedBy = managedByInput?.kind === "ibgp-domain"
+    ? {
+        kind: "ibgp-domain" as const,
+        domainId: normalizeId(managedByInput.domainId, "iBGP 域 ID"),
+        adjacencyId: normalizeId(managedByInput.adjacencyId, "iBGP 邻接 ID"),
+      }
+    : undefined;
   for (const channel of Object.values(channels)) {
     assertValidation(bgp.connectionMode !== "multihop" || channel.gateway !== "direct", "Multihop 会话不能使用 Direct Gateway");
     assertValidation(bgp.capabilities !== "off" || !(channel.mandatory || channel.requireExtendedNextHop || channel.requireAddPaths), "关闭 Capabilities 时不能要求 Channel 能力");
@@ -390,5 +407,7 @@ export function normalizeSession(inputValue: unknown): BgpSession {
     bgp,
     channels,
     enabled: input.enabled !== false,
+    sessionType,
+    ...(managedBy ? { managedBy } : {}),
   };
 }

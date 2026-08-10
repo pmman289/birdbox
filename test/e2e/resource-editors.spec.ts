@@ -17,6 +17,16 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await authenticate(page);
   await page.locator("#resourceWorkspaceTab").click();
 
+  await page.locator("#resource-nodes .primary-button").click();
+  await page.locator("#nodeEditorName").fill("E2E SSH Router");
+  await page.locator("#nodeEditorSshHost").fill("192.0.2.10");
+  await page.locator("#nodeEditorSshUser").fill("birdbox");
+  await page.locator("#nodeEditorRouterId").fill("192.0.2.10");
+  await page.locator("#generateNodeSetupButton").click();
+  await expect(page.locator("#nodeSetupGuide")).toBeVisible();
+  await expect(page.locator("#nodeSetupScript")).toContainText("birdbox");
+  await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
+
   await page.locator("#managementNodeRows .row-edit-button").click();
   await expect(page.locator("#nodeDialog")).toBeVisible();
   await expect(page.locator("#nodeEditorRouterId")).toHaveValue("192.0.2.1");

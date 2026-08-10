@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
 
 import type { ResourceDeleteResponse, ResourceMutationResponse, StaticMutationRequest } from "@birdbox/contracts/api";
 import type {
@@ -130,7 +130,11 @@ function emptyFilter(): StaticRouteFilter {
 }
 
 function cloneFilter(filter: StaticRouteFilter | undefined): StaticRouteFilter {
-  return structuredClone(filter ?? emptyFilter());
+  return structuredClone(toRaw(filter ?? emptyFilter()));
+}
+
+function cloneOperation(operation: StaticRouteFilterOperation): StaticRouteFilterOperation {
+  return structuredClone(toRaw(operation));
 }
 
 function clearRecord<Value>(record: Record<string, Value>): void {
@@ -234,7 +238,7 @@ function applyOperationToAll(index: number): void {
     dispatchToast(`${full} 已达到 32 项上限`, "error");
     return;
   }
-  for (const prefix of targets) ensureFilter(prefix).operations.push(structuredClone(source));
+  for (const prefix of targets) ensureFilter(prefix).operations.push(cloneOperation(source));
 }
 
 function applyBulkAction(): void {
@@ -294,7 +298,7 @@ function open(resource: StaticProtocol | null): void {
   });
   clearRecord(routeActions);
   clearRecord(routeFilters);
-  Object.assign(routeActions, structuredClone(resource?.routeActions ?? {}));
+  Object.assign(routeActions, structuredClone(toRaw(resource?.routeActions ?? {})));
   for (const [prefix, filter] of Object.entries(resource?.routeFilters ?? {})) routeFilters[prefix] = cloneFilter(filter);
   const defaultAction = resource?.action ?? Object.values(resource?.routeActions ?? {})[0] ?? (resource?.defineId ? "blackhole" : "");
   const parts = actionParts(defaultAction);

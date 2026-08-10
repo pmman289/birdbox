@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw } from "vue";
 
 import type {
   NodeMutationRequest,
@@ -99,10 +99,20 @@ function close(): void {
 }
 
 function onboardingPayload(): NodeMutationRequest {
+  const value = toRaw(draft);
   return {
-    ...structuredClone(draft),
-    sshHost: isSsh.value ? draft.sshHost || null : null,
-    sshUser: isSsh.value ? draft.sshUser || null : null,
+    name: String(value.name),
+    transport: value.transport,
+    sshHost: isSsh.value ? String(value.sshHost || "") || null : null,
+    sshPort: isSsh.value ? Number(value.sshPort) : null,
+    sshUser: isSsh.value ? String(value.sshUser || "") || null : null,
+    sshIdentity: value.sshIdentity,
+    deploymentMode: value.deploymentMode,
+    mainConfigPath: String(value.mainConfigPath),
+    generatedConfigPath: String(value.generatedConfigPath),
+    socketPath: String(value.socketPath),
+    routerId: String(value.routerId),
+    listenPort: Number(value.listenPort),
   };
 }
 

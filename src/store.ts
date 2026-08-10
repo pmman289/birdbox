@@ -50,7 +50,7 @@ function normalizeInventory(value: unknown): Inventory {
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 20;
+const CURRENT_INVENTORY_VERSION = 21;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -146,6 +146,7 @@ function upgradeSessionV15(sessionInput: unknown, nodesInput: unknown): LegacyRe
       };
   return {
     ...upgraded,
+    sessionType: session.sessionType === "ibgp" ? "ibgp" : "ebgp",
     localPort: session.localPort ?? node?.listenPort ?? 179,
     bgp: {
       connectionMode: optionalRecord(session.bgp).connectionMode ?? (multihop === false ? "direct" : "multihop"),
@@ -222,6 +223,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
       rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
       staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
       sessions: migrated.sessions,
+      ibgpDomains: recordArray(source.ibgpDomains, "iBGP 域").map((item) => ({ ...item })),
     };
   }
   const prefixLists: LegacyRecord[] = recordArray(source.prefixLists, "历史 Prefix List").map((item) => ({
@@ -287,6 +289,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
     rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
     staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
     sessions: migrated.sessions,
+    ibgpDomains: recordArray(source.ibgpDomains, "iBGP 域").map((item) => ({ ...item })),
   };
 }
 
@@ -376,6 +379,7 @@ export class InventoryStore {
       rpki: [],
       staticProtocols: [] as LegacyRecord[],
       sessions: [] as BgpSession[],
+      ibgpDomains: [] as LegacyRecord[],
     };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));
@@ -477,7 +481,7 @@ export class InventoryStore {
     await this.initialize();
     const operation = await this.database.mutateState<unknown, Result>(
       this.stateKey,
-      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [] },
+      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [], ibgpDomains: [] },
       async (current) => {
         const draft = structuredClone(normalizeInventory(upgradeInventory(current)));
         const result = await mutator(draft);

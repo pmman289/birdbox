@@ -175,6 +175,7 @@ export class SessionApplicationService {
         const state = await this.#options.store.read();
         const session = state.sessions.find((item) => item.id === sessionId);
         if (!session) fail(404, "会话不存在");
+        if (session.managedBy?.kind === "ibgp-domain") fail(409, "该会话由 iBGP 域托管，请在 iBGP 域工作区删除邻接");
         node = findNode(state, session.nodeId);
         const candidate = validateInventory({
           ...state,
@@ -225,6 +226,7 @@ export class SessionApplicationService {
     const node = findNode(state, String(payload.nodeId ?? ""));
     const peer = findPeer(state, String(payload.peerId ?? ""));
     if (peer.nodeId !== node.id) fail(400, "所选 Peer 不属于该节点");
+    if (peer.managedBy?.kind === "ibgp-domain") fail(409, "该会话由 iBGP 域托管，请在 iBGP 域工作区同时修改双方配置");
     const requestedChannels = payload.channels
       && typeof payload.channels === "object"
       && !Array.isArray(payload.channels)
@@ -268,6 +270,7 @@ export class SessionApplicationService {
       localAddress: payload.localAddress,
       localAsn: payload.localAsn,
       localPort: payload.localPort,
+      sessionType: "ebgp",
       bgp: payload.bgp,
       channels: requestedChannels,
       enabled: payload.enabled !== false,

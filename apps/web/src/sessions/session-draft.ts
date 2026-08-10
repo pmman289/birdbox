@@ -8,6 +8,7 @@ import type {
   Inventory,
   Peer,
 } from "@birdbox/contracts/inventory";
+import { toRaw } from "vue";
 
 import { uniqueBirdName } from "../shared/resource-names";
 
@@ -97,6 +98,8 @@ export function defaultBgpOptions(): BgpOptions {
     defaultLocalPref: null,
     localRole: "",
     requireRoles: false,
+    rrClient: false,
+    rrClusterId: null,
     raw: "",
   };
 }
@@ -149,7 +152,7 @@ export function createSessionDraft(dashboard: DashboardResponse): SessionDraft |
   const node = dashboard.node;
   if (!peer || !node) return null;
   if (peer.session) {
-    const { id: _id, ...session } = structuredClone(peer.session);
+    const { id: _id, ...session } = structuredClone(toRaw(peer.session));
     for (const family of ["ipv4", "ipv6"] as const) {
       for (const direction of ["importPolicy", "exportPolicy"] as const) {
         const policy = session.channels[family][direction];
@@ -165,6 +168,7 @@ export function createSessionDraft(dashboard: DashboardResponse): SessionDraft |
     nodeId: node.id,
     peerId: peer.id,
     protocolName: defaultProtocolName(dashboard.inventory, peer),
+    sessionType: "ebgp",
     enabled: true,
     localAddress: null,
     localAsn: null,
@@ -188,7 +192,7 @@ export function channelUsesCrossFamilyTransport(peer: Peer, family: AddressFamil
 export function toSessionMutationRequest(draft: SessionDraft, peer: Peer): SessionMutationRequest {
   if (draft.localAsn === null || !Number.isSafeInteger(draft.localAsn)) throw new Error("本地 ASN 不能为空");
   if (draft.localPort === null || !Number.isSafeInteger(draft.localPort)) throw new Error("本地端口不能为空");
-  const payload = structuredClone(draft) as SessionMutationRequest;
+  const payload = structuredClone(toRaw(draft)) as SessionMutationRequest;
   for (const family of ["ipv4", "ipv6"] as const) {
     if (payload.channels[family].enabled && channelUsesCrossFamilyTransport(peer, family)) {
       payload.channels[family].extendedNextHop = true;

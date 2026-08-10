@@ -384,6 +384,9 @@ export class NodeOnboardingService {
         const current = await this.#options.store.read();
         node = findNode(current, nodeId);
         const targetNode = node;
+        if (current.ibgpDomains.some((domain) => domain.members.some((member) => member.nodeId === targetNode.id))) {
+          fail(409, "请先从 iBGP 域中移除该节点或删除对应域");
+        }
         if (force) {
           const inventory = validateInventory({
             ...current,

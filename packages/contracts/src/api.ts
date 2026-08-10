@@ -1,6 +1,7 @@
 import type {
   AddressFamily,
   BgpSession,
+  IbgpDomain,
   Inventory,
   ManagedNode,
   Peer,
@@ -11,9 +12,9 @@ import type {
   StaticProtocol,
 } from "./inventory.js";
 
-export type SessionMutationRequest = Omit<BgpSession, "id">;
+export type SessionMutationRequest = Omit<BgpSession, "id" | "managedBy">;
 export type NodeMutationRequest = Omit<ManagedNode, "id" | "kind">;
-export type PeerMutationRequest = Omit<Peer, "id" | "nodeId">;
+export type PeerMutationRequest = Omit<Peer, "id" | "nodeId" | "managedBy">;
 export type StaticMutationRequest = Omit<StaticProtocol, "id">;
 export type RpkiMutationRequest = Omit<RpkiSource, "id">;
 
@@ -171,6 +172,18 @@ export interface ResourceDeleteResponse {
   inventory: Inventory;
   deployment: DeploymentReport;
   events: ChangeEvent[];
+}
+
+export interface IbgpDomainListResponse {
+  domains: IbgpDomain[];
+  inventory: Inventory;
+}
+
+export interface IbgpDomainMutationResponse {
+  domain?: IbgpDomain;
+  inventory: Inventory;
+  deployment?: DeploymentReport;
+  events?: ChangeEvent[];
 }
 
 export interface RouteDetail {

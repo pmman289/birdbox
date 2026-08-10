@@ -12,6 +12,7 @@ import SessionControlButton from "../dashboard/SessionControlButton.vue";
 import { clearDashboard, loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
 import ResourceWorkspace from "../resources/ResourceWorkspace.vue";
 import SessionEditor from "../sessions/SessionEditor.vue";
+import IbgpWorkspace from "../ibgp/IbgpWorkspace.vue";
 import { api } from "../shared/api-client";
 import type { MutationStartEventDetail, ResourceWorkspaceTarget, ToastType } from "../shared/events";
 import type { MutationWaitPresentation } from "../shared/interaction-state";
@@ -24,7 +25,7 @@ interface ToastItem {
 
 const THEME_STORAGE_KEY = "birdbox-theme";
 const authenticated = ref(false);
-const activeWorkspace = ref<"sessionWorkspace" | "resourceWorkspace">("sessionWorkspace");
+const activeWorkspace = ref<"sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace">("sessionWorkspace");
 const accountDialog = ref<HTMLDialogElement | null>(null);
 const passwordForm = ref<HTMLFormElement | null>(null);
 const mutationDialog = ref<HTMLDialogElement | null>(null);
@@ -166,7 +167,7 @@ async function logout(): Promise<void> {
   }
 }
 
-function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace", resourceTarget: ResourceWorkspaceTarget | null = null): void {
+function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace", resourceTarget: ResourceWorkspaceTarget | null = null): void {
   activeWorkspace.value = workspace;
   if (!resourceTarget) return;
   window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: resourceTarget } }));
@@ -181,8 +182,8 @@ function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace", 
 function moveWorkspaceTab(event: KeyboardEvent, current: number): void {
   if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
   event.preventDefault();
-  const next = event.key === "Home" ? 0 : event.key === "End" ? 1 : current === 0 ? 1 : 0;
-  const workspace = next === 0 ? "sessionWorkspace" : "resourceWorkspace";
+  const next = event.key === "Home" ? 0 : event.key === "End" ? 2 : (current + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) + 3) % 3;
+  const workspace = next === 0 ? "sessionWorkspace" : next === 1 ? "resourceWorkspace" : "ibgpWorkspace";
   activateWorkspace(workspace);
   void nextTick(() => document.querySelector<HTMLButtonElement>(`[data-workspace="${workspace}"]`)?.focus());
 }
@@ -322,6 +323,7 @@ onBeforeUnmount(() => {
     <nav class="workspace-tabs" role="tablist" aria-label="Birdbox 工作区">
       <button id="sessionWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'sessionWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'sessionWorkspace'" aria-controls="sessionWorkspace" data-workspace="sessionWorkspace" :tabindex="activeWorkspace === 'sessionWorkspace' ? 0 : -1" @click="activateWorkspace('sessionWorkspace')" @keydown="moveWorkspaceTab($event, 0)">会话与拓扑</button>
       <button id="resourceWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'resourceWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'resourceWorkspace'" aria-controls="resourceWorkspace" data-workspace="resourceWorkspace" :tabindex="activeWorkspace === 'resourceWorkspace' ? 0 : -1" @click="activateWorkspace('resourceWorkspace')" @keydown="moveWorkspaceTab($event, 1)">资源管理</button>
+      <button id="ibgpWorkspaceTab" class="workspace-tab" :class="{ active: activeWorkspace === 'ibgpWorkspace' }" type="button" role="tab" :aria-selected="activeWorkspace === 'ibgpWorkspace'" aria-controls="ibgpWorkspace" data-workspace="ibgpWorkspace" :tabindex="activeWorkspace === 'ibgpWorkspace' ? 0 : -1" @click="activateWorkspace('ibgpWorkspace')" @keydown="moveWorkspaceTab($event, 2)">iBGP 域</button>
     </nav>
 
     <div id="sessionWorkspace" class="workspace-panel" role="tabpanel" aria-labelledby="sessionWorkspaceTab" :hidden="activeWorkspace !== 'sessionWorkspace'">
@@ -337,6 +339,9 @@ onBeforeUnmount(() => {
 
     <section id="resourceWorkspace" class="workspace-panel resource-workspace" role="tabpanel" aria-labelledby="resourceWorkspaceTab" :hidden="activeWorkspace !== 'resourceWorkspace'">
       <div id="resourceWorkspaceApp"><ResourceWorkspace /></div>
+    </section>
+    <section id="ibgpWorkspace" class="workspace-panel ibgp-workspace-panel" role="tabpanel" aria-labelledby="ibgpWorkspaceTab" :hidden="activeWorkspace !== 'ibgpWorkspace'">
+      <IbgpWorkspace />
     </section>
   </main>
 

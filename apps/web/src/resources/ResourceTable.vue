@@ -18,6 +18,7 @@ const { dashboard } = useDashboardStore();
 const inventory = computed<Inventory | null>(() => dashboard.value?.inventory ?? null);
 const nodeNames = computed(() => new Map((inventory.value?.nodes ?? []).map((node) => [node.id, node.name])));
 const defineNames = computed(() => new Map((inventory.value?.defines ?? []).map((resource) => [resource.id, resource.label ?? resource.name])));
+const externalPeers = computed(() => (inventory.value?.peers ?? []).filter((peer) => !peer.managedBy));
 
 function edit(kind: ResourceEditKind, id: string): void {
   window.dispatchEvent(new CustomEvent("birdbox:resource-edit", { detail: { kind, id } }));
@@ -106,8 +107,8 @@ function staticSummary(resource: StaticProtocol): string {
   </template>
 
   <template v-else-if="kind === 'peers'">
-    <tr v-if="!inventory?.peers.length"><td colspan="5" class="empty-cell">尚无 eBGP 远端</td></tr>
-    <tr v-for="peer in inventory?.peers ?? []" v-else :key="peer.id">
+    <tr v-if="!externalPeers.length"><td colspan="5" class="empty-cell">尚无 eBGP 远端</td></tr>
+    <tr v-for="peer in externalPeers" v-else :key="peer.id">
       <td><strong>{{ peer.name }}</strong><small>{{ peer.id }}</small></td>
       <td>{{ nodeNames.get(peer.nodeId) ?? peer.nodeId }}</td>
       <td><code>{{ peer.address }}:{{ peer.port }}</code></td>

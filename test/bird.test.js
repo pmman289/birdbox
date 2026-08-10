@@ -782,7 +782,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 20);
+  assert.equal(state.version, 21);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({

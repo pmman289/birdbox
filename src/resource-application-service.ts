@@ -1,6 +1,8 @@
 import type { ChangeEvent } from "../packages/contracts/src/api.js";
 import type {
+  BgpSession,
   Inventory,
+  IbgpDomain,
   ManagedNode,
   PolicyCollection,
 } from "../packages/contracts/src/inventory.js";
@@ -13,6 +15,7 @@ import {
   stageAndValidate,
   validateInventory,
 } from "./bird.js";
+import { normalizeSession } from "./bird-session.js";
 import type { DeploymentService } from "./deployment-service.js";
 import { fail } from "./errors.js";
 import {
@@ -27,6 +30,7 @@ import {
 } from "./inventory-domain.js";
 import type { NodeOnboardingService } from "./node-onboarding-service.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
+import { desiredAdjacencies, expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
 import type { SessionApplicationService } from "./session-application-service.js";
 import type { InventoryStore } from "./store.js";
 
@@ -50,6 +54,66 @@ export function createResourceApplicationService(
   const event = options.addEvent;
   const withDeploymentLock = options.withDeploymentLock;
   const mutateAndApply = options.deploymentService.mutateAndApply.bind(options.deploymentService);
+
+  function domainNodeIds(domain: IbgpDomain): string[] {
+    return uniqueNodeIds(domain.members.map((member) => member.nodeId));
+  }
+
+  function assertDomainUnique(state: Inventory, id: string, name: string, excludedId: string | null = null): void {
+    if (state.ibgpDomains.some((item) => item.id !== excludedId && item.id === id)) fail(409, "iBGP 域 ID 已存在");
+    if (state.ibgpDomains.some((item) => item.id !== excludedId && item.name === name)) fail(409, "iBGP 域名称已存在");
+  }
+
+  function materializeDomain(input: Record<string, unknown>, previous: IbgpDomain | null = null): IbgpDomain {
+    const base = { ...(previous ?? {}), ...input } as Record<string, unknown>;
+    const members = Array.isArray(base.members) ? base.members : previous?.members ?? [];
+    const requested = Array.isArray(base.adjacencies) ? base.adjacencies : [];
+    const topology = base.topology ?? previous?.topology ?? "full-mesh";
+    const seed = normalizeIbgpDomain({
+      ...base,
+      id: previous?.id ?? base.id ?? makeId("ibgp"),
+      members,
+      topology,
+      adjacencies: [],
+    });
+    const previousByPair = new Map((previous?.adjacencies ?? []).map((adjacency) => [
+      `${adjacency.leftNodeId}:${adjacency.rightNodeId}`,
+      adjacency,
+    ]));
+    const pairs = topology === "manual"
+      ? requested
+      : desiredAdjacencies(seed);
+    const adjacencies = pairs.map((value, index) => {
+      const pair = value as Record<string, unknown>;
+      const leftNodeId = String(pair.leftNodeId ?? "");
+      const rightNodeId = String(pair.rightNodeId ?? "");
+      const old = previousByPair.get(`${leftNodeId}:${rightNodeId}`) ?? previousByPair.get(`${rightNodeId}:${leftNodeId}`);
+      const rawId = old?.id ?? makeId("ibgp_adj");
+      const id = String(rawId || `${seed.id}_adj_${index + 1}`);
+      return {
+        id,
+        leftNodeId,
+        rightNodeId,
+        enabled: pair.enabled !== false,
+        leftSessionId: String(pair.leftSessionId ?? old?.leftSessionId ?? `${id}_left`),
+        rightSessionId: String(pair.rightSessionId ?? old?.rightSessionId ?? `${id}_right`),
+      };
+    });
+    return normalizeIbgpDomain({ ...seed, adjacencies });
+  }
+
+  function sessionUpdates(body: Record<string, unknown>, existing: BgpSession[]): BgpSession[] {
+    const updates = Array.isArray(body.sessionUpdates) ? body.sessionUpdates : [];
+    const byId = new Map(existing.map((session) => [session.id, session]));
+    for (const value of updates) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const item = value as Record<string, unknown>;
+      const id = String(item.id ?? "");
+      const previous = byId.get(id);
+      if (previous) byId.set(id, normalizeSession({ ...previous, ...item, id }));
+    }
+    return [...byId.values()];
+  }
 
   async function preflightPolicyResource(
     stateInput: Inventory,
@@ -144,7 +208,7 @@ export function createResourceApplicationService(
   },
 
   async createPeer(nodeId, body) {
-    const peer = normalizePeer({ ...body, id: makeId("peer"), nodeId });
+    const peer = normalizePeer({ ...body, id: makeId("peer"), nodeId, managedBy: undefined });
     const { state } = await withDeploymentLock(() => store.mutate((draft) => {
       findNode(draft, nodeId);
       draft.peers.push(peer);
@@ -159,7 +223,8 @@ export function createResourceApplicationService(
       if (index < 0) fail(404, "远端 Peer 不存在");
       const previous = draft.peers[index];
       if (!previous) fail(404, "远端 Peer 不存在");
-      const updated = normalizePeer({ ...previous, ...body, id: peerId, nodeId: previous.nodeId });
+      if (previous.managedBy?.kind === "ibgp-domain") fail(409, "该 Peer 由 iBGP 域托管，请在 iBGP 域工作区修改");
+      const updated = normalizePeer({ ...previous, ...body, id: peerId, nodeId: previous.nodeId, managedBy: undefined });
       draft.peers[index] = updated;
       return updated;
     }, (updated) => [updated.nodeId]);
@@ -170,6 +235,7 @@ export function createResourceApplicationService(
   async deletePeer(peerId) {
     const { state, result: peer } = await withDeploymentLock(() => store.mutate((draft) => {
       const target = findPeer(draft, peerId);
+      if (target.managedBy?.kind === "ibgp-domain") fail(409, "该 Peer 由 iBGP 域托管，请在 iBGP 域工作区删除邻接");
       if (draft.sessions.some((item) => item.peerId === target.id)) fail(409, "请先移除该 Peer 的会话");
       draft.peers = draft.peers.filter((item) => item.id !== target.id);
       return target;
@@ -391,6 +457,77 @@ export function createResourceApplicationService(
     }, () => affectedNodeIds);
     event("success", `已删除 ${kind} ${resource.name}`, resource.nodeId);
     return { status: 200, payload: { inventory: state, deployment, events } };
+  },
+
+  async listIbgpDomains() {
+    const state = await store.read();
+    return { status: 200, payload: { domains: state.ibgpDomains, inventory: state } };
+  },
+
+  async createIbgpDomain(body) {
+    const domain = materializeDomain({ ...body, id: body.id ?? makeId("ibgp") });
+    const { state, deployment } = await mutateAndApply((draft) => {
+      assertDomainUnique(draft, domain.id, domain.name);
+      const expanded = expandIbgpDomain(domain, draft.nodes);
+      draft.ibgpDomains.push(domain);
+      draft.peers.push(...expanded.peers);
+      draft.sessions.push(...expanded.sessions);
+      return domain;
+    }, () => domainNodeIds(domain));
+    event("success", `已创建 iBGP 域 ${domain.name}`);
+    return { status: 201, payload: { domain: state.ibgpDomains.find((item) => item.id === domain.id), inventory: state, deployment, events } };
+  },
+
+  async updateIbgpDomain(domainId, body) {
+    let affectedNodeIds: string[] = [];
+    const { state, result: domain, deployment } = await mutateAndApply((draft) => {
+      const index = draft.ibgpDomains.findIndex((item) => item.id === domainId);
+      if (index < 0) fail(404, "iBGP 域不存在");
+      const previous = draft.ibgpDomains[index];
+      if (!previous) fail(404, "iBGP 域不存在");
+      const updated = materializeDomain({ ...body, id: domainId }, previous);
+      assertDomainUnique(draft, updated.id, updated.name, domainId);
+      const oldSessions = draft.sessions.filter((session) => session.managedBy?.domainId === domainId);
+      const preserved = sessionUpdates(body, oldSessions);
+      draft.peers = draft.peers.filter((peer) => peer.managedBy?.domainId !== domainId);
+      draft.sessions = draft.sessions.filter((session) => session.managedBy?.domainId !== domainId);
+      const expanded = expandIbgpDomain(updated, draft.nodes, preserved);
+      draft.ibgpDomains[index] = updated;
+      draft.peers.push(...expanded.peers);
+      draft.sessions.push(...expanded.sessions);
+      affectedNodeIds = uniqueNodeIds(domainNodeIds(previous), domainNodeIds(updated));
+      return updated;
+    }, () => affectedNodeIds);
+    event("success", `已更新 iBGP 域 ${domain.name}`);
+    return { status: 200, payload: { domain, inventory: state, deployment, events } };
+  },
+
+  async deleteIbgpDomain(domainId) {
+    let affectedNodeIds: string[] = [];
+    const { state, result: domain, deployment } = await mutateAndApply((draft) => {
+      const index = draft.ibgpDomains.findIndex((item) => item.id === domainId);
+      if (index < 0) fail(404, "iBGP 域不存在");
+      const target = draft.ibgpDomains[index];
+      if (!target) fail(404, "iBGP 域不存在");
+      affectedNodeIds = domainNodeIds(target);
+      draft.ibgpDomains.splice(index, 1);
+      draft.peers = draft.peers.filter((peer) => peer.managedBy?.domainId !== domainId);
+      draft.sessions = draft.sessions.filter((session) => session.managedBy?.domainId !== domainId);
+      return target;
+    }, () => affectedNodeIds);
+    event("success", `已删除 iBGP 域 ${domain.name}`);
+    return { status: 200, payload: { inventory: state, deployment, events } };
+  },
+
+  async updateIbgpDomainLayout(domainId, body) {
+    const { state, result: domain } = await withDeploymentLock(() => store.mutate((draft) => {
+      const target = draft.ibgpDomains.find((item) => item.id === domainId);
+      if (!target) fail(404, "iBGP 域不存在");
+      if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout)) fail(400, "拓扑布局必须是对象");
+      target.layout = normalizeIbgpDomain({ ...target, layout: body.layout }).layout;
+      return target;
+    }));
+    return { status: 200, payload: { domain, inventory: state } };
   },
 
     previewSession: (body) => options.sessions.preview(body),

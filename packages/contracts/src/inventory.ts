@@ -1,6 +1,7 @@
 export type AddressFamily = "ipv4" | "ipv6";
 export type SwitchSetting = "default" | "on" | "off";
 export type ResourceScope = string | null;
+export type BgpSessionType = "ebgp" | "ibgp";
 
 export interface ManagedNode {
   id: string;
@@ -19,6 +20,18 @@ export interface ManagedNode {
   listenPort: number;
 }
 
+export interface TopologyPosition {
+  x: number;
+  y: number;
+  locked: boolean;
+}
+
+export type BgpManagedBy = {
+  kind: "ibgp-domain";
+  domainId: string;
+  adjacencyId: string;
+};
+
 export interface Peer {
   id: string;
   nodeId: string;
@@ -26,6 +39,7 @@ export interface Peer {
   address: string;
   asn: number;
   port: number;
+  managedBy?: BgpManagedBy;
 }
 
 interface PolicyResourceBase {
@@ -251,6 +265,8 @@ export interface BgpOptions {
   defaultLocalPref: number | null;
   localRole: "" | "provider" | "rs_server" | "rs_client" | "customer" | "peer";
   requireRoles: boolean;
+  rrClient: boolean;
+  rrClusterId: string | null;
   raw: string;
 }
 
@@ -265,10 +281,44 @@ export interface BgpSession {
   bgp: BgpOptions;
   channels: Record<AddressFamily, BgpChannel>;
   enabled: boolean;
+  sessionType: BgpSessionType;
+  managedBy?: BgpManagedBy;
+}
+
+export type IbgpTopology = "full-mesh" | "route-reflector" | "manual";
+export type IbgpMemberRole = "member" | "reflector" | "client";
+
+export interface IbgpMember {
+  nodeId: string;
+  address4: string | null;
+  address6: string | null;
+  role: IbgpMemberRole;
+  clusterId: string | null;
+}
+
+export interface IbgpAdjacency {
+  id: string;
+  leftNodeId: string;
+  rightNodeId: string;
+  enabled: boolean;
+  leftSessionId: string;
+  rightSessionId: string;
+}
+
+export interface IbgpDomain {
+  id: string;
+  name: string;
+  asn: number;
+  topology: IbgpTopology;
+  families: AddressFamily[];
+  defaultClusterId: string | null;
+  members: IbgpMember[];
+  adjacencies: IbgpAdjacency[];
+  layout: Record<string, TopologyPosition>;
 }
 
 export interface Inventory {
-  version: 20;
+  version: 21;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];
@@ -277,6 +327,7 @@ export interface Inventory {
   rpki: RpkiSource[];
   staticProtocols: StaticProtocol[];
   sessions: BgpSession[];
+  ibgpDomains: IbgpDomain[];
 }
 
 export type PolicyCollection = "defines" | "functions" | "filters";

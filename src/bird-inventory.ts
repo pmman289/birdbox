@@ -20,6 +20,7 @@ import { isExactPrefix } from "./bird-prefix.js";
 import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
 import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
+import { normalizeIbgpDomain } from "./ibgp-domain.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ReferencingResource = PolicyDefine | PolicyFunction | PolicyFilter;
@@ -51,6 +52,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   const rpki = list(input, "rpki").map(normalizeRPKISource);
   let staticProtocols = list(input, "staticProtocols").map(normalizeStaticProtocol);
   const sessions = list(input, "sessions").map(normalizeSession);
+  const ibgpDomains = list(input, "ibgpDomains").map(normalizeIbgpDomain);
   assertValidation(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
   assertValidation(nodes.filter((item) => item.transport === "local").length <= 1, "只能配置一个本机节点");
   const deploymentTargets = nodes
@@ -64,12 +66,34 @@ export function validateInventory(inputValue: unknown): Inventory {
   assertValidation(new Set(rpki.map((item) => item.id)).size === rpki.length, "RPKI 资源 ID 重复");
   assertValidation(new Set(staticProtocols.map((item) => item.id)).size === staticProtocols.length, "Static 资源 ID 重复");
   assertValidation(new Set(sessions.map((item) => item.id)).size === sessions.length, "会话 ID 重复");
+  assertValidation(new Set(ibgpDomains.map((item) => item.id)).size === ibgpDomains.length, "iBGP 域 ID 重复");
+  const allIbgpAdjacencies = ibgpDomains.flatMap((domain) => domain.adjacencies);
+  assertValidation(new Set(allIbgpAdjacencies.map((item) => item.id)).size === allIbgpAdjacencies.length, "跨 iBGP 域的邻接 ID 重复");
 
   const nodeMap = new Map(nodes.map((item) => [item.id, item]));
   const peerMap = new Map(peers.map((item) => [item.id, item]));
   const defineMap = new Map(defines.map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
+  for (const domain of ibgpDomains) {
+    for (const member of domain.members) assertValidation(nodeMap.has(member.nodeId), `iBGP 域 ${domain.name} 引用了不存在的节点`);
+    const memberIds = new Set(domain.members.map((member) => member.nodeId));
+    for (const adjacency of domain.adjacencies) {
+      assertValidation(memberIds.has(adjacency.leftNodeId) && memberIds.has(adjacency.rightNodeId), `iBGP 域 ${domain.name} 的邻接节点不属于域成员`);
+      const left = sessions.find((session) => session.id === adjacency.leftSessionId);
+      const right = sessions.find((session) => session.id === adjacency.rightSessionId);
+      assertValidation(left?.sessionType === "ibgp" && right?.sessionType === "ibgp", `iBGP 域 ${domain.name} 的邻接必须引用 iBGP 会话`);
+      assertValidation(left?.managedBy?.domainId === domain.id && right?.managedBy?.domainId === domain.id, `iBGP 域 ${domain.name} 的会话托管关系不一致`);
+      assertValidation(left?.managedBy?.adjacencyId === adjacency.id && right?.managedBy?.adjacencyId === adjacency.id, `iBGP 域 ${domain.name} 的邻接托管关系不一致`);
+      assertValidation(left?.nodeId === adjacency.leftNodeId && right?.nodeId === adjacency.rightNodeId, `iBGP 域 ${domain.name} 的双向会话节点不一致`);
+    }
+  }
+  const domainMap = new Map(ibgpDomains.map((domain) => [domain.id, domain]));
+  for (const resource of [...peers, ...sessions]) {
+    if (!resource.managedBy) continue;
+    const domain = domainMap.get(resource.managedBy.domainId);
+    assertValidation(domain?.adjacencies.some((adjacency) => adjacency.id === resource.managedBy?.adjacencyId), "存在失去 iBGP 域归属的托管会话资源");
+  }
   staticProtocols = staticProtocols.map((resource) => {
     const exactPrefixes = enabledCidrEntries(resource.defineId === null ? undefined : defineMap.get(resource.defineId));
     const routeActions = Object.fromEntries(exactPrefixes.map((prefix) => {
@@ -134,7 +158,13 @@ export function validateInventory(inputValue: unknown): Inventory {
     const peer = peerMap.get(session.peerId);
     assertValidation(node, `会话 ${session.protocolName} 引用了不存在的节点`);
     assertValidation(peer && peer.nodeId === node.id, `会话 ${session.protocolName} 的 Peer 不属于所选节点`);
-    assertValidation(session.localAsn !== peer.asn, `会话 ${session.protocolName} 的两端 ASN 必须不同`);
+    assertValidation(
+      session.sessionType === "ibgp" ? session.localAsn === peer.asn : session.localAsn !== peer.asn,
+      session.sessionType === "ibgp"
+        ? `iBGP 会话 ${session.protocolName} 的两端 ASN 必须相同`
+        : `eBGP 会话 ${session.protocolName} 的两端 ASN 必须不同`,
+    );
+    assertValidation(session.sessionType === "ibgp" || (!session.bgp.rrClient && session.bgp.rrClusterId === null), `eBGP 会话 ${session.protocolName} 不能配置 Route Reflector 参数`);
     assertValidation(session.localAddress === null || session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
     assertValidation(session.localAddress === null || ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
     const localScope = session.localAddress === null ? null : splitScopedIPAddress(session.localAddress).zone;
@@ -219,7 +249,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   }
 
   return {
-    version: 20,
+    version: 21,
     nodes,
     peers,
     defines,
@@ -228,5 +258,6 @@ export function validateInventory(inputValue: unknown): Inventory {
     rpki,
     staticProtocols,
     sessions,
+    ibgpDomains,
   };
 }

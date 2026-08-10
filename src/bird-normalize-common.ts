@@ -190,6 +190,16 @@ export function normalizeNode(inputValue: unknown): ManagedNode {
 
 export function normalizePeer(inputValue: unknown): Peer {
   const input = inputRecord(inputValue, "Peer 参数不能为空");
+  const managedByInput = input.managedBy && typeof input.managedBy === "object" && !Array.isArray(input.managedBy)
+    ? input.managedBy as UnknownRecord
+    : null;
+  const managedBy = managedByInput?.kind === "ibgp-domain"
+    ? {
+        kind: "ibgp-domain" as const,
+        domainId: normalizeId(managedByInput.domainId, "iBGP 域 ID"),
+        adjacencyId: normalizeId(managedByInput.adjacencyId, "iBGP 邻接 ID"),
+      }
+    : undefined;
   return {
     id: normalizeId(input.id, "Peer ID"),
     nodeId: normalizeId(input.nodeId, "所属节点 ID"),
@@ -197,5 +207,6 @@ export function normalizePeer(inputValue: unknown): Peer {
     address: normalizeIPAddress(input.address, "Peer 地址"),
     asn: normalizeAsn(input.asn, "远端 ASN "),
     port: normalizePort(input.port, "远端 BGP 端口", 179),
+    ...(managedBy ? { managedBy } : {}),
   };
 }

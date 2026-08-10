@@ -54,6 +54,11 @@ let autoPreviewTimer: number | null = null;
 const node = computed(() => dashboard.value?.node ?? null);
 const peer = computed(() => dashboard.value?.selectedPeer ?? null);
 const existingSession = computed(() => peer.value?.session ?? null);
+const managedByDomain = computed(() => existingSession.value?.managedBy?.kind === "ibgp-domain");
+const managedDomainName = computed(() => {
+  const id = existingSession.value?.managedBy?.domainId;
+  return id ? dashboard.value?.inventory.ibgpDomains.find((domain) => domain.id === id)?.name ?? id : null;
+});
 const unavailable = computed(() => !node.value || !peer.value || !draft.value);
 const pairLocal = computed(() => draft.value
   ? `${draft.value.localAddress || "自动选择"} · ${draft.value.localAsn ? `AS${draft.value.localAsn}` : "ASN 未设置"}`
@@ -313,7 +318,9 @@ onBeforeUnmount(() => {
 
     <div v-if="unavailable" class="empty-state"><strong>此节点尚未定义远端 Peer</strong><button class="secondary-button" type="button" @click="openPeerResources">前往资源管理</button></div>
 
-    <form v-else-if="draft && peer" ref="form" novalidate :aria-busy="applyPending" :inert="applyPending" @submit.prevent="preview(false)">
+    <div v-else-if="managedByDomain" class="domain-managed-notice" role="status"><strong>此会话由 iBGP 域“{{ managedDomainName }}”托管</strong><span>请在 iBGP 域工作区同时编辑双方参数和策略，避免单边配置漂移。</span></div>
+
+    <form v-else-if="draft && peer" ref="form" novalidate :aria-busy="applyPending" :inert="applyPending || managedByDomain" @submit.prevent="preview(false)">
       <div class="pair-summary"><div><span>本机</span><strong>{{ pairLocal }}</strong></div><i aria-hidden="true"></i><div><span>远端</span><strong>{{ pairRemote }}</strong></div></div>
       <div class="field" data-field="protocolName" :class="{ 'field-invalid': errorField === 'protocolName' }"><label for="protocolName">BIRD 协议名称（自动，可编辑）</label><input id="protocolName" v-model.trim="draft.protocolName" required pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" autocomplete="off" :aria-invalid="errorField === 'protocolName'"></div>
       <label class="toggle-row full-width session-enabled-row"><span><strong>启用会话</strong><small>关闭后不生成该会话的 BGP 配置</small></span><input v-model="draft.enabled" type="checkbox"><i aria-hidden="true"></i></label>

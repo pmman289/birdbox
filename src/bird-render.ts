@@ -135,6 +135,8 @@ function renderBgpOptions(session: BgpSession): string {
   if (options.freeBind) output += "  free bind on;\n";
   output += renderSetting("check link", options.checkLink);
   if (options.rsClient) output += "  rs client;\n";
+  if (options.rrClient) output += "  rr client;\n";
+  if (options.rrClusterId) output += `  rr cluster id ${options.rrClusterId};\n`;
   if (options.confederation !== null) output += `  confederation ${options.confederation};\n`;
   if (options.confederationMember) output += "  confederation member on;\n";
   if (options.allowLocalPref) output += "  allow bgp_local_pref on;\n";
@@ -331,7 +333,12 @@ function normalizeActiveSessions(
     const peer = peerMap.get(session.peerId);
     assertValidation(session.nodeId === node.id, `会话 ${session.protocolName} 不属于节点 ${node.name}`);
     assertValidation(peer && peer.nodeId === node.id, `会话 ${session.protocolName} 的 Peer 不属于节点 ${node.name}`);
-    assertValidation(session.localAsn !== peer.asn, `会话 ${session.protocolName} 的两端 ASN 必须不同`);
+    assertValidation(
+      session.sessionType === "ibgp" ? session.localAsn === peer.asn : session.localAsn !== peer.asn,
+      session.sessionType === "ibgp"
+        ? `iBGP 会话 ${session.protocolName} 的两端 ASN 必须相同`
+        : `eBGP 会话 ${session.protocolName} 的两端 ASN 必须不同`,
+    );
     assertValidation(session.localAddress === null || session.localAddress !== peer.address, `会话 ${session.protocolName} 的两端地址不能相同`);
     assertValidation(session.localAddress === null || ipFamily(session.localAddress) === ipFamily(peer.address), `会话 ${session.protocolName} 的本地与 Peer 地址必须属于同一地址族`);
     const localScope = session.localAddress === null ? null : splitScopedIPAddress(session.localAddress).zone;
