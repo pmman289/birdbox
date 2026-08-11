@@ -149,10 +149,18 @@ export interface NodeMutationResponse {
   events: ChangeEvent[];
 }
 
+export interface NodeOnboardingRpkiRequirement {
+  resourceId: string;
+  resourceLabel: string;
+  family: AddressFamily;
+  path: string;
+}
+
 export interface NodeSetupScriptResponse {
   script: string;
   includeLine: string;
   publicKey: string;
+  rpkiRequirements: NodeOnboardingRpkiRequirement[];
 }
 
 export interface NodeTestResponse {

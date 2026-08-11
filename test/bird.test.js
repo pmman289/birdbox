@@ -1125,6 +1125,49 @@ test("streams node command input without embedding it in the command", async () 
   assert.deepEqual(result, { ok: true, stdout: "received", stderr: "" });
 });
 
+test("filters informational OpenSSH warnings without hiding a remote failure", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ssh-warning-"));
+  const binDir = path.join(root, "bin");
+  const originalPath = process.env.PATH;
+  context.after(async () => {
+    process.env.PATH = originalPath;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.writeFile(path.join(binDir, "ssh"), `#!/bin/sh
+printf 'actual remote failure\n'
+printf '%s\r\n' \
+  "Warning: Permanently added 'router.example' (ED25519) to the list of known hosts." \
+  '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
+  '** This session may be vulnerable to "store now, decrypt later" attacks.' \
+  '** The server may need to be upgraded. See https://openssh.com/pq.html' >&2
+exit 1
+`, { mode: 0o755 });
+  process.env.PATH = `${binDir}:${originalPath}`;
+  configureManagedSsh({
+    identityFile: path.join(root, "unused-identity"),
+    knownHostsFile: path.join(root, "unused-known-hosts"),
+  });
+  const remoteNode = normalizeNode({
+    id: "ssh_warning",
+    name: "SSH warning",
+    transport: "ssh",
+    sshHost: "router.example",
+    sshUser: "birdbox",
+    sshIdentity: "managed",
+    deploymentMode: "include",
+    mainConfigPath: "/etc/bird.conf",
+    generatedConfigPath: "/etc/birdbox/generated.conf",
+    socketPath: "/run/bird.ctl",
+    routerId: "192.0.2.1",
+  });
+  const result = await runOnNode(remoteNode, "false");
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "actual remote failure");
+  assert.equal(result.stderr, "");
+  assert.equal(result.code, 1);
+});
+
 test("requires an active BIRD include instead of accepting commented directives", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-include-check-"));
   const binDir = path.join(root, "bin");

@@ -7,7 +7,7 @@ import type {
   NodeSetupScriptResponse,
   NodeTestResponse,
 } from "@birdbox/contracts/api";
-import type { ManagedNode } from "@birdbox/contracts/inventory";
+import type { ManagedNode, RpkiSource } from "@birdbox/contracts/inventory";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
@@ -53,6 +53,9 @@ const draft = reactive<NodeDraft>({
 const editing = computed(() => editingId.value !== null);
 const isSsh = computed(() => draft.transport === "ssh");
 const saveDisabled = computed(() => pending.value || (!editing.value && !verified.value));
+const globalRpkiResources = computed(() => (
+  dashboard.value?.inventory.rpki.filter((resource) => resource.enabled && resource.nodeId === null) ?? []
+));
 
 const fieldMappings = [
   [/节点名称/, "nodeEditorName"],
@@ -89,6 +92,26 @@ function resetDraft(node: ManagedNode | null): void {
   setupScript.value = "";
   includeLine.value = "";
   if (form.value) clearFormValidation(form.value);
+}
+
+function rpkiResourceDetails(resource: RpkiSource): Array<{ label: string; value: string }> {
+  if (resource.sourceType === "file") {
+    return [
+      ...(resource.file4 === null ? [] : [{ label: "IPv4 文件", value: resource.file4 }]),
+      ...(resource.file6 === null ? [] : [{ label: "IPv6 文件", value: resource.file6 }]),
+    ];
+  }
+  return [{
+    label: resource.transport === "ssh" ? "RPKI SSH" : "RPKI-RTR",
+    value: `${resource.remote}:${resource.port}`,
+  }];
+}
+
+function rpkiResourceAction(resource: RpkiSource): string {
+  if (resource.sourceType === "file") return "先将 ROA 文件同步到上述路径并配置持续更新，再运行准备脚本。";
+  return resource.transport === "ssh"
+    ? "确认新节点可访问该 SSH 服务，且 BIRD 使用的用户、私钥与远端公钥已部署。"
+    : "确认新节点可访问该 RPKI-RTR 地址和端口；使用 TCP-MD5 时还需确认两端密钥一致。";
 }
 
 function applySystemPreset(preset: NodeSystemPreset): void {
@@ -303,6 +326,11 @@ onBeforeUnmount(() => {
             <div class="field full-width"><label for="nodeEditorSocketPath">控制 Socket</label><input id="nodeEditorSocketPath" v-model.trim="draft.socketPath" required :disabled="editing"></div>
           </div>
         </details>
+        <section v-if="!editing && globalRpkiResources.length" id="nodeGlobalRpkiWarning" class="node-rpki-warning full-width" role="status" aria-live="polite">
+          <div class="node-rpki-warning-head"><strong>全节点 RPKI 前置条件</strong><span>{{ globalRpkiResources.length }} 个资源</span></div>
+          <p>这些资源会自动应用到新节点。请在测试连接前完成对应处理；不适用于该节点时，请先到 RPKI 资源中把作用域改为指定节点。</p>
+          <ul><li v-for="resource in globalRpkiResources" :key="resource.id"><strong>{{ resource.label }}</strong><div v-for="detail in rpkiResourceDetails(resource)" :key="`${resource.id}:${detail.label}:${detail.value}`"><span>{{ detail.label }}</span><code>{{ detail.value }}</code></div><p class="node-rpki-action"><span>处理</span>{{ rpkiResourceAction(resource) }}</p></li></ul>
+        </section>
         <section v-if="!editing" id="nodeOnboardingPanel" class="node-onboarding full-width">
           <div class="node-onboarding-head"><strong>节点接入</strong><span :class="onboardingState">{{ onboardingStatus }}</span></div>
           <div class="node-onboarding-actions">

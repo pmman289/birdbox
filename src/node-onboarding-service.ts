@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { ChangeEvent, NodeRuntime } from "../packages/contracts/src/api.js";
+import type { ChangeEvent, NodeOnboardingRpkiRequirement, NodeRuntime } from "../packages/contracts/src/api.js";
 import type { Inventory, ManagedNode } from "../packages/contracts/src/inventory.js";
 import {
   ACTIVE_BIRD_INCLUDE_AWK,
@@ -68,12 +68,57 @@ function normalizeOnboardingNode(inputValue: unknown, id = "node_onboarding"): M
   return node as ManagedSshNode;
 }
 
+export function globalRpkiFileRequirements(inventory: Inventory): NodeOnboardingRpkiRequirement[] {
+  return inventory.rpki.flatMap((resource) => {
+    if (!resource.enabled || resource.nodeId !== null || resource.sourceType !== "file") return [];
+    return [
+      ...(resource.file4 === null ? [] : [{
+        resourceId: resource.id,
+        resourceLabel: resource.label,
+        family: "ipv4" as const,
+        path: resource.file4,
+      }]),
+      ...(resource.file6 === null ? [] : [{
+        resourceId: resource.id,
+        resourceLabel: resource.label,
+        family: "ipv6" as const,
+        path: resource.file6,
+      }]),
+    ];
+  });
+}
+
+export function onboardingValidationError(
+  requirements: readonly NodeOnboardingRpkiRequirement[],
+  detail: string,
+): string {
+  const requirement = requirements.find((item) => detail.includes(item.path));
+  if (!requirement) return detail;
+  return `全节点 RPKI 资源“${requirement.resourceLabel}”要求新节点提供 ${requirement.family.toUpperCase()} ROA 文件：${requirement.path}。请先在目标节点部署并持续更新该文件；若此资源不适用于新节点，请将其作用域改为指定节点。BIRD 原始错误：${detail}`;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function nodeSetupScript(
   node: ManagedSshNode,
   controllerPublicKey: string,
+  rpkiRequirements: readonly NodeOnboardingRpkiRequirement[],
 ): { includeLine: string; script: string } {
   const directory = path.posix.dirname(node.generatedConfigPath);
   const includeLine = `include "${node.generatedConfigPath}";`;
+  const rpkiPreflight = rpkiRequirements.length === 0 ? "" : `
+RPKI_MISSING=0
+${rpkiRequirements.map((requirement) => `if [ ! -r ${shellSingleQuote(requirement.path)} ]; then
+  printf '%s\\n' ${shellSingleQuote(`全节点 RPKI 资源“${requirement.resourceLabel}”缺少 ${requirement.family.toUpperCase()} ROA 文件：${requirement.path}`)} >&2
+  RPKI_MISSING=1
+fi`).join("\n")}
+if [ "$RPKI_MISSING" -ne 0 ]; then
+  echo "请先部署并持续更新上述文件；若资源不适用于此节点，请在 Birdbox 中把 RPKI 作用域改为指定节点" >&2
+  exit 1
+fi
+`;
   return {
     includeLine,
     script: `#!/bin/sh
@@ -107,6 +152,7 @@ if [ "$IS_OPENWRT" -eq 1 ]; then
       ;;
   esac
 fi
+${rpkiPreflight}
 test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }
 test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
 for REQUIRED_COMMAND in birdc stat mkdir mktemp awk grep chown chmod cp mv ln readlink id cut tr; do
@@ -461,10 +507,14 @@ async function inspectOnboardingNode(node: ManagedSshNode): Promise<NodeRuntime>
 async function verifyOnboardingNode(
   node: ManagedSshNode,
   config: string,
+  rpkiRequirements: readonly NodeOnboardingRpkiRequirement[],
 ): Promise<{ runtime: NodeRuntime; validation: { ok: true } }> {
   const runtime = await inspectOnboardingNode(node);
   const validation = await stageAndValidate(node, config);
-  if (!validation.ok) fail(422, validation.stderr || validation.stdout || "系统主配置预检失败");
+  if (!validation.ok) {
+    const detail = validation.stderr || validation.stdout || "系统主配置预检失败";
+    fail(422, onboardingValidationError(rpkiRequirements, detail));
+  }
   return { runtime, validation: { ok: true } };
 }
 
@@ -478,11 +528,14 @@ export class NodeOnboardingService {
 
   async createSetupScript(body: Record<string, unknown>) {
     const node = normalizeOnboardingNode(body);
+    const inventory = await this.#options.store.read();
+    const rpkiRequirements = globalRpkiFileRequirements(inventory);
     return {
       status: 200,
       payload: {
-        ...nodeSetupScript(node, this.#options.controllerPublicKey()),
+        ...nodeSetupScript(node, this.#options.controllerPublicKey(), rpkiRequirements),
         publicKey: this.#options.controllerPublicKey(),
+        rpkiRequirements,
       },
     };
   }
@@ -494,7 +547,11 @@ export class NodeOnboardingService {
       const candidate = structuredClone(current);
       candidate.nodes.push(node);
       const inventory = validateInventory(candidate);
-      return verifyOnboardingNode(node, configForNode(inventory, node));
+      return verifyOnboardingNode(
+        node,
+        configForNode(inventory, node),
+        globalRpkiFileRequirements(current),
+      );
     });
     return {
       status: 200,

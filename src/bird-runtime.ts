@@ -52,7 +52,24 @@ interface ExecError extends ExecFileException {
   stderr?: string;
 }
 
+const OPENSSH_INFORMATION_LINES = new Set([
+  "** WARNING: connection is not using a post-quantum key exchange algorithm.",
+  "** This session may be vulnerable to \"store now, decrypt later\" attacks.",
+  "** The server may need to be upgraded. See https://openssh.com/pq.html",
+]);
+
 let managedSshConfiguration: ManagedSshConfiguration = { identityFile: null, knownHostsFile: null };
+
+function commandStderr(node: ManagedNode, value: unknown): string {
+  const stderr = String(value ?? "").replace(/\r\n/g, "\n");
+  if (node.transport !== "ssh") return stderr.trim();
+  return stderr
+    .split("\n")
+    .filter((line) => !OPENSSH_INFORMATION_LINES.has(line))
+    .filter((line) => !/^Warning: Permanently added .+ to the list of known hosts\.$/.test(line))
+    .join("\n")
+    .trim();
+}
 
 export function configureManagedSsh({ identityFile, knownHostsFile }: { identityFile: string; knownHostsFile: string }): void {
   managedSshConfiguration = {
@@ -180,13 +197,13 @@ export async function runOnNode(nodeInput: unknown, command: string, options: Ru
       maxBuffer,
       encoding: "utf8",
     }, options.input);
-    return { ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+    return { ok: true, stdout: result.stdout.trim(), stderr: commandStderr(node, result.stderr) };
   } catch (error) {
     const execError = error as ExecError;
     return {
       ok: false,
       stdout: String(execError.stdout ?? "").trim(),
-      stderr: String(execError.stderr ?? execError.message ?? "命令执行失败").trim(),
+      stderr: commandStderr(node, execError.stderr ?? execError.message ?? "命令执行失败"),
       code: execError.code ?? 1,
     };
   }

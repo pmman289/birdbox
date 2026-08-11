@@ -14,10 +14,52 @@ async function authenticate(page: import("@playwright/test").Page): Promise<void
 test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.route("**/api/dashboard**", async (route) => {
+    const response = await route.fetch();
+    const dashboard = await response.json();
+    dashboard.inventory.rpki = [
+      {
+        id: "e2e_global_roa",
+        nodeId: null,
+        label: "E2E 全局 ROA",
+        name: "e2e_global_roa",
+        enabled: true,
+        sourceType: "file",
+        roa4Table: "E2E_ROA4",
+        roa6Table: "E2E_ROA6",
+        file4: "/etc/bird/e2e-roa4.conf",
+        file6: "/etc/bird/e2e-roa6.conf",
+      },
+      {
+        id: "e2e_global_rtr",
+        nodeId: null,
+        label: "E2E 全局 RTR",
+        name: "e2e_global_rtr",
+        enabled: true,
+        sourceType: "server",
+        roa4Table: "E2E_RTR4",
+        roa6Table: null,
+        remote: "rpki.example",
+        port: 323,
+        transport: "tcp",
+        authentication: "none",
+      },
+    ];
+    await route.fulfill({ response, json: dashboard });
+  });
   await authenticate(page);
   await page.locator("#resourceWorkspaceTab").click();
 
   await page.locator("#resource-nodes .primary-button").click();
+  const rpkiWarning = page.locator("#nodeGlobalRpkiWarning");
+  await expect(rpkiWarning).toBeVisible();
+  await expect(rpkiWarning).toContainText("E2E 全局 ROA");
+  await expect(rpkiWarning).toContainText("/etc/bird/e2e-roa4.conf");
+  await expect(rpkiWarning).toContainText("先将 ROA 文件同步到上述路径");
+  await expect(rpkiWarning).toContainText("E2E 全局 RTR");
+  await expect(rpkiWarning).toContainText("rpki.example:323");
+  await expect(rpkiWarning).toContainText("确认新节点可访问该 RPKI-RTR 地址和端口");
+  await expect(rpkiWarning).toContainText("把作用域改为指定节点");
   await page.locator("#nodeEditorName").fill("E2E SSH Router");
   await page.locator("#nodeEditorSshHost").fill("192.0.2.10");
   await page.locator("#nodeEditorSshUser").fill("birdbox");
