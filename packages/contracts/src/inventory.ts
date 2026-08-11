@@ -1,6 +1,7 @@
 export type AddressFamily = "ipv4" | "ipv6";
 export type SwitchSetting = "default" | "on" | "off";
 export type ResourceScope = string | null;
+export type MultiNodeResourceScope = string[] | null;
 export type BgpSessionType = "ebgp" | "ibgp";
 
 export interface ManagedNode {
@@ -42,32 +43,39 @@ export interface Peer {
   managedBy?: BgpManagedBy;
 }
 
-interface PolicyResourceBase {
+interface NamedPolicyResourceBase {
   id: string;
-  nodeId: ResourceScope;
   label: string;
   name: string;
   enabled: boolean;
 }
 
-export interface CidrDefine extends PolicyResourceBase {
+interface MultiNodePolicyResourceBase extends NamedPolicyResourceBase {
+  nodeIds: MultiNodeResourceScope;
+}
+
+interface SingleNodePolicyResourceBase extends NamedPolicyResourceBase {
+  nodeId: ResourceScope;
+}
+
+export interface CidrDefine extends MultiNodePolicyResourceBase {
   type: "cidr4" | "cidr6";
   entries: string[];
 }
 
-export interface ExpressionDefine extends PolicyResourceBase {
+export interface ExpressionDefine extends MultiNodePolicyResourceBase {
   type: "expression";
   value: string;
 }
 
 export type PolicyDefine = CidrDefine | ExpressionDefine;
 
-export interface PolicyFunction extends PolicyResourceBase {
+export interface PolicyFunction extends MultiNodePolicyResourceBase {
   source: string;
   callable: boolean;
 }
 
-export interface PolicyFilter extends PolicyResourceBase {
+export interface PolicyFilter extends SingleNodePolicyResourceBase {
   source: string;
 }
 
@@ -99,7 +107,7 @@ export interface StaticProtocol {
   enabled: boolean;
 }
 
-interface RpkiBase extends PolicyResourceBase {
+interface RpkiBase extends SingleNodePolicyResourceBase {
   sourceType: "file" | "server";
   roa4Table: string | null;
   roa6Table: string | null;
@@ -309,7 +317,7 @@ export interface IbgpDomain {
 }
 
 export interface Inventory {
-  version: 23;
+  version: 24;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];

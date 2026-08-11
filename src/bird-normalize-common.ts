@@ -144,6 +144,16 @@ export function normalizeResourceScope(value: unknown): string | null {
   return value === null || value === undefined || value === "" ? null : normalizeId(value, "所属节点 ID");
 }
 
+export function normalizeMultiNodeResourceScope(value: unknown, legacyValue: unknown = undefined): string[] | null {
+  const source = value === undefined ? legacyValue : value;
+  if (source === null || source === undefined || source === "") return null;
+  const values = Array.isArray(source) ? source : [source];
+  assertValidation(values.length > 0, "可用范围至少需要选择一个节点");
+  const nodeIds = values.map((item) => normalizeId(item, "所属节点 ID"));
+  assertValidation(new Set(nodeIds).size === nodeIds.length, "可用范围不能重复选择节点");
+  return nodeIds;
+}
+
 export function normalizeNode(inputValue: unknown): ManagedNode {
   const input = inputRecord(inputValue, "节点参数不能为空");
   const transport = input.transport ?? "ssh";

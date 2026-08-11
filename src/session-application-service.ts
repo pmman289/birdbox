@@ -6,6 +6,7 @@ import type {
   ManagedNode,
   Peer,
 } from "../packages/contracts/src/inventory.js";
+import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import {
   applyStagedConfig,
   inspectNode,
@@ -256,7 +257,7 @@ export class SessionApplicationService {
       ) {
         fail(400, `所选 Define 不是可用的 ${family.toUpperCase()} CIDR 类型`);
       }
-      if (exportDefine && exportDefine.nodeId !== null && exportDefine.nodeId !== node.id) {
+      if (exportDefine && !resourceAppliesToNode(exportDefine, node.id)) {
         fail(400, "所选 CIDR Define 对该节点不可用");
       }
       exportDefines[family] = exportDefine;

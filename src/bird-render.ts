@@ -15,6 +15,7 @@ import type {
   StaticRouteFilter,
   StaticRouteFilterOperation,
 } from "../packages/contracts/src/inventory.js";
+import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import {
   assertValidation,
   channelRequiresExtendedNextHop,
@@ -360,7 +361,7 @@ function normalizeActiveSessions(
       assertValidation(
         channel.exportDefineId === null || (
           exportDefine?.type === expectedType
-          && (exportDefine.nodeId === null || exportDefine.nodeId === node.id)
+          && resourceAppliesToNode(exportDefine, node.id)
         ),
         `会话 ${session.protocolName} 的 ${family.toUpperCase()} 导出 CIDR Define 对节点 ${node.name} 不可用`,
       );
@@ -398,7 +399,7 @@ export function renderBirdConfig(
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
   for (const resource of [...defines, ...functions, ...filters]) {
-    assertValidation(resource.nodeId === null || resource.nodeId === node.id, `策略 ${resource.name} 对节点 ${node.name} 不可用`);
+    assertValidation(resourceAppliesToNode(resource, node.id), `策略 ${resource.name} 对节点 ${node.name} 不可用`);
   }
   const table4Names = new Set(rpki.map((item) => item.roa4Table).filter((value): value is string => value !== null));
   const table6Names = new Set(rpki.map((item) => item.roa6Table).filter((value): value is string => value !== null));
@@ -410,7 +411,7 @@ export function renderBirdConfig(
     assertValidation(
       resource.defineId === null || (
         staticDefine?.type === expectedType
-        && (staticDefine.nodeId === null || staticDefine.nodeId === node.id)
+        && resourceAppliesToNode(staticDefine, node.id)
       ),
       `Static 资源 ${resource.name} 的 CIDR Define 对节点 ${node.name} 不可用`,
     );

@@ -11,6 +11,7 @@ import type {
 } from "@birdbox/contracts/inventory";
 
 import type { ResourceWorkspaceTarget } from "../shared/events";
+import { resourceScopeShortLabel } from "../shared/resource-scope";
 
 const props = defineProps<{
   family: AddressFamily;
@@ -115,7 +116,7 @@ function stepSubtitle(step: ChannelPolicy["steps"][number]): string {
     return "不导出";
   }
   const resource = functionMap.value.get(step.functionId);
-  return resource ? `${resource.name}() · ${resource.nodeId === null ? "所有节点" : "当前节点"}` : step.functionId;
+  return resource ? `${resource.name}() · ${resourceScopeShortLabel(resource)}` : step.functionId;
 }
 
 function openResource(target: ResourceWorkspaceTarget): void {
@@ -178,7 +179,7 @@ function openResource(target: ResourceWorkspaceTarget): void {
           <div class="select-actions prefix-select-actions">
             <select :value="exportDefineId ?? ''" :disabled="disabled" required @change="emit('update:exportDefineId', ($event.currentTarget as HTMLSelectElement).value || null)">
               <option value="">不导出 CIDR</option>
-              <option v-for="resource in defines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }}{{ resource.nodeId === null ? " · 所有节点" : "" }}</option>
+              <option v-for="resource in defines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource) }}</option>
             </select>
             <button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Define" aria-label="前往资源管理 Tab 管理 Define" @click="openResource('defines')">?</button>
           </div>

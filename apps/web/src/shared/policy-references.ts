@@ -1,8 +1,13 @@
 import type { PolicyCollection } from "@birdbox/contracts/inventory";
+import {
+  resourceScopeContains,
+  type MultiNodeScopedResource,
+  type NodeScopedResource,
+} from "../../../../packages/contracts/src/resource-scope";
 
 export interface PolicyReferenceResource {
   id: string;
-  nodeId: string | null;
+  nodeIds: string[] | null;
   name: string;
   enabled: boolean;
   callable?: boolean;
@@ -18,6 +23,7 @@ export interface AvailablePolicyReferenceInput {
   collection: PolicyCollection;
   currentId?: string;
   nodeId?: string | null;
+  nodeIds?: string[] | null;
 }
 
 export interface AvailablePolicyReferences {
@@ -25,17 +31,17 @@ export interface AvailablePolicyReferences {
   functions: PolicyReferenceResource[];
 }
 
-function compatibleWithScope(resource: PolicyReferenceResource, nodeId: string | null): boolean {
-  return resource.nodeId === null || (nodeId !== null && resource.nodeId === nodeId);
+function compatibleWithScope(resource: PolicyReferenceResource, consumer: NodeScopedResource): boolean {
+  return resourceScopeContains(resource, consumer);
 }
 
 function enabledCompatibleResources(
   resources: PolicyReferenceResource[] | null | undefined,
-  nodeId: string | null,
+  consumer: NodeScopedResource,
   currentId: string,
 ): PolicyReferenceResource[] {
   return (resources ?? []).filter((resource) =>
-    resource.enabled && resource.id !== currentId && compatibleWithScope(resource, nodeId),
+    resource.enabled && resource.id !== currentId && compatibleWithScope(resource, consumer),
   );
 }
 
@@ -44,9 +50,11 @@ export function availablePolicySourceReferences({
   collection,
   currentId = "",
   nodeId = null,
+  nodeIds,
 }: AvailablePolicyReferenceInput): AvailablePolicyReferences {
+  const consumer: NodeScopedResource = nodeIds === undefined ? { nodeId } : { nodeIds } satisfies MultiNodeScopedResource;
   const inventoryDefines = inventory?.defines ?? [];
-  const defines = enabledCompatibleResources(inventoryDefines, nodeId, currentId);
+  const defines = enabledCompatibleResources(inventoryDefines, consumer, currentId);
   const currentDefineIndex = inventoryDefines.findIndex((resource) => resource.id === currentId);
   const orderedDefines = collection === "defines" && currentDefineIndex >= 0
     ? defines.filter((resource) => inventoryDefines.indexOf(resource) < currentDefineIndex)
@@ -57,7 +65,7 @@ export function availablePolicySourceReferences({
   }
 
   const inventoryFunctions = inventory?.functions ?? [];
-  const functions = enabledCompatibleResources(inventoryFunctions, nodeId, currentId);
+  const functions = enabledCompatibleResources(inventoryFunctions, consumer, currentId);
   const currentFunctionIndex = inventoryFunctions.findIndex((resource) => resource.id === currentId);
   const orderedFunctions = collection === "functions" && currentFunctionIndex >= 0
     ? functions.filter((resource) => inventoryFunctions.indexOf(resource) < currentFunctionIndex)

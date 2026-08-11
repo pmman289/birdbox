@@ -150,6 +150,30 @@ exit 0
   assert.deepEqual(updated.body.inventory.defines[0].entries, ["203.0.113.0/24"]);
   assert.match(await fs.readFile(fakeLog, "utf8"), /bird .* -c .*bird\.conf/);
 
+  const legacyScoped = await authenticatedRequest("/api/defines/define_test", {
+    method: "PUT",
+    body: JSON.stringify({ nodeId: "local" }),
+  });
+  assert.equal(legacyScoped.status, 200);
+  assert.deepEqual(legacyScoped.body.resource.nodeIds, ["local"]);
+  assert.equal(Object.hasOwn(legacyScoped.body.resource, "nodeId"), false);
+
+  const restoredGlobal = await authenticatedRequest("/api/defines/define_test", {
+    method: "PUT",
+    body: JSON.stringify({ nodeIds: null }),
+  });
+  assert.equal(restoredGlobal.status, 200);
+  assert.equal(restoredGlobal.body.resource.nodeIds, null);
+
+  const rejectedScope = await authenticatedRequest("/api/defines/define_test", {
+    method: "PUT",
+    body: JSON.stringify({ nodeIds: ["local", "missing"] }),
+  });
+  assert.equal(rejectedScope.status, 400);
+  assert.match(rejectedScope.body.error, /不存在的节点/);
+  const afterRejectedScope = await authenticatedRequest("/api/dashboard");
+  assert.equal(afterRejectedScope.body.inventory.defines[0].nodeIds, null);
+
   const createdStatic = await authenticatedRequest("/api/statics", {
     method: "POST",
     body: JSON.stringify({

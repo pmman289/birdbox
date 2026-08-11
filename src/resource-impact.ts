@@ -1,14 +1,12 @@
 import type { BgpSession, Inventory } from "../packages/contracts/src/inventory.js";
-
-export interface NodeScopedResource {
-  nodeId: string | null;
-}
+import { scopedNodeIds, type NodeScopedResource } from "../packages/contracts/src/resource-scope.js";
 
 type ResourceImpactInventory = Pick<Inventory, "nodes" | "sessions">;
 
 function scopeNodeIds(state: ResourceImpactInventory, resource: NodeScopedResource | null | undefined): string[] {
-  if (!resource || resource.nodeId === null) return state.nodes.map((node) => node.id);
-  return [resource.nodeId];
+  if (!resource) return state.nodes.map((node) => node.id);
+  const nodeIds = scopedNodeIds(resource);
+  return nodeIds === null ? state.nodes.map((node) => node.id) : [...nodeIds];
 }
 
 export function uniqueNodeIds(...groups: ReadonlyArray<ReadonlyArray<string | null | undefined>>): string[] {

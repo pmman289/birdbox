@@ -11,6 +11,10 @@ import type {
   StaticProtocol,
 } from "../packages/contracts/src/inventory.js";
 import {
+  resourceAppliesToNode,
+  resourceExplicitlyScopesNode,
+} from "../packages/contracts/src/resource-scope.js";
+import {
   birdSourceReferencesSymbol,
   locateStaticRouteDiagnostic,
   normalizeDefine,
@@ -75,7 +79,7 @@ export function nodePolicyResources<Collection extends PolicyCollection>(
   enabledOnly = false,
 ): Inventory[Collection] {
   return state[collection].filter((item) =>
-    (item.nodeId === null || item.nodeId === nodeId) && (!enabledOnly || item.enabled),
+    resourceAppliesToNode(item, nodeId) && (!enabledOnly || item.enabled),
   ) as Inventory[Collection];
 }
 
@@ -93,8 +97,13 @@ export function ownedNodePolicyResources(
   state: Inventory,
   nodeId: string,
 ): Array<PolicyResource | RpkiSource | StaticProtocol> {
-  return [...state.defines, ...state.functions, ...state.filters, ...state.rpki, ...state.staticProtocols]
-    .filter((item) => item.nodeId === nodeId);
+  return [
+    ...state.defines.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
+    ...state.functions.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
+    ...state.filters.filter((item) => item.nodeId === nodeId),
+    ...state.rpki.filter((item) => item.nodeId === nodeId),
+    ...state.staticProtocols.filter((item) => item.nodeId === nodeId),
+  ];
 }
 
 export function resourceReferencesSymbol(

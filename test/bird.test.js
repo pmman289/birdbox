@@ -258,6 +258,8 @@ test("calculates resource edit scope and the existing sessions that will be relo
     sessions: [sessions[0], { ...sessions[1], nodeId: "other", peerId: peers[1].id }],
   });
   assert.deepEqual(resourceNodeIds(state, state.defines[0]), ["local", "other"]);
+  assert.deepEqual(resourceNodeIds(state, { nodeIds: ["local", "other"] }), ["local", "other"]);
+  assert.deepEqual(resourceChangeNodeIds(state, { nodeIds: ["local"] }, { nodeIds: ["other"] }), ["local", "other"]);
   assert.deepEqual(resourceChangeNodeIds(state, { nodeId: "local" }, { nodeId: "other" }), ["local", "other"]);
   assert.deepEqual(resourceChangeSessions(state, ["other"]).map((session) => session.id), ["session_ix"]);
 });
@@ -451,7 +453,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
   const globalDefine = { ...cidrDefines[0], nodeId: null, name: "GLOBAL_EXPORTS" };
   const globalSession = { ...sessions[0], exportDefineId: globalDefine.id };
   const state = validateInventory({ nodes: [node, otherNode], peers: [peers[0]], defines: [globalDefine], sessions: [globalSession] });
-  assert.equal(state.defines[0].nodeId, null);
+  assert.equal(state.defines[0].nodeIds, null);
   assert.throws(
     () => validateInventory({
       nodes: [node, otherNode],
@@ -782,7 +784,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 23);
+  assert.equal(state.version, 24);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.throws(
     () => validateInventory({
@@ -805,15 +807,35 @@ test("validates policy scope, enabled state, callability, and global names", () 
     name: "scoped_reference",
     source: "function scoped_reference() { return net ~ TRANSIT_EXPORTS; }",
   };
-  assert.equal(validateInventory({
+  assert.deepEqual(validateInventory({
     nodes: [node], peers: [], defines: [cidrDefines[0]], functions: [scopedReference], filters: [], sessions: [],
-  }).functions[0].nodeId, "local");
+  }).functions[0].nodeIds, ["local"]);
   assert.throws(
     () => validateInventory({
       nodes: [node], peers: [], defines: [cidrDefines[0]],
       functions: [{ ...scopedReference, nodeId: null }], filters: [], sessions: [],
     }),
     /作用域不兼容的 Define TRANSIT_EXPORTS/,
+  );
+  const otherNode = { ...node, id: "other", name: "Other", routerId: "192.0.2.2", transport: "ssh", sshHost: "other.example" };
+  const sharedDefine = { ...cidrDefines[0], nodeIds: ["local", "other"], name: "SHARED_EXPORTS" };
+  const sharedFunction = {
+    ...policyFunctions[0],
+    nodeIds: ["local", "other"],
+    name: "shared_function",
+    source: "function shared_function() { return net ~ SHARED_EXPORTS; }",
+  };
+  const multiState = validateInventory({
+    nodes: [node, otherNode], peers: [], defines: [sharedDefine], functions: [sharedFunction], filters: [], sessions: [],
+  });
+  assert.deepEqual(multiState.defines[0].nodeIds, ["local", "other"]);
+  assert.deepEqual(multiState.functions[0].nodeIds, ["local", "other"]);
+  assert.throws(
+    () => validateInventory({
+      nodes: [node, otherNode], peers: [],
+      defines: [{ ...sharedDefine, nodeIds: ["local"] }], functions: [sharedFunction], filters: [], sessions: [],
+    }),
+    /作用域不兼容的 Define SHARED_EXPORTS/,
   );
 });
 

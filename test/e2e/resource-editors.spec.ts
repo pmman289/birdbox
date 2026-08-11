@@ -95,13 +95,21 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator('#managementDefineRows .row-edit-button[title="编辑 Define"]').click();
   await expect(page.locator("#policyResourceDialog")).toBeVisible();
   await expect(page.locator("#policyResourceSourceLabel")).toContainText("CIDR");
+  await expect(page.locator('input[name="policyResourceScopeMode"][value="selected"]')).toBeChecked();
+  await expect(page.locator('.policy-scope-node input[value="local"]')).toBeChecked();
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
   await page.locator("#resourceFunctionsTab").click();
   await page.locator("#resource-functions .primary-button").click();
   await expect(page.locator("#policyResourceDialog")).toBeVisible();
-  await page.locator("#policyResourceNodeId").selectOption({ index: 1 });
+  await page.locator("#policyResourceNodeScope .segmented-control label").filter({ hasText: "指定节点" }).click();
+  await page.locator("#savePolicyResourceButton").click();
+  await expect(page.locator("#policyResourceNodeScope")).toHaveAttribute("aria-invalid", "true");
+  await page.locator('.policy-scope-node input[value="local"]').check();
   await expect(page.locator("#policySourceReferences")).toContainText("e2e_peer CIDRs");
+  await page.locator('.policy-scope-node input[value="edge"]').check();
+  await expect(page.locator("#policySourceReferences")).not.toContainText("e2e_peer CIDRs");
+  await expect(page.locator("#policyResourceNodeScope")).toContainText("已选择 2 个节点");
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
   await page.locator("#resourceStaticsTab").click();

@@ -9,6 +9,7 @@ import type {
   PolicyFilter,
   PolicyFunction,
 } from "@birdbox/contracts/inventory";
+import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
 
 import BgpOptionsEditor from "../sessions/BgpOptionsEditor.vue";
 import ChannelEditor from "../sessions/ChannelEditor.vue";
@@ -41,7 +42,7 @@ const visibleDefines = computed(() => {
     (resource) =>
       resource.enabled &&
       resource.type === type &&
-      (resource.nodeId === null || resource.nodeId === model.value.nodeId),
+      resourceAppliesToNode(resource, model.value.nodeId),
   );
 });
 
@@ -50,7 +51,7 @@ const visibleFunctions = computed(() =>
     (resource) =>
       resource.enabled &&
       resource.callable &&
-      (resource.nodeId === null || resource.nodeId === model.value.nodeId),
+      resourceAppliesToNode(resource, model.value.nodeId),
   ),
 );
 

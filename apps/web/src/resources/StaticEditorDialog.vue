@@ -9,6 +9,7 @@ import type {
   StaticRouteFilter,
   StaticRouteFilterOperation,
 } from "@birdbox/contracts/inventory";
+import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
 
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
@@ -16,6 +17,7 @@ import { deploymentSummary } from "../shared/deployment";
 import { dispatchToast } from "../shared/events";
 import { clearFormValidation, markFieldInvalid, presentFormError, validateForm } from "../shared/form-validation";
 import { uniqueBirdName } from "../shared/resource-names";
+import { resourceScopeShortLabel } from "../shared/resource-scope";
 import StaticRouteOperationRow from "./StaticRouteOperationRow.vue";
 
 type RouteActionKind = "blackhole" | "reject" | "unreachable" | "prohibit" | "via";
@@ -32,7 +34,7 @@ interface ReferenceItem {
   symbol: string;
   insertion: string;
   kind: "Define" | "Function";
-  nodeId: string | null;
+  nodeIds: string[] | null;
 }
 
 const dialog = ref<HTMLDialogElement | null>(null);
@@ -66,11 +68,10 @@ const draft = reactive<StaticDraft>({
 const editing = computed(() => editingId.value !== null);
 const inventory = computed(() => dashboard.value?.inventory ?? null);
 const nodes = computed(() => inventory.value?.nodes ?? []);
-const nodeNames = computed(() => new Map(nodes.value.map((node) => [node.id, node.name])));
 const compatibleDefines = computed<CidrDefine[]>(() => (inventory.value?.defines ?? []).filter((resource): resource is CidrDefine =>
   resource.enabled
   && resource.type === (draft.family === "ipv6" ? "cidr6" : "cidr4")
-  && (resource.nodeId === null || resource.nodeId === draft.nodeId),
+  && resourceAppliesToNode(resource, draft.nodeId),
 ));
 const selectedDefine = computed(() => compatibleDefines.value.find((resource) => resource.id === draft.defineId) ?? null);
 const routeEntries = computed(() => (selectedDefine.value?.entries ?? []).filter((entry) => /^[0-9A-Fa-f:.]+\/\d{1,3}$/.test(entry)));
@@ -81,12 +82,12 @@ const references = computed<ReferenceItem[]>(() => {
   const current = inventory.value;
   if (!current) return [];
   const items: ReferenceItem[] = [
-    ...current.defines.filter((item) => item.enabled && (item.nodeId === null || item.nodeId === draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: item.name, insertion: item.name, kind: "Define" as const, nodeId: item.nodeId })),
-    ...current.functions.filter((item) => item.enabled && item.callable && (item.nodeId === null || item.nodeId === draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: `${item.name}()`, insertion: `${item.name}()`, kind: "Function" as const, nodeId: item.nodeId })),
+    ...current.defines.filter((item) => item.enabled && resourceAppliesToNode(item, draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: item.name, insertion: item.name, kind: "Define" as const, nodeIds: item.nodeIds })),
+    ...current.functions.filter((item) => item.enabled && item.callable && resourceAppliesToNode(item, draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: `${item.name}()`, insertion: `${item.name}()`, kind: "Function" as const, nodeIds: item.nodeIds })),
   ];
   const query = referenceSearch.value.trim().toLocaleLowerCase();
   if (!query) return items;
-  return items.filter((item) => [item.label, item.name, item.kind, item.symbol, item.nodeId === null ? "所有节点" : nodeNames.value.get(item.nodeId)].join(" ").toLocaleLowerCase().includes(query));
+  return items.filter((item) => [item.label, item.name, item.kind, item.symbol, resourceScopeShortLabel(item)].join(" ").toLocaleLowerCase().includes(query));
 });
 
 const preview = computed(() => {
@@ -412,7 +413,7 @@ onBeforeUnmount(() => {
         <div class="field"><label for="staticLabel">显示名称</label><input id="staticLabel" v-model.trim="draft.label" maxlength="80" required @input="syncName"></div>
         <div class="field"><label for="staticName">BIRD 名称（自动，可编辑）</label><input id="staticName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required @input="nameEdited = true"></div>
         <div class="field"><label for="staticFamily">地址族</label><select id="staticFamily" v-model="draft.family" @change="changeFamily"><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></select></div>
-        <div class="field"><label for="staticDefineId">CIDR Define</label><select id="staticDefineId" v-model="draft.defineId"><option :value="null">不创建标准路由</option><option v-for="resource in compatibleDefines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }}{{ resource.nodeId === null ? " · 所有节点" : "" }}</option></select></div>
+        <div class="field"><label for="staticDefineId">CIDR Define</label><select id="staticDefineId" v-model="draft.defineId"><option :value="null">不创建标准路由</option><option v-for="resource in compatibleDefines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource, draft.nodeId) }}</option></select></div>
         <div class="field"><label for="staticImport">Static Import</label><select id="staticImport" v-model="draft.import"><option value="all">all</option><option value="none">none</option></select></div>
         <div class="field"><label for="staticExport">Static Export</label><select id="staticExport" v-model="draft.export"><option value="none">none</option><option value="all">all</option></select></div>
         <section v-if="draft.defineId" id="staticRouteActionsSection" class="static-route-editor full-width" aria-labelledby="staticRouteActionsTitle">
@@ -440,7 +441,7 @@ onBeforeUnmount(() => {
                 <div id="staticFilterOperationList" class="static-filter-operation-list"><StaticRouteOperationRow v-for="(operation, index) in selectedFilter.operations" :key="`${selectedPrefix}-${index}-${operation.type}`" :operation="operation" :index="index" :total="selectedFilter.operations.length" @update="updateOperation(index, $event)" @remove="removeOperation(index)" @move="moveOperation(index, $event)" @apply-all="applyOperationToAll(index)" /><p v-if="!selectedFilter.operations.length" class="static-filter-empty">暂无快捷操作</p></div>
               </section>
               <div class="field static-route-custom-field"><label for="staticRouteCustom">自定义 per-route 源码</label><textarea id="staticRouteCustom" ref="customEditor" v-model="selectedFilter.custom" class="compact-code-editor" maxlength="8192" spellcheck="false" placeholder="if net.len = 24 then bgp_med = 50;"></textarea></div>
-              <section class="static-code-references" aria-labelledby="staticReferenceTitle"><div class="code-reference-toolbar"><div class="code-reference-heading"><strong id="staticReferenceTitle">可用资源</strong><span id="staticReferenceCount">{{ references.length }} 项</span></div><input id="staticReferenceSearch" v-model.trim="referenceSearch" type="search" placeholder="搜索 Define / Function"></div><div id="staticReferences" class="code-reference-groups"><section v-if="references.length" class="code-reference-group"><div class="code-reference-list"><button v-for="item in references" :key="item.id" class="code-reference-button" type="button" @click="insertReference(item)"><span class="code-reference-copy"><strong>{{ item.label }}</strong><code>{{ item.symbol }}</code></span><span class="code-reference-meta"><span>{{ item.kind }}</span><span>{{ item.nodeId === null ? "所有节点" : (nodeNames.get(item.nodeId) ?? item.nodeId) }}</span></span></button></div></section><span v-else class="code-reference-empty">没有匹配的资源</span></div></section>
+              <section class="static-code-references" aria-labelledby="staticReferenceTitle"><div class="code-reference-toolbar"><div class="code-reference-heading"><strong id="staticReferenceTitle">可用资源</strong><span id="staticReferenceCount">{{ references.length }} 项</span></div><input id="staticReferenceSearch" v-model.trim="referenceSearch" type="search" placeholder="搜索 Define / Function"></div><div id="staticReferences" class="code-reference-groups"><section v-if="references.length" class="code-reference-group"><div class="code-reference-list"><button v-for="item in references" :key="item.id" class="code-reference-button" type="button" @click="insertReference(item)"><span class="code-reference-copy"><strong>{{ item.label }}</strong><code>{{ item.symbol }}</code></span><span class="code-reference-meta"><span>{{ item.kind }}</span><span>{{ resourceScopeShortLabel(item, draft.nodeId) }}</span></span></button></div></section><span v-else class="code-reference-empty">没有匹配的资源</span></div></section>
               <div class="static-route-preview"><span>最终 BIRD 路由</span><pre id="staticRoutePreview">{{ preview }}</pre></div>
             </div>
           </div>

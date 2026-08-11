@@ -12,6 +12,7 @@ import type {
 
 import type { ResourceEditKind } from "../shared/events";
 import { useDashboardStore } from "../dashboard/dashboard-store";
+import { resourceScopeCompactLabel, resourceScopeLabel } from "../shared/resource-scope";
 
 const { kind } = defineProps<{ kind: ResourceEditKind }>();
 const { dashboard } = useDashboardStore();
@@ -28,10 +29,6 @@ function move(event: MouseEvent, collection: PolicyCollection, id: string, direc
   window.dispatchEvent(new CustomEvent("birdbox:resource-move", {
     detail: { collection, id, direction, button: event.currentTarget as HTMLButtonElement },
   }));
-}
-
-function scopeName(nodeId: string | null): string {
-  return nodeId === null ? "所有节点" : (nodeNames.value.get(nodeId) ?? nodeId);
 }
 
 function status(resource: { enabled: boolean }, collection: PolicyCollection): string {
@@ -122,7 +119,7 @@ function staticSummary(resource: StaticProtocol): string {
     <tr v-for="(resource, index) in inventory?.defines ?? []" v-else :key="resource.id">
       <td><strong>{{ resource.label }}</strong><small>{{ resource.name }} · {{ resource.id }}</small></td>
       <td>{{ defineType(resource) }}</td>
-      <td>{{ scopeName(resource.nodeId) }}</td>
+      <td :title="resourceScopeLabel(resource, nodeNames)">{{ resourceScopeCompactLabel(resource, nodeNames) }}</td>
       <td>{{ index + 1 }}</td>
       <td><code class="entry-summary" :title="defineValue(resource)">{{ defineValue(resource) }}</code></td>
       <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ status(resource, 'defines') }}</span></td>
@@ -152,7 +149,7 @@ function staticSummary(resource: StaticProtocol): string {
     <tr v-if="!inventory?.functions.length"><td colspan="6" class="empty-cell">尚无 Function</td></tr>
     <tr v-for="(resource, index) in inventory?.functions ?? []" v-else :key="resource.id">
       <td><strong>{{ resource.label ?? resource.name }}</strong><small>{{ resource.name }} · {{ resource.id }}</small></td>
-      <td>{{ scopeName(resource.nodeId) }}</td>
+      <td :title="resourceScopeLabel(resource, nodeNames)">{{ resourceScopeCompactLabel(resource, nodeNames) }}</td>
       <td>{{ index + 1 }}</td>
       <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ status(resource, 'functions') }}</span></td>
       <td>{{ policyReferenceCount('functions', resource.id) }}</td>
@@ -168,7 +165,7 @@ function staticSummary(resource: StaticProtocol): string {
     <tr v-if="!inventory?.filters.length"><td colspan="5" class="empty-cell">尚无 Filter</td></tr>
     <tr v-for="resource in inventory?.filters ?? []" v-else :key="resource.id">
       <td><strong>{{ resource.label ?? resource.name }}</strong><small>{{ resource.name }} · {{ resource.id }}</small></td>
-      <td>{{ scopeName(resource.nodeId) }}</td>
+      <td :title="resourceScopeLabel(resource, nodeNames)">{{ resourceScopeCompactLabel(resource, nodeNames) }}</td>
       <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ status(resource, 'filters') }}</span></td>
       <td>{{ policyReferenceCount('filters', resource.id) }}</td>
       <td><button class="row-edit-button" type="button" title="编辑 Filter" :aria-label="`编辑 Filter ${resource.name}`" @click="edit('filters', resource.id)">✎</button></td>
@@ -180,7 +177,7 @@ function staticSummary(resource: StaticProtocol): string {
     <tr v-for="resource in inventory?.rpki ?? []" v-else :key="resource.id">
       <td><strong>{{ resource.label }}</strong><small>{{ resource.name }} · {{ resource.id }}</small></td>
       <td>{{ resource.sourceType === "file" ? "本地文件" : `RPKI-RTR · ${resource.remote}` }}</td>
-      <td>{{ scopeName(resource.nodeId) }}</td>
+      <td :title="resourceScopeLabel(resource, nodeNames)">{{ resourceScopeCompactLabel(resource, nodeNames) }}</td>
       <td><code>{{ [resource.roa4Table, resource.roa6Table].filter(Boolean).join(" / ") }}</code></td>
       <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ resource.enabled ? "已启用" : "已停用" }}</span></td>
       <td><button class="row-edit-button" type="button" title="编辑 RPKI" :aria-label="`编辑 RPKI ${resource.name}`" @click="edit('rpki', resource.id)">✎</button></td>

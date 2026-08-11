@@ -6,6 +6,7 @@ import type {
   AddressFamily,
   PolicyFunction,
 } from "@birdbox/contracts/inventory";
+import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
 
 import {
   setDashboardSnapshot,
@@ -14,6 +15,7 @@ import {
 import { api } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
 import { uniqueBirdName } from "../shared/resource-names";
+import { resourceScopeShortLabel } from "../shared/resource-scope";
 
 type Direction = "import" | "export";
 type ActionType = "local_pref" | "prepend" | "community";
@@ -51,7 +53,7 @@ const availableDefines = computed(() => {
     (resource) =>
       resource.type === type &&
       resource.enabled &&
-      (resource.nodeId === null || resource.nodeId === nodeId),
+      resourceAppliesToNode(resource, nodeId),
   );
 });
 
@@ -198,7 +200,7 @@ async function save(): Promise<void> {
       {
         method: "POST",
         body: JSON.stringify({
-          nodeId,
+          nodeIds: [nodeId],
           label: label.value,
           name: name.value,
           source: buildSource(),
@@ -209,7 +211,7 @@ async function save(): Promise<void> {
     const visibleFunctions = result.inventory.functions.filter(
       (resource) =>
         resource.enabled &&
-        (resource.nodeId === null || resource.nodeId === nodeId),
+        resourceAppliesToNode(resource, nodeId),
     );
     setDashboardSnapshot({
       ...current,
@@ -290,8 +292,7 @@ defineExpose({ open });
               :key="resource.id"
               :value="resource.name"
             >
-              {{ resource.name
-              }}{{ resource.nodeId === null ? " · 所有节点" : "" }}
+              {{ resource.name }} · {{ resourceScopeShortLabel(resource, nodeId) }}
             </option>
           </select>
         </div>

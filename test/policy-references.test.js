@@ -8,16 +8,18 @@ import {
 
 const inventory = {
   defines: [
-    { id: "define_global", nodeId: null, name: "GLOBAL", enabled: true },
-    { id: "define_local", nodeId: "node_a", name: "LOCAL", enabled: true },
-    { id: "define_disabled", nodeId: null, name: "DISABLED", enabled: false },
+    { id: "define_global", nodeIds: null, name: "GLOBAL", enabled: true },
+    { id: "define_local", nodeIds: ["node_a"], name: "LOCAL", enabled: true },
+    { id: "define_shared", nodeIds: ["node_a", "node_b"], name: "SHARED", enabled: true },
+    { id: "define_disabled", nodeIds: null, name: "DISABLED", enabled: false },
   ],
   functions: [
-    { id: "function_global", nodeId: null, name: "global_helper", enabled: true, callable: true },
-    { id: "function_local", nodeId: "node_a", name: "local_helper", enabled: true, callable: false },
-    { id: "function_current", nodeId: "node_a", name: "current_helper", enabled: true, callable: true },
-    { id: "function_later", nodeId: null, name: "later_helper", enabled: true, callable: true },
-    { id: "function_disabled", nodeId: null, name: "disabled_helper", enabled: false, callable: true },
+    { id: "function_global", nodeIds: null, name: "global_helper", enabled: true, callable: true },
+    { id: "function_local", nodeIds: ["node_a"], name: "local_helper", enabled: true, callable: false },
+    { id: "function_shared", nodeIds: ["node_a", "node_b"], name: "shared_helper", enabled: true, callable: true },
+    { id: "function_current", nodeIds: ["node_a", "node_b"], name: "current_helper", enabled: true, callable: true },
+    { id: "function_later", nodeIds: null, name: "later_helper", enabled: true, callable: true },
+    { id: "function_disabled", nodeIds: null, name: "disabled_helper", enabled: false, callable: true },
   ],
 };
 
@@ -26,16 +28,16 @@ test("lists scope-compatible Defines and earlier Functions for a Function editor
     inventory,
     collection: "functions",
     currentId: "function_current",
-    nodeId: "node_a",
+    nodeIds: ["node_a", "node_b"],
   });
-  assert.deepEqual(references.defines.map((resource) => resource.id), ["define_global", "define_local"]);
-  assert.deepEqual(references.functions.map((resource) => resource.id), ["function_global", "function_local"]);
+  assert.deepEqual(references.defines.map((resource) => resource.id), ["define_global", "define_shared"]);
+  assert.deepEqual(references.functions.map((resource) => resource.id), ["function_global", "function_shared"]);
 });
 
 test("lists every compatible Function for a Filter and excludes node-local resources from global scope", () => {
   const nodeReferences = availablePolicySourceReferences({ inventory, collection: "filters", nodeId: "node_a" });
   assert.deepEqual(nodeReferences.functions.map((resource) => resource.id), [
-    "function_global", "function_local", "function_current", "function_later",
+    "function_global", "function_local", "function_shared", "function_current", "function_later",
   ]);
 
   const globalReferences = availablePolicySourceReferences({ inventory, collection: "filters", nodeId: null });
@@ -48,7 +50,7 @@ test("keeps expression Define references ordered and inserts callable Functions 
     inventory,
     collection: "defines",
     currentId: "define_local",
-    nodeId: "node_a",
+    nodeIds: ["node_a"],
   });
   assert.deepEqual(references.defines.map((resource) => resource.id), ["define_global"]);
   assert.deepEqual(references.functions, []);

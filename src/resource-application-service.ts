@@ -6,6 +6,7 @@ import type {
   ManagedNode,
   PolicyCollection,
 } from "../packages/contracts/src/inventory.js";
+import { resourceSingleNodeId } from "../packages/contracts/src/resource-scope.js";
 import type { MutationService } from "./application-contracts.js";
 import {
   normalizeNode,
@@ -160,7 +161,7 @@ export function createResourceApplicationService(
     const resource = findPolicyResource(probe, collection, resourceId);
     resource.enabled = true;
     const state = validateInventory(probe);
-    const nodes = resource.nodeId === null ? state.nodes : [findNode(state, resource.nodeId)];
+    const nodes = resourceNodeIds(state, resource).map((nodeId) => findNode(state, nodeId));
     for (const node of nodes) {
       const validation = await stageAndValidate(node, configForNode(state, node));
       if (!validation.ok) fail(422, validation.stderr || `${resource.name} 的 BIRD 语法检查失败`);
@@ -406,7 +407,7 @@ export function createResourceApplicationService(
       if (!resource.enabled) await preflightPolicyResource(candidate, collection, resource.id);
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
-    event("success", `已添加 ${kind} ${resource.name}`, resource.nodeId);
+    event("success", `已添加 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 201, payload: { resource, inventory: state, deployment, events } };
   },
 
@@ -433,7 +434,7 @@ export function createResourceApplicationService(
       affectedNodeIds = uniqueNodeIds(affectedNodeIds, resourceNodeIds(draft, current));
       return moved;
     }, () => affectedNodeIds);
-    event("success", `已调整 ${kind} ${resource.name} 的声明顺序`, resource.nodeId);
+    event("success", `已调整 ${kind} ${resource.name} 的声明顺序`, resourceSingleNodeId(resource));
     return { status: 200, payload: { resource, inventory: state, deployment, events } };
   },
 
@@ -446,13 +447,14 @@ export function createResourceApplicationService(
       if (index < 0) fail(404, `${kind} 不存在`);
       const previous = resources[index];
       if (!previous) fail(404, `${kind} 不存在`);
-      const nodeId = Object.hasOwn(body, "nodeId")
-        ? (body.nodeId === null || body.nodeId === "" ? null : String(body.nodeId))
-        : previous.nodeId;
-      if (nodeId !== null) findNode(draft, nodeId);
-      const updated = normalizePolicyResource(collection, { ...previous, ...body, id: resourceId, nodeId });
-      if (collection === "defines" && updated.name !== previous.name && resourceReferencesSymbol(draft, previous.name, resourceId)) {
-        fail(409, `请先更新引用 Define ${previous.name} 的资源`);
+      const scopeCompatibleBody = collection !== "filters"
+        && Object.hasOwn(body, "nodeId")
+        && !Object.hasOwn(body, "nodeIds")
+        ? { ...body, nodeIds: body.nodeId }
+        : body;
+      const updated = normalizePolicyResource(collection, { ...previous, ...scopeCompatibleBody, id: resourceId });
+      if ((collection === "defines" || collection === "functions") && updated.name !== previous.name && resourceReferencesSymbol(draft, previous.name, resourceId)) {
+        fail(409, `请先更新引用 ${kind} ${previous.name} 的资源`);
       }
       resources[index] = updated;
       affectedNodeIds = resourceChangeNodeIds(draft, previous, updated);
@@ -460,7 +462,7 @@ export function createResourceApplicationService(
       if (!updated.enabled) await preflightPolicyResource(candidate, collection, resourceId);
       return updated;
     }, () => affectedNodeIds);
-    event("success", `已更新 ${kind} ${resource.name}`, resource.nodeId);
+    event("success", `已更新 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { resource, inventory: state, deployment, events } };
   },
 
@@ -483,15 +485,15 @@ export function createResourceApplicationService(
       if (collection === "defines" && draft.staticProtocols.some((item) => item.defineId === target.id)) {
         fail(409, "请先从 Static 资源中移除该 Define");
       }
-      if (collection === "defines" && resourceReferencesSymbol(draft, target.name, target.id)) {
-        fail(409, `请先更新引用 Define ${target.name} 的资源`);
+      if ((collection === "defines" || collection === "functions") && resourceReferencesSymbol(draft, target.name, target.id)) {
+        fail(409, `请先更新引用 ${kind} ${target.name} 的资源`);
       }
       const resources = policyResources(draft, collection);
       const index = resources.findIndex((item) => item.id === target.id);
       if (index >= 0) resources.splice(index, 1);
       return target;
     }, () => affectedNodeIds);
-    event("success", `已删除 ${kind} ${resource.name}`, resource.nodeId);
+    event("success", `已删除 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { inventory: state, deployment, events } };
   },
 

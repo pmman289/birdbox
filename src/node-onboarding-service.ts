@@ -33,6 +33,17 @@ type ManagedSshNode = ManagedNode & {
   deploymentMode: "include";
 };
 
+function removeNodeFromMultiScope<Resource extends { nodeIds: string[] | null }>(
+  resources: readonly Resource[],
+  nodeId: string,
+): Resource[] {
+  return resources.flatMap((resource) => {
+    if (resource.nodeIds === null || !resource.nodeIds.includes(nodeId)) return [resource];
+    const nodeIds = resource.nodeIds.filter((item) => item !== nodeId);
+    return nodeIds.length ? [{ ...resource, nodeIds }] : [];
+  });
+}
+
 interface NodeOnboardingServiceOptions {
   store: InventoryStore;
   deploymentService: DeploymentService;
@@ -599,8 +610,8 @@ export class NodeOnboardingService {
             nodes: current.nodes.filter((item) => item.id !== targetNode.id),
             peers: current.peers.filter((item) => item.nodeId !== targetNode.id),
             sessions: current.sessions.filter((item) => item.nodeId !== targetNode.id),
-            defines: current.defines.filter((item) => item.nodeId !== targetNode.id),
-            functions: current.functions.filter((item) => item.nodeId !== targetNode.id),
+            defines: removeNodeFromMultiScope(current.defines, targetNode.id),
+            functions: removeNodeFromMultiScope(current.functions, targetNode.id),
             filters: current.filters.filter((item) => item.nodeId !== targetNode.id),
             rpki: current.rpki.filter((item) => item.nodeId !== targetNode.id),
             staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== targetNode.id),

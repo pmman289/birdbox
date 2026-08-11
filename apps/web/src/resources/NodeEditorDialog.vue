@@ -8,6 +8,7 @@ import type {
   NodeTestResponse,
 } from "@birdbox/contracts/api";
 import type { ManagedNode, RpkiSource } from "@birdbox/contracts/inventory";
+import { resourceExplicitlyScopesNode } from "@birdbox/contracts/resource-scope";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
@@ -260,13 +261,13 @@ async function retire(force: boolean): Promise<void> {
     const counts = [
       ["Sessions", inventory.sessions.filter((item) => item.nodeId === node.id).length],
       ["Peers", inventory.peers.filter((item) => item.nodeId === node.id).length],
-      ["Defines", inventory.defines.filter((item) => item.nodeId === node.id).length],
-      ["Functions", inventory.functions.filter((item) => item.nodeId === node.id).length],
+      ["Defines", inventory.defines.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
+      ["Functions", inventory.functions.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["Filters", inventory.filters.filter((item) => item.nodeId === node.id).length],
       ["RPKI", inventory.rpki.filter((item) => item.nodeId === node.id).length],
       ["Static", inventory.staticProtocols.filter((item) => item.nodeId === node.id).length],
     ].map(([label, count]) => `${label} ${count}`).join("、");
-    if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将级联删除 ${counts}，且不会清理远端配置。`)) return;
+    if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将处理关联资源：${counts}。多节点 Define/Function 只会移除此节点的可用范围；操作不会清理远端配置。`)) return;
     const confirmation = `遗忘 ${node.id}`;
     if (window.prompt(`请输入“${confirmation}”以确认：`) !== confirmation) return;
   }

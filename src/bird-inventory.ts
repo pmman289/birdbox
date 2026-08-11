@@ -21,6 +21,11 @@ import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
 import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
 import { normalizeIbgpDomain } from "./ibgp-domain.js";
+import {
+  resourceAppliesToNode,
+  resourceScopeContains,
+  scopedNodeIds,
+} from "../packages/contracts/src/resource-scope.js";
 
 type UnknownRecord = Record<string, unknown>;
 type ReferencingResource = PolicyDefine | PolicyFunction | PolicyFilter;
@@ -116,17 +121,28 @@ export function validateInventory(inputValue: unknown): Inventory {
     identifiers.delete(resource.name);
     for (const dependency of defines.filter((item) => identifiers.has(item.name))) {
       assertValidation(
-        dependency.nodeId === null || resource.nodeId === dependency.nodeId,
+        resourceScopeContains(dependency, resource),
         `资源 ${resource.name} 引用了作用域不兼容的 Define ${dependency.name}`,
       );
       assertValidation(!resource.enabled || dependency.enabled, `资源 ${resource.name} 引用了已停用的 Define ${dependency.name}`);
     }
+    for (const dependency of functions.filter((item) => item.id !== resource.id && identifiers.has(item.name))) {
+      assertValidation(
+        resourceScopeContains(dependency, resource),
+        `资源 ${resource.name} 引用了作用域不兼容的 Function ${dependency.name}`,
+      );
+      assertValidation(!resource.enabled || dependency.enabled, `资源 ${resource.name} 引用了已停用的 Function ${dependency.name}`);
+    }
   };
   for (const resource of defines) {
-    assertValidation(resource.nodeId === null || nodeMap.has(resource.nodeId), `Define ${resource.name} 引用了不存在的节点`);
+    assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `Define ${resource.name} 引用了不存在的节点`);
     if (resource.type === "expression") validateReferences(resource, resource.value);
   }
-  for (const resource of [...functions, ...filters]) {
+  for (const resource of functions) {
+    assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `策略 ${resource.name} 引用了不存在的节点`);
+    validateReferences(resource, resource.source);
+  }
+  for (const resource of filters) {
     assertValidation(resource.nodeId === null || nodeMap.has(resource.nodeId), `策略 ${resource.name} 引用了不存在的节点`);
     validateReferences(resource, resource.source);
   }
@@ -142,14 +158,14 @@ export function validateInventory(inputValue: unknown): Inventory {
       resource.defineId === null || (
         staticDefine?.type === expectedDefineType
         && staticDefine.enabled
-        && (staticDefine.nodeId === null || staticDefine.nodeId === node.id)
+        && resourceAppliesToNode(staticDefine, node.id)
       ),
       `Static 资源 ${resource.name} 的 CIDR Define 对所选节点或地址族不可用`,
     );
     const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
     const identifiers = new Set(sources.flatMap((source) => [...birdIdentifiers(source)]));
     for (const dependency of [...defines, ...functions].filter((item) => identifiers.has(item.name))) {
-      assertValidation(dependency.nodeId === null || dependency.nodeId === node.id, `Static 资源 ${resource.name} 引用了作用域不兼容的资源 ${dependency.name}`);
+      assertValidation(resourceAppliesToNode(dependency, node.id), `Static 资源 ${resource.name} 引用了作用域不兼容的资源 ${dependency.name}`);
       assertValidation(dependency.enabled, `Static 资源 ${resource.name} 引用了已停用的资源 ${dependency.name}`);
     }
   }
@@ -188,14 +204,14 @@ export function validateInventory(inputValue: unknown): Inventory {
         channel.exportDefineId === null || (
           exportDefine?.type === expectedDefineType
           && exportDefine.enabled
-          && (exportDefine.nodeId === null || exportDefine.nodeId === node.id)
+          && resourceAppliesToNode(exportDefine, node.id)
         ),
         `会话 ${session.protocolName} 的 ${family.toUpperCase()} 导出 CIDR Define 对所选节点不可用`,
       );
       for (const [label, policy] of [["导入", channel.importPolicy], ["导出", channel.exportPolicy]] as const) {
         for (const step of policy.steps.filter((item) => item.type === "function")) {
           const resource = functionMap.get(step.functionId);
-          assertValidation(resource && resource.enabled && resource.callable && (resource.nodeId === null || resource.nodeId === node.id), `会话 ${session.protocolName} 的 ${family.toUpperCase()} ${label} Function 不可用`);
+          assertValidation(resource && resource.enabled && resource.callable && resourceAppliesToNode(resource, node.id), `会话 ${session.protocolName} 的 ${family.toUpperCase()} ${label} Function 不可用`);
         }
         if (policy.filterId !== null) {
           const resource = filterMap.get(policy.filterId);
@@ -206,8 +222,8 @@ export function validateInventory(inputValue: unknown): Inventory {
   }
   for (const node of nodes) {
     const nodeSessions = sessions.filter((item) => item.nodeId === node.id);
-    const nodeDefines = defines.filter((item) => item.nodeId === null || item.nodeId === node.id);
-    const nodeFunctions = functions.filter((item) => item.nodeId === null || item.nodeId === node.id);
+    const nodeDefines = defines.filter((item) => resourceAppliesToNode(item, node.id));
+    const nodeFunctions = functions.filter((item) => resourceAppliesToNode(item, node.id));
     const nodeFilters = filters.filter((item) => item.nodeId === null || item.nodeId === node.id);
     const nodeRPKI = rpki.filter((item) => item.enabled && (item.nodeId === null || item.nodeId === node.id));
     const nodeStaticProtocols = staticProtocols.filter((item) => item.nodeId === node.id);
@@ -249,7 +265,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   }
 
   return {
-    version: 23,
+    version: 24,
     nodes,
     peers,
     defines,

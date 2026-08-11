@@ -23,7 +23,7 @@ const globalFileRpki = {
 
 function inventoryWithRpki(rpki) {
   return {
-    version: 23,
+    version: 24,
     nodes: [],
     peers: [],
     defines: [],

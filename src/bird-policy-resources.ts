@@ -1,5 +1,11 @@
 import type { PolicyDefine, PolicyFilter, PolicyFunction } from "../packages/contracts/src/inventory.js";
-import { assertValidation, normalizeId, normalizeLabel, normalizeResourceScope } from "./bird-normalize-common.js";
+import {
+  assertValidation,
+  normalizeId,
+  normalizeLabel,
+  normalizeMultiNodeResourceScope,
+  normalizeResourceScope,
+} from "./bird-normalize-common.js";
 import { parseBirdPrefixEntries } from "./bird-prefix.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -70,7 +76,7 @@ export function normalizeDefine(inputValue: unknown): PolicyDefine {
   assertValidation(type === "cidr4" || type === "cidr6" || type === "expression", "Define 类型不合法");
   const base = {
     id: normalizeId(input.id, "Define ID"),
-    nodeId: normalizeResourceScope(input.nodeId),
+    nodeIds: normalizeMultiNodeResourceScope(input.nodeIds, input.nodeId),
     label: normalizeLabel(input.label ?? input.name, "Define 显示名称"),
     name,
     enabled: input.enabled !== false,
@@ -165,13 +171,18 @@ function normalizePolicyResource(inputValue: unknown, kind: PolicyKind): PolicyF
   const declaration = inspectPolicyDeclaration(input.source, kind, name);
   const base = {
     id: normalizeId(input.id, `${noun} ID`),
-    nodeId: normalizeResourceScope(input.nodeId),
     label,
     name,
     source: declaration.source,
     enabled: input.enabled !== false,
   };
-  return kind === "function" ? { ...base, callable: declaration.callable } : base;
+  return kind === "function"
+    ? {
+        ...base,
+        nodeIds: normalizeMultiNodeResourceScope(input.nodeIds, input.nodeId),
+        callable: declaration.callable,
+      }
+    : { ...base, nodeId: normalizeResourceScope(input.nodeId) };
 }
 
 export function normalizePolicyFunction(input: unknown): PolicyFunction {
