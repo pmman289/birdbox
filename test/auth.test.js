@@ -144,6 +144,18 @@ test("supports password setup and manages multiple active admin sessions", async
   assert.match(setupScript.body.script, /grep -Fx -- "\$KEY_LINE"/);
   assert.match(setupScript.body.script, /useradd --system/);
   assert.match(setupScript.body.script, /adduser --system/);
+  assert.match(setupScript.body.script, /IS_OPENWRT=0/);
+  assert.match(setupScript.body.script, /\/etc\/openwrt_release/);
+  assert.match(setupScript.body.script, /MANAGED_SHELL=\/bin\/ash/);
+  assert.match(setupScript.body.script, /Dropbear 不接受登录 Shell/);
+  assert.match(setupScript.body.script, /\/etc\/birdbox-users/);
+  assert.match(setupScript.body.script, /procd_set_param/);
+  assert.match(setupScript.body.script, / -g " group/);
+  assert.match(setupScript.body.script, /init 脚本已恢复/);
+  assert.doesNotMatch(setupScript.body.script, /REQUIRED_COMMAND in[^\n]*\binstall\b/);
+  assert.match(setupScript.body.script, /runuser -u "\$BIRDBOX_USER"/);
+  assert.match(setupScript.body.script, /无法执行登录 Shell/);
+  assert.match(setupScript.body.script, /\/usr\/bin 通常应为 0755/);
   assert.match(setupScript.body.script, /BACKUP_CANDIDATE=\$\(mktemp/);
   assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" 'configure check'/);
   assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" configure/);

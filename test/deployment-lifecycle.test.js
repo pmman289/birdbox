@@ -57,6 +57,7 @@ test("serializes remote validation and deploys global resources through node lif
   const holdValidation = path.join(root, "hold-validation");
   const validationEntered = path.join(root, "validation-entered");
   const releaseValidation = path.join(root, "release-validation");
+  const shellFailure = path.join(root, "shell-failure");
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(fakeBin, { recursive: true });
 
@@ -64,6 +65,10 @@ test("serializes remote validation and deploys global resources through node lif
 printf '%s\n' "$*" >> "$BIRDBOX_FAKE_LOG"
 command=''
 for argument do command=$argument; done
+if [ -f "$BIRDBOX_SHELL_FAILURE" ]; then
+  printf '/bin/sh: Permission denied\n' >&2
+  exit 126
+fi
 if printf '%s' "$command" | grep -q -- '---BIRDBOX---'; then
   printf 'BIRD version 2.19.1\n---BIRDBOX---\n'
   exit 0
@@ -120,6 +125,7 @@ exit 0
       BIRDBOX_HOLD_VALIDATION: holdValidation,
       BIRDBOX_VALIDATION_ENTERED: validationEntered,
       BIRDBOX_RELEASE_VALIDATION: releaseValidation,
+      BIRDBOX_SHELL_FAILURE: shellFailure,
       PATH: `${fakeBin}:${process.env.PATH}`,
     },
     stdio: "ignore",
@@ -143,6 +149,16 @@ exit 0
     sshUser: "birdbox",
     routerId: "192.0.2.1",
   };
+
+  await fs.writeFile(shellFailure, "1\n");
+  const shellFailureResponse = await authenticatedRequest("/api/nodes/test", {
+    method: "POST",
+    body: JSON.stringify(nodePayload),
+  });
+  assert.equal(shellFailureResponse.status, 422);
+  assert.match(shellFailureResponse.body.error, /SSH 公钥认证成功/);
+  assert.match(shellFailureResponse.body.error, /namei -l \/bin\/sh/);
+  await fs.rm(shellFailure);
 
   await fs.writeFile(holdValidation, "1\n");
   const nodeTest = authenticatedRequest("/api/nodes/test", {

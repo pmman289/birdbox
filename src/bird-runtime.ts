@@ -312,7 +312,7 @@ export async function stageAndValidate(nodeInput: unknown, config: string): Prom
       `test -w '${directory}'`,
       `bird_group=$(stat -c '%G' '${node.socketPath}')`,
       `test -n "$bird_group" && test "$bird_group" != UNKNOWN`,
-      `install -d -m 0750 '${directory}/versions'`,
+      `mkdir -p '${directory}/versions'`,
       `chgrp "$bird_group" '${directory}/versions'`,
       `chmod 0750 '${directory}/versions'`,
       `current_target=$(readlink '${activePath}')`,

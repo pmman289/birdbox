@@ -22,9 +22,14 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator("#nodeEditorSshHost").fill("192.0.2.10");
   await page.locator("#nodeEditorSshUser").fill("birdbox");
   await page.locator("#nodeEditorRouterId").fill("192.0.2.10");
+  await page.getByText("OpenWrt", { exact: true }).click();
+  await expect(page.locator("#nodeEditorMainConfigPath")).toHaveValue("/etc/bird.conf");
+  await expect(page.locator("#nodeEditorGeneratedConfigPath")).toHaveValue("/etc/birdbox/generated.conf");
+  await expect(page.locator("#nodeEditorSocketPath")).toHaveValue("/var/run/bird.ctl");
   await page.locator("#generateNodeSetupButton").click();
   await expect(page.locator("#nodeSetupGuide")).toBeVisible();
   await expect(page.locator("#nodeSetupScript")).toContainText("birdbox");
+  await expect(page.locator("#nodeSetupScript")).toContainText("/etc/openwrt_release");
   await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
 
   await page.getByRole("button", { name: "编辑节点 E2E Router" }).click();

@@ -91,8 +91,8 @@ docker compose up -d --force-recreate birdbox
 
 目标节点应满足：
 
-- BIRD 2.19.1 已安装并正在运行；
-- BIRD 控制 Socket 已创建，且所属用户组不是 `root`；
+- BIRD 2 已安装并正在运行；
+- BIRD 控制 Socket 已创建。常规 Linux 应使用非 `root` 控制组，OpenWrt 可以由准备脚本自动配置专用控制组；
 - BIRD 主配置文件路径已确定，例如 `/etc/bird/bird.conf`。
 - 管理员可以在首次接入时执行一次 root 准备脚本。
 
@@ -100,13 +100,27 @@ docker compose up -d --force-recreate birdbox
 
 登录 Birdbox 后进入“资源管理”中的“受管节点”，点击“添加节点”，填写节点地址、SSH 用户、Router ID 和配置路径，然后点击“生成准备脚本”。
 
-复制完整脚本，在目标节点上使用 root 执行：
+常规 Linux 使用默认的 Linux 预设。OpenWrt/iStoreOS 应选择 OpenWrt 预设，默认路径为：
 
-```bash
-sudo sh birdbox-node-setup.sh
+```text
+主配置：/etc/bird.conf
+生成配置：/etc/birdbox/generated.conf
+控制 Socket：/var/run/bird.ctl
 ```
 
-脚本会自动完成以下工作：创建缺失的专用用户和 Home 目录、加入 BIRD Socket 用户组、安装受限 SSH 公钥、创建受管配置目录、写入主配置 Include，并执行 `configure check` 和 `configure`。主配置修改前会在同目录创建临时备份；任何检查或加载失败都会恢复原配置。脚本可重复执行，不会重复添加用户、公钥或 Include。
+OpenWrt 的 `/var` 和 `/tmp` 位于内存盘，不能把生成配置或受管用户 Home 放在这些目录。Birdbox 会把 OpenWrt 的生成配置和 SSH Home 放在 `/etc` 下的持久存储中。
+
+复制完整脚本，在目标节点的 root Shell 中执行：
+
+```bash
+sh birdbox-node-setup.sh
+```
+
+常规 Linux 使用非 root 管理账户登录时，也可以执行 `sudo sh birdbox-node-setup.sh`。
+
+脚本会自动完成以下工作：创建缺失的专用用户和持久 Home 目录、加入 BIRD Socket 用户组、安装受限 SSH 公钥、创建受管配置目录、写入主配置 Include，并执行 `configure check` 和 `configure`。主配置修改前会在同目录创建临时备份；任何检查或加载失败都会恢复原配置。脚本可重复执行，不会重复添加用户、公钥或 Include。
+
+在 OpenWrt 上，脚本还会使用 `/bin/ash` 作为 Dropbear 登录 Shell，并为 `/etc/init.d/bird` 的 procd 启动命令配置专用运行组。首次配置控制组时 BIRD 会重启一次；脚本会等待 `birdc show status` 真正恢复后再继续，失败时恢复原 init 脚本。
 
 ### 3. 测试并保存节点
 

@@ -18,6 +18,7 @@ import { clearFormValidation, presentFormError, validateForm } from "../shared/f
 import { loadDashboard } from "../dashboard/dashboard-store";
 
 interface NodeDraft extends NodeMutationRequest {}
+type NodeSystemPreset = "linux" | "openwrt";
 
 const dialog = ref<HTMLDialogElement | null>(null);
 const cleanupDialog = ref<HTMLDialogElement | null>(null);
@@ -31,6 +32,7 @@ const setupScript = ref("");
 const includeLine = ref("");
 const cleanupNode = ref<ManagedNode | null>(null);
 const cleanupForced = ref(false);
+const systemPreset = ref<NodeSystemPreset>("linux");
 const { dashboard } = useDashboardStore();
 
 const draft = reactive<NodeDraft>({
@@ -66,6 +68,7 @@ const fieldMappings = [
 
 function resetDraft(node: ManagedNode | null): void {
   editingId.value = node?.id ?? null;
+  systemPreset.value = node?.mainConfigPath === "/etc/bird.conf" ? "openwrt" : "linux";
   Object.assign(draft, {
     name: node?.name ?? "",
     transport: node?.transport ?? "ssh",
@@ -86,6 +89,20 @@ function resetDraft(node: ManagedNode | null): void {
   setupScript.value = "";
   includeLine.value = "";
   if (form.value) clearFormValidation(form.value);
+}
+
+function applySystemPreset(preset: NodeSystemPreset): void {
+  systemPreset.value = preset;
+  Object.assign(draft, preset === "openwrt" ? {
+    mainConfigPath: "/etc/bird.conf",
+    generatedConfigPath: "/etc/birdbox/generated.conf",
+    socketPath: "/var/run/bird.ctl",
+  } : {
+    mainConfigPath: "/etc/bird/bird.conf",
+    generatedConfigPath: "/var/lib/birdbox/generated.conf",
+    socketPath: "/run/bird/bird.ctl",
+  });
+  changed();
 }
 
 function open(node: ManagedNode | null): void {
@@ -280,6 +297,7 @@ onBeforeUnmount(() => {
         <details id="nodeBirdPaths" class="node-path-settings full-width" :open="!editing || draft.deploymentMode === 'include'">
           <summary>系统 BIRD 路径</summary>
           <div class="dialog-grid node-path-grid">
+            <div v-if="!editing" class="field full-width"><span class="field-label">系统预设</span><div class="segmented-control" role="radiogroup" aria-label="节点系统预设"><label><input :checked="systemPreset === 'linux'" type="radio" name="nodeSystemPreset" value="linux" @change="applySystemPreset('linux')"><span>Linux</span></label><label><input :checked="systemPreset === 'openwrt'" type="radio" name="nodeSystemPreset" value="openwrt" @change="applySystemPreset('openwrt')"><span>OpenWrt</span></label></div></div>
             <div class="field full-width"><label for="nodeEditorMainConfigPath">主配置</label><input id="nodeEditorMainConfigPath" v-model.trim="draft.mainConfigPath" required :disabled="editing"></div>
             <div class="field full-width"><label for="nodeEditorGeneratedConfigPath">生成配置</label><input id="nodeEditorGeneratedConfigPath" v-model.trim="draft.generatedConfigPath" required :disabled="editing"></div>
             <div class="field full-width"><label for="nodeEditorSocketPath">控制 Socket</label><input id="nodeEditorSocketPath" v-model.trim="draft.socketPath" required :disabled="editing"></div>
@@ -292,7 +310,7 @@ onBeforeUnmount(() => {
             <button id="testNodeConnectionButton" class="secondary-button" type="button" :disabled="pending" @click="testConnection">测试连接</button>
           </div>
           <div v-if="setupScript" id="nodeSetupGuide" class="node-setup-guide">
-            <div class="setup-guide-heading"><span>在目标节点使用 sudo 执行</span><button id="copyNodeSetupButton" class="compact-command" type="button" @click="copyScript">复制脚本</button></div>
+            <div class="setup-guide-heading"><span>在目标节点以 root 身份执行</span><button id="copyNodeSetupButton" class="compact-command" type="button" @click="copyScript">复制脚本</button></div>
             <pre id="nodeSetupScript">{{ setupScript }}</pre>
             <div class="setup-include"><span>脚本将自动写入主配置</span><code id="nodeIncludeLine">{{ includeLine }}</code></div>
           </div>
@@ -314,7 +332,7 @@ onBeforeUnmount(() => {
     <form method="dialog">
       <div class="dialog-head"><span class="dialog-icon managed">!</span><div><p class="eyebrow">需要人工清理</p><h2 id="nodeCleanupDialogTitle">{{ cleanupForced ? "节点已强制遗忘" : "节点已安全退役，仍需人工清理" }}</h2></div></div>
       <p id="nodeCleanupTarget" class="dialog-note">SSH {{ cleanupNode?.sshUser ? `${cleanupNode.sshUser}@` : "" }}{{ cleanupNode?.sshHost }}:{{ cleanupNode?.sshPort }} · 主配置 {{ cleanupNode?.mainConfigPath }} · 生成配置 {{ cleanupNode?.generatedConfigPath }} · Socket {{ cleanupNode?.socketPath }}</p>
-      <ul class="cleanup-list"><li>先从主配置移除 include 行并执行 BIRD configure check/configure</li><li>再删除远端生成配置，最后从 authorized_keys 删除控制器公钥</li><li>重新纳管或复用主机前核对 BIRD 当前配置</li></ul>
+      <ul class="cleanup-list"><li>先从主配置移除 include 行并执行 BIRD configure check/configure</li><li>再删除远端生成配置，最后从 authorized_keys 删除控制器公钥</li><li v-if="cleanupNode?.mainConfigPath === '/etc/bird.conf'">OpenWrt 节点还需移除 /etc/init.d/bird 启动命令中的 Birdbox 管理组参数并重启 BIRD</li><li>重新纳管或复用主机前核对 BIRD 当前配置</li></ul>
       <div class="dialog-actions"><button class="primary-button" value="default">我已记录</button></div>
     </form>
   </dialog>

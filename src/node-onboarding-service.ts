@@ -90,34 +90,56 @@ KEY_LINE="restrict $CONTROLLER_KEY"
 INCLUDE_LINE='${includeLine}'
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "请使用 sudo sh 执行此脚本" >&2
+  echo "请使用 root 身份执行此脚本" >&2
   exit 1
+fi
+IS_OPENWRT=0
+MANAGED_SHELL=/bin/sh
+if [ -r /etc/openwrt_release ]; then
+  IS_OPENWRT=1
+  MANAGED_SHELL=/bin/ash
+fi
+if [ "$IS_OPENWRT" -eq 1 ]; then
+  case "$GENERATED_CONFIG" in
+    /var/*|/tmp/*)
+      echo "OpenWrt 的 /var 和 /tmp 位于内存盘，生成配置必须使用持久路径（建议 /etc/birdbox/generated.conf）" >&2
+      exit 1
+      ;;
+  esac
 fi
 test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }
 test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
-for REQUIRED_COMMAND in birdc stat install mktemp awk grep; do
+for REQUIRED_COMMAND in birdc stat mkdir mktemp awk grep chown chmod cp mv ln readlink id cut tr; do
   command -v "$REQUIRED_COMMAND" >/dev/null 2>&1 || { echo "缺少 $REQUIRED_COMMAND 命令" >&2; exit 1; }
 done
-BIRD_GROUP=$(stat -c '%G' "$SOCKET_PATH")
-BIRD_GROUP_ID=$(stat -c '%g' "$SOCKET_PATH")
-case "$BIRD_GROUP" in
+BIRD_SOCKET_GROUP=$(stat -c '%G' "$SOCKET_PATH")
+BIRD_SOCKET_GROUP_ID=$(stat -c '%g' "$SOCKET_PATH")
+case "$BIRD_SOCKET_GROUP" in
   ''|UNKNOWN) echo "无法识别 BIRD Socket 用户组" >&2; exit 1 ;;
 esac
-if [ "$BIRD_GROUP" = root ] || [ "$BIRD_GROUP_ID" = 0 ]; then
+if { [ "$BIRD_SOCKET_GROUP" = root ] || [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; } && [ "$IS_OPENWRT" -ne 1 ]; then
   echo "BIRD Socket 不能使用 root 用户组，请先为 BIRD 配置专用控制组" >&2
   exit 1
 fi
 
 if ! id "$BIRDBOX_USER" >/dev/null 2>&1; then
-  USER_HOME="/var/lib/birdbox-users/$BIRDBOX_USER"
-  install -d -o root -g root -m 0755 /var/lib/birdbox-users
+  if [ "$IS_OPENWRT" -eq 1 ]; then
+    USER_HOME_ROOT=/etc/birdbox-users
+  else
+    USER_HOME_ROOT=/var/lib/birdbox-users
+  fi
+  USER_HOME="$USER_HOME_ROOT/$BIRDBOX_USER"
+  test ! -L "$USER_HOME_ROOT" || { echo "$USER_HOME_ROOT 不能是符号链接" >&2; exit 1; }
+  mkdir -p "$USER_HOME_ROOT"
+  chown root:root "$USER_HOME_ROOT"
+  chmod 0755 "$USER_HOME_ROOT"
   if command -v useradd >/dev/null 2>&1; then
-    useradd --system --create-home --user-group --home-dir "$USER_HOME" --shell /bin/sh "$BIRDBOX_USER"
+    useradd --system --create-home --user-group --home-dir "$USER_HOME" --shell "$MANAGED_SHELL" "$BIRDBOX_USER"
   elif command -v adduser >/dev/null 2>&1; then
-    if adduser --system --disabled-password --gecos '' --home "$USER_HOME" --shell /bin/sh --group "$BIRDBOX_USER"; then
+    if adduser --system --disabled-password --gecos '' --home "$USER_HOME" --shell "$MANAGED_SHELL" --group "$BIRDBOX_USER"; then
       :
     else
-      adduser -D -h "$USER_HOME" -s /bin/sh "$BIRDBOX_USER"
+      adduser -D -h "$USER_HOME" -s "$MANAGED_SHELL" "$BIRDBOX_USER"
     fi
   else
     echo "无法创建用户：缺少 useradd/adduser" >&2
@@ -126,6 +148,143 @@ if ! id "$BIRDBOX_USER" >/dev/null 2>&1; then
 fi
 id "$BIRDBOX_USER" >/dev/null 2>&1 || { echo "创建用户 $BIRDBOX_USER 失败" >&2; exit 1; }
 [ "$(id -u "$BIRDBOX_USER")" -ne 0 ] || { echo "Birdbox SSH 用户不能是 root" >&2; exit 1; }
+
+if command -v getent >/dev/null 2>&1; then
+  PASSWD_ENTRY=$(getent passwd "$BIRDBOX_USER")
+else
+  PASSWD_ENTRY=$(awk -F: -v user="$BIRDBOX_USER" '$1 == user { print; exit }' /etc/passwd)
+fi
+HOME_DIR=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f6)
+USER_SHELL=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f7)
+PRIMARY_GROUP=$(id -gn "$BIRDBOX_USER")
+if [ "$IS_OPENWRT" -eq 1 ]; then
+  case "$HOME_DIR" in
+    /var/*|/tmp/*)
+      PERSISTENT_HOME_ROOT=/etc/birdbox-users
+      PERSISTENT_HOME="$PERSISTENT_HOME_ROOT/$BIRDBOX_USER"
+      test ! -L "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不能是符号链接" >&2; exit 1; }
+      command -v usermod >/dev/null 2>&1 || { echo "无法把 $BIRDBOX_USER 的 Home 迁移到持久存储：缺少 usermod" >&2; exit 1; }
+      mkdir -p "$PERSISTENT_HOME_ROOT"
+      chown root:root "$PERSISTENT_HOME_ROOT"
+      chmod 0755 "$PERSISTENT_HOME_ROOT"
+      usermod -d "$PERSISTENT_HOME" -m "$BIRDBOX_USER"
+      HOME_DIR="$PERSISTENT_HOME"
+      ;;
+  esac
+fi
+case "$HOME_DIR" in
+  /?*) ;;
+  *) echo "$BIRDBOX_USER 的 Home 目录不合法" >&2; exit 1 ;;
+esac
+case "$USER_SHELL" in
+  */nologin|*/false)
+    if command -v usermod >/dev/null 2>&1; then
+      usermod -s "$MANAGED_SHELL" "$BIRDBOX_USER"
+    elif command -v chsh >/dev/null 2>&1; then
+      chsh -s "$MANAGED_SHELL" "$BIRDBOX_USER"
+    else
+      echo "无法为 $BIRDBOX_USER 设置可执行 SSH 命令的 Shell" >&2
+      exit 1
+    fi
+    USER_SHELL="$MANAGED_SHELL"
+    ;;
+esac
+if [ "$IS_OPENWRT" -eq 1 ] && { [ ! -r /etc/shells ] || ! grep -Fx -- "$USER_SHELL" /etc/shells >/dev/null 2>&1; }; then
+  if command -v usermod >/dev/null 2>&1; then
+    usermod -s "$MANAGED_SHELL" "$BIRDBOX_USER"
+  elif command -v chsh >/dev/null 2>&1; then
+    chsh -s "$MANAGED_SHELL" "$BIRDBOX_USER"
+  else
+    echo "无法为 Dropbear 设置有效登录 Shell：缺少 usermod/chsh" >&2
+    exit 1
+  fi
+  USER_SHELL="$MANAGED_SHELL"
+fi
+case "$USER_SHELL" in
+  /?*) ;;
+  *) echo "$BIRDBOX_USER 的登录 Shell 路径不合法：$USER_SHELL" >&2; exit 1 ;;
+esac
+test -x "$USER_SHELL" || { echo "$BIRDBOX_USER 的登录 Shell 不可执行：$USER_SHELL" >&2; exit 1; }
+if [ "$IS_OPENWRT" -eq 1 ]; then
+  test -r /etc/shells && grep -Fx -- "$USER_SHELL" /etc/shells >/dev/null 2>&1 || {
+    echo "Dropbear 不接受登录 Shell $USER_SHELL：该路径未登记在 /etc/shells" >&2
+    exit 1
+  }
+fi
+if command -v runuser >/dev/null 2>&1; then
+  runuser -u "$BIRDBOX_USER" -- "$USER_SHELL" -c ':' >/dev/null 2>&1 || {
+    echo "$BIRDBOX_USER 无法执行登录 Shell $USER_SHELL；请检查 Shell 文件及其父目录权限（例如 /usr/bin 通常应为 0755）" >&2
+    exit 1
+  }
+elif command -v su >/dev/null 2>&1; then
+  su -s "$USER_SHELL" "$BIRDBOX_USER" -c ':' >/dev/null 2>&1 || {
+    echo "$BIRDBOX_USER 无法执行登录 Shell $USER_SHELL；请检查 Shell 文件及其父目录权限（例如 /usr/bin 通常应为 0755）" >&2
+    exit 1
+  }
+else
+  echo "无法验证 $BIRDBOX_USER 的登录 Shell：缺少 runuser/su" >&2
+  exit 1
+fi
+
+if [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; then
+  BIRD_GROUP="$PRIMARY_GROUP"
+  BIRD_INIT=/etc/init.d/bird
+  test -f "$BIRD_INIT" || { echo "无法适配 OpenWrt BIRD 控制组：缺少 $BIRD_INIT" >&2; exit 1; }
+  if grep -Eq '^[[:space:]]*procd_set_param[[:space:]]+command.*[[:space:]]-g[[:space:]]' "$BIRD_INIT"; then
+    echo "$BIRD_INIT 已配置 BIRD 运行组，但当前 Socket 仍属于 root；请先修复现有 procd 配置" >&2
+    exit 1
+  fi
+  INIT_BACKUP=$(mktemp "$BIRD_INIT.birdbox-backup.XXXXXX")
+  INIT_PATCH=$(mktemp "$BIRD_INIT.birdbox-patch.XXXXXX")
+  cp -p "$BIRD_INIT" "$INIT_BACKUP"
+  if ! awk -v group="$BIRD_GROUP" '
+    BEGIN { changed = 0 }
+    /^[[:space:]]*procd_set_param[[:space:]]+command[[:space:]]/ && index($0, "$BIRD_BIN") {
+      print $0 " -g " group
+      changed += 1
+      next
+    }
+    { print }
+    END { if (changed != 1) exit 42 }
+  ' "$BIRD_INIT" > "$INIT_PATCH"; then
+    rm -f "$INIT_BACKUP" "$INIT_PATCH"
+    echo "无法识别 $BIRD_INIT 的 procd 启动命令，未修改 BIRD 服务" >&2
+    exit 1
+  fi
+  chown root:root "$INIT_PATCH"
+  chmod 0755 "$INIT_PATCH"
+  mv -f "$INIT_PATCH" "$BIRD_INIT"
+  if ! "$BIRD_INIT" restart; then
+    cp -p "$INIT_BACKUP" "$BIRD_INIT"
+    "$BIRD_INIT" restart >/dev/null 2>&1 || true
+    rm -f "$INIT_BACKUP"
+    echo "OpenWrt BIRD 服务重启失败，init 脚本已恢复" >&2
+    exit 1
+  fi
+  SOCKET_READY=0
+  ATTEMPT=0
+  while [ "$ATTEMPT" -lt 10 ]; do
+    if [ -S "$SOCKET_PATH" ] \
+      && [ "$(stat -c '%G' "$SOCKET_PATH")" = "$BIRD_GROUP" ] \
+      && birdc -s "$SOCKET_PATH" 'show status' >/dev/null 2>&1; then
+      SOCKET_READY=1
+      break
+    fi
+    ATTEMPT=$((ATTEMPT + 1))
+    sleep 1
+  done
+  if [ "$SOCKET_READY" -ne 1 ]; then
+    cp -p "$INIT_BACKUP" "$BIRD_INIT"
+    "$BIRD_INIT" restart >/dev/null 2>&1 || true
+    rm -f "$INIT_BACKUP"
+    echo "OpenWrt BIRD 控制 Socket 未切换到 $BIRD_GROUP 用户组，init 脚本已恢复" >&2
+    exit 1
+  fi
+  rm -f "$INIT_BACKUP"
+else
+  BIRD_GROUP="$BIRD_SOCKET_GROUP"
+fi
+
 if ! id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null 2>&1; then
   if command -v usermod >/dev/null 2>&1; then
     usermod -a -G "$BIRD_GROUP" "$BIRDBOX_USER"
@@ -154,7 +313,8 @@ if [ -e "$CONFIG_DIR" ]; then
     exit 1
   }
 else
-  install -d -o "$BIRDBOX_USER" -g "$BIRD_GROUP" -m 0750 "$CONFIG_DIR"
+  mkdir -p "$CONFIG_DIR"
+  chown "$BIRDBOX_USER:$BIRD_GROUP" "$CONFIG_DIR"
 fi
 if [ -L "$CONFIG_DIR/versions" ]; then
   echo "$CONFIG_DIR/versions 不能是符号链接" >&2
@@ -167,7 +327,8 @@ if [ -e "$CONFIG_DIR/versions" ]; then
     exit 1
   }
 else
-  install -d -o "$BIRDBOX_USER" -g "$BIRD_GROUP" -m 0750 "$CONFIG_DIR/versions"
+  mkdir -p "$CONFIG_DIR/versions"
+  chown "$BIRDBOX_USER:$BIRD_GROUP" "$CONFIG_DIR/versions"
 fi
 chmod 0750 "$CONFIG_DIR" "$CONFIG_DIR/versions"
 if [ -L "$GENERATED_CONFIG" ]; then
@@ -188,38 +349,15 @@ else
   ln -s 'versions/initial.conf' "$GENERATED_CONFIG"
   chown -h "$BIRDBOX_USER:$BIRD_GROUP" "$GENERATED_CONFIG" 2>/dev/null || true
 fi
-
-if command -v getent >/dev/null 2>&1; then
-  PASSWD_ENTRY=$(getent passwd "$BIRDBOX_USER")
-else
-  PASSWD_ENTRY=$(awk -F: -v user="$BIRDBOX_USER" '$1 == user { print; exit }' /etc/passwd)
-fi
-HOME_DIR=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f6)
-USER_SHELL=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f7)
-PRIMARY_GROUP=$(id -gn "$BIRDBOX_USER")
-case "$HOME_DIR" in
-  /?*) ;;
-  *) echo "$BIRDBOX_USER 的 Home 目录不合法" >&2; exit 1 ;;
-esac
-case "$USER_SHELL" in
-  */nologin|*/false)
-    if command -v usermod >/dev/null 2>&1; then
-      usermod -s /bin/sh "$BIRDBOX_USER"
-    elif command -v chsh >/dev/null 2>&1; then
-      chsh -s /bin/sh "$BIRDBOX_USER"
-    else
-      echo "无法为 $BIRDBOX_USER 设置可执行 SSH 命令的 Shell" >&2
-      exit 1
-    fi
-    ;;
-esac
 test ! -L "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不能是符号链接" >&2; exit 1; }
 if [ -e "$HOME_DIR" ]; then
   test -d "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 路径不是目录" >&2; exit 1; }
   [ "$(stat -c '%U' "$HOME_DIR")" = "$BIRDBOX_USER" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
 else
-  install -d -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0750 "$HOME_DIR"
+  mkdir -p "$HOME_DIR"
+  chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR"
 fi
+chmod 0750 "$HOME_DIR"
 if [ -L "$HOME_DIR/.ssh" ]; then
   echo "$HOME_DIR/.ssh 不能是符号链接" >&2
   exit 1
@@ -227,7 +365,8 @@ elif [ -e "$HOME_DIR/.ssh" ]; then
   test -d "$HOME_DIR/.ssh" || { echo "$HOME_DIR/.ssh 不是目录" >&2; exit 1; }
   [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh 属主不正确" >&2; exit 1; }
 else
-  install -d -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0700 "$HOME_DIR/.ssh"
+  mkdir -p "$HOME_DIR/.ssh"
+  chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR/.ssh"
 fi
 chmod 0700 "$HOME_DIR/.ssh"
 if [ -L "$HOME_DIR/.ssh/authorized_keys" ]; then
@@ -237,7 +376,8 @@ elif [ -e "$HOME_DIR/.ssh/authorized_keys" ]; then
   test -f "$HOME_DIR/.ssh/authorized_keys" || { echo "$HOME_DIR/.ssh/authorized_keys 不是普通文件" >&2; exit 1; }
   [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh/authorized_keys")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh/authorized_keys 属主不正确" >&2; exit 1; }
 else
-  install -o "$BIRDBOX_USER" -g "$PRIMARY_GROUP" -m 0600 /dev/null "$HOME_DIR/.ssh/authorized_keys"
+  : > "$HOME_DIR/.ssh/authorized_keys"
+  chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR/.ssh/authorized_keys"
 fi
 chmod 0600 "$HOME_DIR/.ssh/authorized_keys"
 if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; then
@@ -303,7 +443,16 @@ echo "Birdbox 节点准备完成：用户、SSH 公钥、Include 和 BIRD 配置
 
 async function inspectOnboardingNode(node: ManagedSshNode): Promise<NodeRuntime> {
   const access = await checkIncludeNodeAccess(node);
-  if (!access.ok) fail(422, access.stderr || access.stdout || "节点接入条件检查失败");
+  if (!access.ok) {
+    const detail = access.stderr || access.stdout || "节点接入条件检查失败";
+    if (/\/bin\/sh:\s*Permission denied/i.test(detail)) {
+      fail(
+        422,
+        `SSH 公钥认证成功，但用户 ${node.sshUser} 无法执行登录 Shell /bin/sh。请在目标节点检查 getent passwd ${node.sshUser} 和 namei -l /bin/sh；Shell 文件及 /bin、/usr、/usr/bin 等父目录必须允许该用户进入。原始错误：${detail}`,
+      );
+    }
+    fail(422, detail);
+  }
   const runtime = await inspectNode(node);
   if (!runtime.reachable || !runtime.bird2) fail(422, runtime.error || "目标节点未运行受支持的 BIRD 2");
   return runtime;
