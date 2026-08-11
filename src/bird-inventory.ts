@@ -2,10 +2,7 @@ import type {
   AddressFamily,
   Inventory,
   PolicyDefine,
-  PolicyFilter,
-  PolicyFunction,
 } from "../packages/contracts/src/inventory.js";
-import { birdIdentifiers } from "./bird-identifiers.js";
 import {
   assertValidation,
   channelRequiresExtendedNextHop,
@@ -20,15 +17,25 @@ import { isExactPrefix } from "./bird-prefix.js";
 import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
 import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
+import {
+  MAX_SOURCE_POLICY_SOURCES_PER_GROUP,
+  normalizeSourcePolicyEgress,
+  SOURCE_POLICY_PRIORITY_MAX,
+  SOURCE_POLICY_PRIORITY_WIDTH,
+  sourcePolicyNames,
+} from "./bird-source-policy.js";
 import { normalizeIbgpDomain } from "./ibgp-domain.js";
+import { validateResourceDependencyGraph } from "./bird-resource-dependencies.js";
 import {
   resourceAppliesToNode,
-  resourceScopeContains,
   scopedNodeIds,
 } from "../packages/contracts/src/resource-scope.js";
 
 type UnknownRecord = Record<string, unknown>;
-type ReferencingResource = PolicyDefine | PolicyFunction | PolicyFilter;
+
+export interface InventoryValidationOptions {
+  allowInvalidResourceDependencies?: boolean;
+}
 
 const FAMILIES = ["ipv4", "ipv6"] as const satisfies readonly AddressFamily[];
 
@@ -47,7 +54,7 @@ function enabledCidrEntries(define: PolicyDefine | undefined): string[] {
   return define && define.type !== "expression" ? define.entries.filter(isExactPrefix) : [];
 }
 
-export function validateInventory(inputValue: unknown): Inventory {
+export function validateInventory(inputValue: unknown, options: InventoryValidationOptions = {}): Inventory {
   const input = record(inputValue, "资产数据不能为空");
   const nodes = list(input, "nodes").map(normalizeNode);
   const peers = list(input, "peers").map(normalizePeer);
@@ -56,6 +63,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   const filters = list(input, "filters").map(normalizePolicyFilter);
   const rpki = list(input, "rpki").map(normalizeRPKISource);
   let staticProtocols = list(input, "staticProtocols").map(normalizeStaticProtocol);
+  const sourcePolicies = list(input, "sourcePolicies").map(normalizeSourcePolicyEgress);
   const sessions = list(input, "sessions").map(normalizeSession);
   const ibgpDomains = list(input, "ibgpDomains").map(normalizeIbgpDomain);
   assertValidation(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
@@ -70,6 +78,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   assertValidation(new Set(filters.map((item) => item.id)).size === filters.length, "Filter ID 重复");
   assertValidation(new Set(rpki.map((item) => item.id)).size === rpki.length, "RPKI 资源 ID 重复");
   assertValidation(new Set(staticProtocols.map((item) => item.id)).size === staticProtocols.length, "Static 资源 ID 重复");
+  assertValidation(new Set(sourcePolicies.map((item) => item.id)).size === sourcePolicies.length, "源地址出口映射 ID 重复");
   assertValidation(new Set(sessions.map((item) => item.id)).size === sessions.length, "会话 ID 重复");
   assertValidation(new Set(ibgpDomains.map((item) => item.id)).size === ibgpDomains.length, "iBGP 域 ID 重复");
   const allIbgpAdjacencies = ibgpDomains.flatMap((domain) => domain.adjacencies);
@@ -116,38 +125,26 @@ export function validateInventory(inputValue: unknown): Inventory {
   for (const peer of peers) {
     assertValidation(nodeMap.has(peer.nodeId), `Peer ${peer.name} 引用了不存在的节点`);
   }
-  const validateReferences = (resource: ReferencingResource, source: string): void => {
-    const identifiers = birdIdentifiers(source);
-    identifiers.delete(resource.name);
-    for (const dependency of defines.filter((item) => identifiers.has(item.name))) {
-      assertValidation(
-        resourceScopeContains(dependency, resource),
-        `资源 ${resource.name} 引用了作用域不兼容的 Define ${dependency.name}`,
-      );
-      assertValidation(!resource.enabled || dependency.enabled, `资源 ${resource.name} 引用了已停用的 Define ${dependency.name}`);
-    }
-    for (const dependency of functions.filter((item) => item.id !== resource.id && identifiers.has(item.name))) {
-      assertValidation(
-        resourceScopeContains(dependency, resource),
-        `资源 ${resource.name} 引用了作用域不兼容的 Function ${dependency.name}`,
-      );
-      assertValidation(!resource.enabled || dependency.enabled, `资源 ${resource.name} 引用了已停用的 Function ${dependency.name}`);
-    }
-  };
   for (const resource of defines) {
     assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `Define ${resource.name} 引用了不存在的节点`);
-    if (resource.type === "expression") validateReferences(resource, resource.value);
   }
   for (const resource of functions) {
     assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `策略 ${resource.name} 引用了不存在的节点`);
-    validateReferences(resource, resource.source);
   }
   for (const resource of filters) {
     assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `策略 ${resource.name} 引用了不存在的节点`);
-    validateReferences(resource, resource.source);
   }
   for (const resource of rpki) {
     assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `RPKI 资源 ${resource.name} 引用了不存在的节点`);
+  }
+  for (const resource of sourcePolicies) {
+    assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `源地址出口映射 ${resource.label} 引用了不存在的节点`);
+    assertValidation(new Set(resource.groups.map((group) => group.id)).size === resource.groups.length, `源地址出口映射 ${resource.label} 的出口组 ID 重复`);
+    assertValidation(new Set(resource.groups.map((group) => group.egressAddress)).size === resource.groups.length, `源地址出口映射 ${resource.label} 的出口地址重复`);
+    for (const defineId of resource.internalDefineIds) {
+      const define = defineMap.get(defineId);
+      assertValidation(define?.type === "cidr4" && define.enabled, `源地址出口映射 ${resource.label} 引用了不可用的 IPv4 CIDR Define`);
+    }
   }
   for (const resource of staticProtocols) {
     const node = nodeMap.get(resource.nodeId);
@@ -162,12 +159,6 @@ export function validateInventory(inputValue: unknown): Inventory {
       ),
       `Static 资源 ${resource.name} 的 CIDR Define 对所选节点或地址族不可用`,
     );
-    const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
-    const identifiers = new Set(sources.flatMap((source) => [...birdIdentifiers(source)]));
-    for (const dependency of [...defines, ...functions].filter((item) => identifiers.has(item.name))) {
-      assertValidation(resourceAppliesToNode(dependency, node.id), `Static 资源 ${resource.name} 引用了作用域不兼容的资源 ${dependency.name}`);
-      assertValidation(dependency.enabled, `Static 资源 ${resource.name} 引用了已停用的资源 ${dependency.name}`);
-    }
   }
   for (const session of sessions) {
     const node = nodeMap.get(session.nodeId);
@@ -227,6 +218,7 @@ export function validateInventory(inputValue: unknown): Inventory {
     const nodeFilters = filters.filter((item) => resourceAppliesToNode(item, node.id));
     const nodeRPKI = rpki.filter((item) => item.enabled && resourceAppliesToNode(item, node.id));
     const nodeStaticProtocols = staticProtocols.filter((item) => item.nodeId === node.id);
+    const nodeSourcePolicies = sourcePolicies.filter((item) => resourceAppliesToNode(item, node.id));
     assertValidation(new Set(nodeSessions.map((item) => item.peerId)).size === nodeSessions.length, `节点 ${node.name} 对同一 Peer 存在多个会话`);
     assertValidation(new Set(nodeSessions.map((item) => item.protocolName)).size === nodeSessions.length, `节点 ${node.name} 的协议名称重复`);
     const symbols = [
@@ -243,6 +235,10 @@ export function validateInventory(inputValue: unknown): Inventory {
         item.roa4Table,
         item.roa6Table,
       ]).filter((value): value is string => value !== null),
+      ...nodeSourcePolicies.flatMap((item) => item.groups.flatMap((group) => {
+        const names = sourcePolicyNames(item, group);
+        return [names.table, names.staticProtocol, names.kernelProtocol, names.filter, names.pipe];
+      })),
     ];
     assertValidation(new Set(symbols).size === symbols.length, `节点 ${node.name} 的 BIRD 全局标识符冲突`);
     for (const family of FAMILIES) {
@@ -262,10 +258,57 @@ export function validateInventory(inputValue: unknown): Inventory {
         }
       }
     }
+    const activeSourcePolicies = nodeSourcePolicies.filter((item) => item.enabled);
+    const sourceRoutes: Array<{ policy: typeof activeSourcePolicies[number]; group: typeof activeSourcePolicies[number]["groups"][number]; source: string; range: [number, number] }> = [];
+    for (const policy of activeSourcePolicies) {
+      assertValidation(policy.rulePriorityBase + SOURCE_POLICY_PRIORITY_WIDTH - 1 <= SOURCE_POLICY_PRIORITY_MAX, `源地址出口映射 ${policy.label} 的规则优先级范围无效`);
+      for (const group of policy.groups) {
+        assertValidation(![0, 253, 254, 255].includes(group.kernelTable), `源地址出口映射 ${policy.label} 使用了保留内核路由表`);
+        for (const [index, source] of group.sources.entries()) {
+          const range = source.split("/");
+          const address = range[0]?.split(".").map(Number) ?? [];
+          const prefix = Number(range[1]);
+          const numeric = ((((address[0] ?? 0) << 24) | ((address[1] ?? 0) << 16) | ((address[2] ?? 0) << 8) | (address[3] ?? 0)) >>> 0);
+          const size = prefix === 0 ? 0xffffffff : (2 ** (32 - prefix)) - 1;
+          sourceRoutes.push({ policy, group, source, range: [numeric, numeric + size] });
+          assertValidation(policy.rulePriorityBase + group.ruleSlot * MAX_SOURCE_POLICY_SOURCES_PER_GROUP + index <= SOURCE_POLICY_PRIORITY_MAX, `源地址出口映射 ${policy.label} 的规则 priority 超出范围`);
+        }
+      }
+    }
+    for (let left = 0; left < sourceRoutes.length; left += 1) {
+      for (let right = left + 1; right < sourceRoutes.length; right += 1) {
+        const first = sourceRoutes[left]!;
+        const second = sourceRoutes[right]!;
+        if (first.policy.id === second.policy.id && first.group.id === second.group.id && first.source === second.source) continue;
+        const firstRange = first.range;
+        const secondRange = second.range;
+        const overlap = firstRange[0] <= secondRange[1] && secondRange[0] <= firstRange[1];
+        if (!overlap) continue;
+        assertValidation(false, `节点 ${node.name} 的源 CIDR ${first.source} 与 ${second.source} 存在出口映射冲突`);
+      }
+    }
+    const tableOwners = new Map<number, string>();
+    const priorityOwners = new Map<number, string>();
+    for (const policy of activeSourcePolicies) {
+      for (const group of policy.groups) {
+        const tableOwner = tableOwners.get(group.kernelTable);
+        assertValidation(!tableOwner, `节点 ${node.name} 的内核路由表 ${group.kernelTable} 被多个源地址出口映射占用`);
+        tableOwners.set(group.kernelTable, policy.id);
+      }
+      for (let priority = policy.rulePriorityBase; priority < policy.rulePriorityBase + SOURCE_POLICY_PRIORITY_WIDTH; priority += 1) {
+        const priorityOwner = priorityOwners.get(priority);
+        assertValidation(!priorityOwner || priorityOwner === policy.id, `节点 ${node.name} 的规则 priority ${priority} 被多个源地址出口映射占用`);
+        priorityOwners.set(priority, policy.id);
+      }
+    }
+  }
+
+  if (!options.allowInvalidResourceDependencies) {
+    validateResourceDependencyGraph({ defines, functions, filters, rpki, staticProtocols, sourcePolicies });
   }
 
   return {
-    version: 25,
+    version: 26,
     nodes,
     peers,
     defines,
@@ -273,6 +316,7 @@ export function validateInventory(inputValue: unknown): Inventory {
     filters,
     rpki,
     staticProtocols,
+    sourcePolicies,
     sessions,
     ibgpDomains,
   };

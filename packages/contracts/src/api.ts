@@ -9,6 +9,7 @@ import type {
   PolicyFilter,
   PolicyFunction,
   RpkiSource,
+  SourcePolicyEgress,
   StaticProtocol,
 } from "./inventory.js";
 
@@ -17,6 +18,7 @@ export type NodeMutationRequest = Omit<ManagedNode, "id" | "kind">;
 export type PeerMutationRequest = Omit<Peer, "id" | "nodeId" | "managedBy">;
 export type StaticMutationRequest = Omit<StaticProtocol, "id">;
 export type RpkiMutationRequest = Omit<RpkiSource, "id">;
+export type SourcePolicyMutationRequest = Omit<SourcePolicyEgress, "id" | "rulePriorityBase">;
 
 export type PolicyResource = PolicyDefine | PolicyFunction | PolicyFilter;
 export type PolicyMutationRequest<Resource extends PolicyResource = PolicyResource> = Omit<Resource, "id">;
@@ -90,6 +92,7 @@ export interface DashboardResponse {
   filters: PolicyFilter[];
   rpki: RpkiSource[];
   staticProtocols: StaticProtocol[];
+  sourcePolicies: SourcePolicyEgress[];
   selectedPeer: DashboardPeer | null;
   runtime: NodeRuntime;
   health: InventoryHealth;
@@ -140,6 +143,35 @@ export interface ResourceMutationResponse<Resource> {
   inventory: Inventory;
   deployment: DeploymentReport;
   events: ChangeEvent[];
+}
+
+export interface SourcePolicyRuleInstruction {
+  priority: number;
+  source: string;
+  table: number;
+  egressAddress: string;
+  groupId: string;
+}
+
+export interface SourcePolicyManualPlan {
+  operation: "create" | "update" | "delete" | "reconcile";
+  resourceId: string;
+  resourceLabel: string;
+  nodeId: string;
+  nodeName: string;
+  platform: "linux" | "openwrt";
+  birdConfig: string;
+  rules: SourcePolicyRuleInstruction[];
+  removeRules: SourcePolicyRuleInstruction[];
+  applyScript: string | null;
+  cleanupScript: string | null;
+  systemdUnit: string | null;
+  systemdInstallScript: string | null;
+  instructions: string[];
+}
+
+export interface SourcePolicyMutationResponse extends ResourceMutationResponse<SourcePolicyEgress> {
+  manualPlans: SourcePolicyManualPlan[];
 }
 
 export interface NodeMutationResponse {

@@ -1,11 +1,13 @@
-import type { ChangeEvent, IbgpPreviewSide } from "../packages/contracts/src/api.js";
+import type { ChangeEvent, IbgpPreviewSide, SourcePolicyManualPlan } from "../packages/contracts/src/api.js";
 import type {
   BgpSession,
   Inventory,
   IbgpDomain,
   ManagedNode,
   PolicyCollection,
+  SourcePolicyEgress,
 } from "../packages/contracts/src/inventory.js";
+import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import { resourceSingleNodeId } from "../packages/contracts/src/resource-scope.js";
 import type { MutationService } from "./application-contracts.js";
 import {
@@ -13,6 +15,9 @@ import {
   normalizePeer,
   normalizeRPKI,
   normalizeStaticProtocol,
+  prepareSourcePolicyEgress,
+  renderSourcePolicyEgress,
+  sourcePolicyManualPlan,
   stageAndValidate,
   validateInventory,
 } from "./bird.js";
@@ -200,6 +205,45 @@ export function createResourceApplicationService(
         ),
       );
     }
+  }
+
+  async function preflightSourcePolicy(stateInput: Inventory, resourceId: string): Promise<void> {
+    const probe = structuredClone(stateInput);
+    const resource = probe.sourcePolicies.find((item) => item.id === resourceId);
+    if (!resource) fail(404, "源地址出口映射不存在");
+    resource.enabled = true;
+    const state = validateInventory(probe);
+    const nodes = resourceNodeIds(state, resource).map((nodeId) => findNode(state, nodeId));
+    for (const node of nodes) {
+      const validation = await stageAndValidate(node, configForNode(state, node));
+      if (!validation.ok) fail(422, validation.stderr || `${resource.label} 的 BIRD 语法检查失败`);
+    }
+  }
+
+  function sourcePolicyPlans(
+    state: Inventory,
+    current: SourcePolicyEgress | null,
+    previous: SourcePolicyEgress | null,
+    operation: SourcePolicyManualPlan["operation"],
+  ): SourcePolicyManualPlan[] {
+    return state.nodes.filter((node) =>
+      (current !== null && resourceAppliesToNode(current, node.id))
+      || (previous !== null && resourceAppliesToNode(previous, node.id)),
+    ).map((node) => {
+      const sourcePolicy = current !== null && current.enabled && resourceAppliesToNode(current, node.id) ? current : null;
+      const internalDefineNames = sourcePolicy?.internalDefineIds.map((defineId) => {
+        const define = state.defines.find((item) => item.id === defineId);
+        if (!define || define.type !== "cidr4") fail(409, `源地址出口映射引用的 Define ${defineId} 不可用`);
+        return define.name;
+      }) ?? [];
+      return sourcePolicyManualPlan(
+        node,
+        current,
+        previous,
+        operation,
+        sourcePolicy ? renderSourcePolicyEgress(sourcePolicy, internalDefineNames) : "",
+      );
+    });
   }
 
   return {
@@ -394,6 +438,94 @@ export function createResourceApplicationService(
     }, () => affectedNodeIds);
     event("success", `已删除 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { inventory: state, deployment, events } };
+  },
+
+  async getSourcePolicyPlan(resourceId, nodeId) {
+    const state = await store.read();
+    const resource = state.sourcePolicies.find((item) => item.id === resourceId);
+    if (!resource) fail(404, "源地址出口映射不存在");
+    const plans = sourcePolicyPlans(state, resource, resource, "reconcile");
+    const plan = nodeId === null ? plans[0] : plans.find((item) => item.nodeId === nodeId);
+    if (!plan) fail(404, "该节点不在源地址出口映射的下发范围内");
+    return { status: 200, payload: { plan } };
+  },
+
+  async previewSourcePolicy(body) {
+    const requestedId = body.id === undefined || body.id === null || body.id === "" ? null : String(body.id);
+    const state = await store.read();
+    const existing = requestedId === null
+      ? null
+      : state.sourcePolicies.find((item) => item.id === requestedId) ?? null;
+    if (requestedId !== null && !existing) fail(404, "源地址出口映射不存在");
+    let previewSequence = 0;
+    const previewId = existing?.id ?? "source_policy_preview";
+    const preview = prepareSourcePolicyEgress(
+      { ...body, id: previewId },
+      existing,
+      state.sourcePolicies,
+      (prefix) => prefix + "_preview_" + (++previewSequence),
+    );
+    const draft = structuredClone(state);
+    const existingIndex = draft.sourcePolicies.findIndex((item) => item.id === preview.id);
+    if (existingIndex >= 0) draft.sourcePolicies[existingIndex] = preview;
+    else draft.sourcePolicies.push(preview);
+    const validated = validateInventory(draft);
+    const current = validated.sourcePolicies.find((item) => item.id === preview.id);
+    if (!current) fail(500, "源地址出口映射预览生成失败");
+    const manualPlans = sourcePolicyPlans(validated, current, existing, existing ? "update" : "create");
+    return { status: 200, payload: { resource: current, manualPlans } };
+  },
+
+  async createSourcePolicy(body) {
+    const { state, result: resource, deployment } = await mutateAndApply(async (draft) => {
+      const created = prepareSourcePolicyEgress({ ...body, id: makeId("source_policy") }, null, draft.sourcePolicies, makeId);
+      draft.sourcePolicies.push(created);
+      const candidate = validateInventory(draft);
+      if (!created.enabled) await preflightSourcePolicy(candidate, created.id);
+      return created;
+    }, (created, inventory) => resourceNodeIds(inventory, created));
+    const applied = state.sourcePolicies.find((item) => item.id === resource.id) ?? resource;
+    const manualPlans = sourcePolicyPlans(state, applied, null, "create");
+    event("success", `已添加源地址出口映射 ${applied.label}`);
+    return { status: 201, payload: { resource: applied, inventory: state, deployment, manualPlans, events } };
+  },
+
+  async updateSourcePolicy(resourceId, body) {
+    let affectedNodeIds: string[] = [];
+    let previous: SourcePolicyEgress | null = null;
+    const { state, result: resource, deployment } = await mutateAndApply(async (draft) => {
+      const index = draft.sourcePolicies.findIndex((item) => item.id === resourceId);
+      if (index < 0) fail(404, "源地址出口映射不存在");
+      const existing = draft.sourcePolicies[index];
+      if (!existing) fail(404, "源地址出口映射不存在");
+      previous = structuredClone(existing);
+      const updated = prepareSourcePolicyEgress({ ...body, id: resourceId }, existing, draft.sourcePolicies, makeId);
+      draft.sourcePolicies[index] = updated;
+      affectedNodeIds = resourceChangeNodeIds(draft, existing, updated);
+      const candidate = validateInventory(draft);
+      if (!updated.enabled) await preflightSourcePolicy(candidate, resourceId);
+      return updated;
+    }, () => affectedNodeIds);
+    const applied = state.sourcePolicies.find((item) => item.id === resource.id) ?? resource;
+    const manualPlans = sourcePolicyPlans(state, applied, previous, "update");
+    event("success", `已更新源地址出口映射 ${applied.label}`);
+    return { status: 200, payload: { resource: applied, inventory: state, deployment, manualPlans, events } };
+  },
+
+  async deleteSourcePolicy(resourceId) {
+    let affectedNodeIds: string[] = [];
+    const { state, result: resource, deployment } = await mutateAndApply((draft) => {
+      const index = draft.sourcePolicies.findIndex((item) => item.id === resourceId);
+      if (index < 0) fail(404, "源地址出口映射不存在");
+      const target = draft.sourcePolicies[index];
+      if (!target) fail(404, "源地址出口映射不存在");
+      affectedNodeIds = resourceNodeIds(draft, target);
+      draft.sourcePolicies.splice(index, 1);
+      return target;
+    }, () => affectedNodeIds);
+    const manualPlans = sourcePolicyPlans(state, null, resource, "delete");
+    event("warning", `已删除源地址出口映射 ${resource.label}；请完成待办的系统规则清理`);
+    return { status: 200, payload: { inventory: state, deployment, manualPlans, events } };
   },
 
   async createPolicy(collection, body) {

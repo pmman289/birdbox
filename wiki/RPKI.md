@@ -92,6 +92,8 @@ filter rpki_import_v4
 
 作用域从多个节点缩小时，Birdbox 会同时预检旧、新作用域，确保被移除节点能安全撤下对应声明。指定节点列表不能为空。
 
+Function、Filter 或 Static 自定义源码引用 ROA Table 时，其作用域必须完全包含在 RPKI 资源作用域内。Birdbox 会沿 Function 等中间资源递归检查；即使 Filter 没有直接写出 Table 名称，也不能通过间接 Function 绕过作用域限制。新增节点同样会重新检查全局策略的完整依赖链。
+
 如果 Function、Filter、Define 或 Static 自定义源码引用 RPKI 名称或 ROA Table，Birdbox 会阻止删除或危险改名。先更新引用者，再修改 RPKI 资源。
 
 ## 保存与验证

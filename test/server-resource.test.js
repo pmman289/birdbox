@@ -174,6 +174,40 @@ exit 0
   const afterRejectedScope = await authenticatedRequest("/api/dashboard");
   assert.equal(afterRejectedScope.body.inventory.defines[0].nodeIds, null);
 
+  const createdRpki = await authenticatedRequest("/api/rpki", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeIds: null,
+      label: "API ROA",
+      name: "api_roa",
+      sourceType: "file",
+      roa4Table: "API_ROA4",
+      file4: "/dev/null",
+      enabled: true,
+    }),
+  });
+  assert.equal(createdRpki.status, 201);
+  const createdFunction = await authenticatedRequest("/api/functions", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeIds: null,
+      label: "API RPKI policy",
+      name: "api_rpki_policy",
+      source: "function api_rpki_policy() { return roa_check(API_ROA4, net, bgp_path.last) = ROA_VALID; }",
+      enabled: true,
+    }),
+  });
+  assert.equal(createdFunction.status, 201);
+  const rejectedRpkiScope = await authenticatedRequest(`/api/rpki/${createdRpki.body.resource.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ nodeIds: ["local"] }),
+  });
+  assert.equal(rejectedRpkiScope.status, 400);
+  assert.match(rejectedRpkiScope.body.error, /作用域不兼容的 RPKI api_roa/);
+  assert.match(rejectedRpkiScope.body.error, /Function api_rpki_policy -> RPKI api_roa/);
+  const afterRejectedRpkiScope = await authenticatedRequest("/api/dashboard");
+  assert.equal(afterRejectedRpkiScope.body.inventory.rpki.find((resource) => resource.id === createdRpki.body.resource.id).nodeIds, null);
+
   const createdStatic = await authenticatedRequest("/api/statics", {
     method: "POST",
     body: JSON.stringify({
@@ -292,6 +326,81 @@ exit 0
   const deletedStatic = await authenticatedRequest(`/api/statics/${staticId}`, { method: "DELETE" });
   assert.equal(deletedStatic.status, 200);
   assert.deepEqual(deletedStatic.body.inventory.staticProtocols, []);
+
+  const createdSourcePolicy = await authenticatedRequest("/api/source-policies", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeIds: ["local"],
+      label: "Public source egress",
+      groups: [
+        { egressAddress: "172.20.177.36", kernelTable: 50000, sources: ["162.141.136.139/32", "162.141.136.138/32"] },
+        { egressAddress: "172.20.177.38", kernelTable: 50001, sources: ["82.47.33.189/32"] },
+      ],
+      copyInternalRoutes: false,
+      internalDefineIds: [],
+      enabled: true,
+    }),
+  });
+  assert.equal(createdSourcePolicy.status, 201);
+  assert.equal(createdSourcePolicy.body.resource.groups.length, 2);
+  assert.equal(createdSourcePolicy.body.resource.groups[0].kernelTable, 50000);
+  assert.equal(createdSourcePolicy.body.resource.groups[1].kernelTable, 50001);
+  assert.equal(createdSourcePolicy.body.manualPlans.length, 1);
+  assert.match(createdSourcePolicy.body.manualPlans[0].applyScript, /ip -4 rule add priority/);
+  const sourcePolicyId = createdSourcePolicy.body.resource.id;
+  const sourcePolicyPreview = await authenticatedRequest("/api/source-policies/preview", {
+    method: "POST",
+    body: JSON.stringify({
+      id: sourcePolicyId,
+      nodeIds: ["local"],
+      label: "Preview only",
+      groups: [
+        { ...createdSourcePolicy.body.resource.groups[0], kernelTable: 50002, sources: ["162.141.136.140/32"] },
+        createdSourcePolicy.body.resource.groups[1],
+      ],
+      copyInternalRoutes: false,
+      internalDefineIds: [],
+      enabled: true,
+    }),
+  });
+  assert.equal(sourcePolicyPreview.status, 200);
+  assert.equal(sourcePolicyPreview.body.resource.groups[0].kernelTable, 50002);
+  assert.match(sourcePolicyPreview.body.manualPlans[0].applyScript, /table 50002/);
+  const afterPreview = await authenticatedRequest("/api/dashboard");
+  assert.equal(afterPreview.body.inventory.sourcePolicies[0].groups[0].kernelTable, 50000);
+  const sourcePolicyPlan = await authenticatedRequest(`/api/source-policies/${sourcePolicyId}/plan?nodeId=local`);
+  assert.equal(sourcePolicyPlan.status, 200);
+  assert.match(sourcePolicyPlan.body.plan.birdConfig, /route 0\.0\.0\.0\/0 recursive 172\.20\.177\.36/);
+
+  const updatedSourcePolicy = await authenticatedRequest(`/api/source-policies/${sourcePolicyId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      label: "Public source egress updated",
+      groups: [
+        { ...createdSourcePolicy.body.resource.groups[0], sources: ["162.141.136.139/32", "162.141.136.140/32"] },
+        createdSourcePolicy.body.resource.groups[1],
+      ],
+    }),
+  });
+  assert.equal(updatedSourcePolicy.status, 200);
+  assert.match(updatedSourcePolicy.body.manualPlans[0].applyScript, /162\.141\.136\.140\/32/);
+
+  const conflictingSourcePolicy = await authenticatedRequest("/api/source-policies", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeIds: ["local"],
+      label: "Conflict source egress",
+      groups: [{ egressAddress: "172.20.177.40", sources: ["162.141.136.0/24"] }],
+      copyInternalRoutes: false,
+      enabled: true,
+    }),
+  });
+  assert.equal(conflictingSourcePolicy.status, 400);
+  assert.match(conflictingSourcePolicy.body.error, /源 CIDR/);
+
+  const deletedSourcePolicy = await authenticatedRequest(`/api/source-policies/${sourcePolicyId}`, { method: "DELETE" });
+  assert.equal(deletedSourcePolicy.status, 200);
+  assert.match(deletedSourcePolicy.body.manualPlans[0].cleanupScript, /ip -4 rule del priority/);
 
   await fs.writeFile(failApply, "1\n");
   const failedApply = await authenticatedRequest("/api/defines/define_test", {

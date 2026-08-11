@@ -6,7 +6,7 @@ Birdbox 适合希望通过浏览器完成以下工作的网络管理员：
 
 - 查看节点和 BGP 会话状态；
 - 创建、预检和部署 IPv4/IPv6 eBGP 会话；
-- 管理 CIDR Define、节点级 Static Protocol、Function、Filter 和 RPKI 资源；
+- 管理 CIDR Define、节点级 Static Protocol、Function、Filter、RPKI 和源地址出口映射资源；
 - 为每个会话独立设置导入、导出和高级 BGP 参数；
 - 在配置失败时保留原库存并回滚已完成的节点部署。
 
@@ -151,11 +151,15 @@ Static 是节点级资源，不属于任何 BGP 会话。一个节点可以创�
 
 ### Function 和 Filter
 
-Function 用于可复用的策略步骤，Filter 用于完整的自定义路由过滤器。两者均可应用于所有节点或多个指定节点；Birdbox 会在每个目标节点的完整配置中解析它们，并阻止引用不存在、禁用或作用域不匹配的资源。
+Function 用于可复用的策略步骤，Filter 用于完整的自定义路由过滤器。两者均可应用于所有节点或多个指定节点；Birdbox 会递归检查 Define、Function、Filter、RPKI 和 Static 自定义源码的依赖链，阻止作用域不匹配、依赖停用、声明顺序错误以及自调用或循环依赖。
 
 ### RPKI
 
 RPKI 资源支持本地 ROA 文件和 RPKI-RTR 缓存，可应用于所有节点或多个指定节点。IPv4、IPv6 ROA Table 可以分别启用，并在 Filter 中通过 `roa_check()` 使用。
+
+### 源地址出口映射
+
+源地址出口映射将一批 IPv4 源 CIDR 按出口地址分组，并下发到指定节点。Birdbox 为每个出口组生成独立 BIRD table、recursive default 和 Kernel Protocol；出口地址通过 `master4` 动态解析。每个出口组的 Linux kernel table 默认自动分配，也可以手工指定未占用的 table ID。保存后，界面会按节点提供 Linux root 脚本、完整 systemd 安装/更新脚本或 OpenWrt LuCI 规则清单。Birdbox 不会自动执行 `ip rule`，删除或停用映射集后也需要执行对应的规则清理计划。
 
 ## 数据、备份和升级
 
@@ -199,7 +203,7 @@ docker compose ps
 
 ## 本地开发
 
-需要 Node.js 18 或更高版本。应用默认使用 MySQL；测试使用内存数据库：
+需要 Node.js 24 或更高版本。应用默认使用 MySQL；测试使用内存数据库：
 
 ```bash
 npm install

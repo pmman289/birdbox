@@ -103,6 +103,25 @@ export interface StaticProtocol {
   enabled: boolean;
 }
 
+export interface SourcePolicyEgressGroup {
+  id: string;
+  egressAddress: string;
+  sources: string[];
+  kernelTable: number;
+  ruleSlot: number;
+}
+
+export interface SourcePolicyEgress {
+  id: string;
+  label: string;
+  enabled: boolean;
+  nodeIds: MultiNodeResourceScope;
+  groups: SourcePolicyEgressGroup[];
+  rulePriorityBase: number;
+  copyInternalRoutes: boolean;
+  internalDefineIds: string[];
+}
+
 interface RpkiBase extends MultiNodePolicyResourceBase {
   sourceType: "file" | "server";
   roa4Table: string | null;
@@ -313,7 +332,7 @@ export interface IbgpDomain {
 }
 
 export interface Inventory {
-  version: 25;
+  version: 26;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];
@@ -321,6 +340,7 @@ export interface Inventory {
   filters: PolicyFilter[];
   rpki: RpkiSource[];
   staticProtocols: StaticProtocol[];
+  sourcePolicies: SourcePolicyEgress[];
   sessions: BgpSession[];
   ibgpDomains: IbgpDomain[];
 }

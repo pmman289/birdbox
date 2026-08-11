@@ -60,13 +60,67 @@ test("confirms an inventory CAS that committed before its response was lost", as
   assert.equal((await database.readState("inventory")).revision, 3);
 });
 
+test("loads legacy dependency mismatches but requires a valid graph for the next write", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-dependencies-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", {
+    version: 25,
+    nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1" }],
+    peers: [],
+    defines: [],
+    functions: [{
+      id: "function_rpki",
+      nodeIds: null,
+      label: "RPKI policy",
+      name: "function_rpki",
+      source: "function function_rpki() { return roa_check(ROA_LOCAL, net, bgp_path.last) = ROA_VALID; }",
+      enabled: true,
+    }],
+    filters: [],
+    rpki: [{
+      id: "rpki_local",
+      nodeIds: ["local"],
+      label: "Local ROA",
+      name: "local_roa",
+      sourceType: "file",
+      roa4Table: "ROA_LOCAL",
+      roa6Table: null,
+      file4: "/dev/null",
+      file6: null,
+      enabled: true,
+    }],
+    staticProtocols: [],
+    sessions: [],
+    ibgpDomains: [],
+  });
+  const store = new InventoryStore({
+    database,
+    dataDir: root,
+    nodesPath: path.join(root, "nodes.json"),
+    legacySessionPath: path.join(root, "session.json"),
+  });
+
+  const current = await store.read();
+  assert.deepEqual(current.rpki[0].nodeIds, ["local"]);
+  await assert.rejects(
+    () => store.replace(current, { ...current, nodes: [{ ...current.nodes[0], name: "Renamed" }] }),
+    /作用域不兼容的 RPKI local_roa/,
+  );
+  const repaired = await store.replace(current, {
+    ...current,
+    rpki: [{ ...current.rpki[0], nodeIds: null }],
+  });
+  assert.equal(repaired.rpki[0].nodeIds, null);
+});
+
 test("refuses a newer inventory format without changing the stored document", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-newer-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const dataDir = path.join(root, "data");
   const database = new MemoryDatabase();
   const futureInventory = {
-    version: 26,
+    version: 27,
     futureOnly: { preserve: true },
     nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [],
   };
@@ -112,7 +166,7 @@ test("migrates legacy shared-resource scopes to nodeIds", async (context) => {
   });
 
   const state = await store.read();
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.deepEqual(state.defines[0].nodeIds, ["left"]);
   assert.deepEqual(state.functions[0].nodeIds, null);
   assert.deepEqual(state.filters[0].nodeIds, ["right"]);
@@ -152,7 +206,7 @@ test("migrates v22 iBGP members to one transport address", async (context) => {
   });
 
   const state = await store.read();
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.deepEqual(state.ibgpDomains[0].members, [
     { nodeId: "left", address: "192.0.2.1" },
     { nodeId: "right", address: "192.0.2.2" },
@@ -192,7 +246,7 @@ test("migrates Static channel policies to node resources while upgrading v18 inv
     legacySessionPath: path.join(root, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.equal(state.sessions[0].localAddress, null);
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);
   assert.deepEqual(state.staticProtocols.map((resource) => ({
@@ -247,7 +301,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v19", a
   });
   const state = await store.read();
 
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.equal(state.nodes[0].address, undefined);
   assert.equal(state.nodes[0].asn, undefined);
   assert.equal(state.sessions[0].localAddress, "192.0.2.10");
@@ -305,7 +359,7 @@ test("migrates v8 Function order and combined policies to ordered v19 channel st
     legacySessionPath: path.join(dataDir, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.deepEqual(state.staticProtocols, []);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "none");
   assert.deepEqual(state.functions.map((resource) => resource.name), ["guard", "late"]);
@@ -351,7 +405,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v19 resource
   });
   const state = await store.read();
 
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.deepEqual(state.defines.map((resource) => [resource.id, resource.type]), [
     ["prefix_global", "cidr4"],
     ["define_pref", "expression"],
@@ -391,7 +445,7 @@ test("migrates v14 export policy and Static settings to a v19 node resource", as
   await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
   const store = new InventoryStore({ database: new MemoryDatabase(), dataDir, nodesPath: "", legacySessionPath: "" });
   const state = await store.read();
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
   assert.equal(state.sessions[0].channels.ipv6.exportPolicy.formAction, "none");
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);

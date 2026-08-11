@@ -45,6 +45,16 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
         authentication: "none",
       },
     ];
+    dashboard.inventory.sourcePolicies = [{
+      id: "e2e_global_source_policy",
+      nodeIds: null,
+      label: "E2E 全局出口",
+      enabled: true,
+      groups: [{ id: "gateway", egressAddress: "172.20.177.36", sources: ["198.51.100.1/32"], kernelTable: 200, ruleSlot: 0 }],
+      rulePriorityBase: 10000,
+      copyInternalRoutes: false,
+      internalDefineIds: [],
+    }];
     await route.fulfill({ response, json: dashboard });
   });
   await authenticate(page);
@@ -60,6 +70,8 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(rpkiWarning).toContainText("rpki.example:323");
   await expect(rpkiWarning).toContainText("确认新节点可访问该 RPKI-RTR 地址和端口");
   await expect(rpkiWarning).toContainText("把作用域改为指定节点");
+  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("E2E 全局出口");
+  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("ip rule 不会自动配置");
   await page.locator("#nodeEditorName").fill("E2E SSH Router");
   await page.locator("#nodeEditorSshHost").fill("192.0.2.10");
   await page.locator("#nodeEditorSshUser").fill("birdbox");
@@ -155,6 +167,27 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator("#rpkiTransport").selectOption("ssh");
   await expect(page.locator("#rpkiSshFields")).toBeVisible();
   await page.locator('#rpkiDialog [data-close="rpkiDialog"]').click();
+
+  await page.locator("#resourceSourcePoliciesTab").click();
+  await page.locator("#resource-sourcePolicies .primary-button").click();
+  await expect(page.locator("#sourcePolicyDialog")).toBeVisible();
+  await page.locator("#sourcePolicyLabel").fill("E2E 源地址出口");
+  await page.locator(".source-policy-import summary").click();
+  await page.locator(".source-policy-import textarea").fill(JSON.stringify({
+    "172.20.177.36": ["162.141.136.139/32", "162.141.136.138/32"],
+    "172.20.177.38": ["82.47.33.189/32"],
+  }, null, 2));
+  await page.getByRole("button", { name: "解析并替换出口组" }).click();
+  await expect(page.locator(".source-policy-group")).toHaveCount(2);
+  await expect(page.locator(".source-policy-source-row")).toHaveCount(3);
+  await expect(page.locator(".source-policy-group").first()).toContainText("2 条");
+  await page.locator("#sourcePolicyKernelTable0").fill("50000");
+  await expect(page.locator("#sourcePolicyKernelTable0")).toHaveValue("50000");
+  await expect(page.locator("#sourcePolicyDialog")).toContainText("kernel table 50000");
+  await expect(page.locator("#sourcePolicyDialog")).toContainText("systemd 安装/更新脚本");
+  const sourcePolicyOverflow = await page.locator("#sourcePolicyDialog").evaluate((element) => element.scrollWidth > element.clientWidth + 1);
+  expect(sourcePolicyOverflow).toBe(false);
+  await page.locator("#sourcePolicyDialog").getByRole("button", { name: "关闭" }).click();
 
   expect(pageErrors).toEqual([]);
 });

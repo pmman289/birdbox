@@ -659,6 +659,7 @@ dialog.editor-dialog { width: min(580px, calc(100vw - 32px)); }
 dialog.editor-dialog { max-height: calc(100vh - 32px); overflow: auto; }
 dialog.static-editor-dialog { width: min(1080px, calc(100vw - 32px)); }
 dialog.policy-editor-dialog { width: min(860px, calc(100vw - 32px)); }
+dialog.source-policy-editor-dialog { width: min(1120px, calc(100vw - 32px)); }
 .policy-scope-field { outline: none; }
 .policy-scope-heading { min-height: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .policy-scope-heading .field-label { margin-bottom: 6px; }
@@ -776,6 +777,48 @@ dialog form { padding: 22px; }
 .node-retire-actions summary { cursor: pointer; }
 .node-retire-actions details .text-danger-button { margin-top: 7px; }
 .cleanup-list { margin: 16px 0 0; padding-left: 20px; color: var(--ink-soft); line-height: 1.8; font-size: 12px; }
+.source-policy-groups, .source-policy-preview { min-width: 0; margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--line); }
+.source-policy-section-head, .source-policy-group-head, .source-policy-code-head, .source-policy-plan-status { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.source-policy-section-head h3 { margin: 0; font-size: 13px; }
+.source-policy-section-head small { display: block; max-width: 720px; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.source-policy-group { min-width: 0; margin-top: 11px; padding: 12px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
+.source-policy-group-head { align-items: end; }
+.source-policy-group-head .field { min-width: min(360px, 100%); }
+.source-policy-group-head .source-policy-table-field { min-width: min(260px, 100%); }
+.source-policy-table-field small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.source-policy-source-list { min-width: 0; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line); }
+.source-policy-list-label { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; font-weight: 700; }
+.source-policy-source-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 6px; margin-top: 6px; }
+.source-policy-source-row input { min-height: 33px; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-policy-source-row .row-edit-button { width: 32px; min-height: 33px; }
+.source-policy-source-list > .compact-command { margin-top: 8px; }
+.source-policy-import { margin-top: 12px; padding-top: 11px; border-top: 1px dashed var(--line-strong); }
+.source-policy-import summary { color: var(--green-dark); cursor: pointer; font-size: 10px; font-weight: 700; }
+.source-policy-import textarea { min-height: 110px; margin-top: 9px; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-policy-import .secondary-button { margin-top: 7px; }
+.source-policy-internal { margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--line); }
+.source-policy-internal .toggle-row span { display: grid; gap: 3px; }
+.source-policy-internal .toggle-row small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.source-policy-define-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+.source-policy-define-option { min-width: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 8px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.source-policy-define-option input { width: 15px; height: 15px; accent-color: var(--green); }
+.source-policy-define-option span, .source-policy-define-option strong, .source-policy-define-option code { min-width: 0; display: block; }
+.source-policy-define-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+.source-policy-define-option code { margin-top: 2px; overflow: hidden; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.source-policy-define-option > small { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.source-policy-plan { min-width: 0; margin-top: 11px; padding: 12px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 5px; }
+.source-policy-plan-status { align-items: center; color: var(--muted); font-size: 10px; }
+.source-policy-plan-status strong { color: var(--ink); font-size: 12px; }
+.source-policy-code-grid { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; margin-top: 10px; }
+.source-policy-code-grid > div { min-width: 0; }
+.source-policy-code-head { align-items: center; min-height: 27px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.source-policy-code-grid pre { min-height: 170px; max-height: 360px; margin: 0; padding: 10px; overflow: auto; color: var(--code-text); background: var(--code); border-radius: 4px; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+.source-policy-openwrt { min-width: 0; }
+.source-policy-openwrt ol { min-height: 170px; max-height: 360px; margin: 0; padding: 9px 9px 9px 30px; overflow: auto; background: var(--code); border-radius: 4px; color: var(--code-text); }
+.source-policy-openwrt li { padding: 5px 0; font-size: 10px; }
+.source-policy-openwrt li code { margin-right: 6px; color: var(--code-text); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-policy-instructions { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.source-policy-systemd { min-width: 0; margin-top: 15px; padding-top: 13px; border-top: 1px dashed var(--line-strong); }
 .static-route-editor { min-width: 0; padding-top: 3px; }
 .static-route-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .static-route-editor-head h3 { margin: 0; font-size: 13px; }
@@ -893,6 +936,10 @@ dialog form { padding: 22px; }
   .static-route-action-list { max-height: 230px; border-right: 0; border-bottom: 1px solid var(--line-strong); }
   .static-route-detail { max-height: none; overflow: visible; padding: 14px; }
   .static-route-action-fields { grid-template-columns: 1fr; }
+  .source-policy-define-list, .source-policy-code-grid { grid-template-columns: 1fr; }
+  .source-policy-group-head, .source-policy-section-head { align-items: stretch; flex-direction: column; }
+  .source-policy-group-head .field { min-width: 0; }
+  .source-policy-code-grid pre, .source-policy-openwrt ol { min-height: 130px; max-height: 280px; }
   .static-filter-section-head { align-items: stretch; flex-direction: column; }
   .static-filter-add-controls { display: grid; grid-template-columns: 1fr auto; }
   .static-filter-operation-row { grid-template-columns: 26px minmax(0, 1fr); align-items: start; }

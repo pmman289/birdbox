@@ -121,11 +121,11 @@ const referenceTotal = computed(() => {
 const referenceShown = computed(() => referenceGroups.value.reduce((count, group) => count + group.resources.length, 0));
 
 const fieldMappings = [
-  [/可用范围|不存在的节点/, "policyResourceNodeScope"],
+  [/可用范围|不存在的节点|作用域不兼容/, "policyResourceNodeScope"],
   [/Define 类型/, "policyResourceType"],
   [/显示名称/, "policyResourceLabel"],
   [/BIRD 全局标识符冲突|BIRD .*名称|Define 名称|策略名称|声明开始/, "policyResourceName"],
-  [/CIDR 列表|Define 表达式|策略源码|源码|顶层声明|花括号|括号/, "policyResourceSource"],
+  [/CIDR 列表|Define 表达式|策略源码|源码|顶层声明|花括号|括号|依赖形成循环|声明顺序/, "policyResourceSource"],
 ] as const;
 
 function defaultSource(kind: PolicyCollection, name: string): string {

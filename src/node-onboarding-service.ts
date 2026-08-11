@@ -614,6 +614,7 @@ export class NodeOnboardingService {
             functions: removeNodeFromMultiScope(current.functions, targetNode.id),
             filters: removeNodeFromMultiScope(current.filters, targetNode.id),
             rpki: removeNodeFromMultiScope(current.rpki, targetNode.id),
+            sourcePolicies: removeNodeFromMultiScope(current.sourcePolicies, targetNode.id),
             staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== targetNode.id),
           });
           const state = await this.#options.store.replace(current, inventory);
@@ -633,7 +634,7 @@ export class NodeOnboardingService {
         });
         const validation = await stageAndValidate(
           targetNode,
-          renderBirdConfig(targetNode, [], [], [], [], [], [], []),
+          renderBirdConfig(targetNode, [], [], [], [], [], [], [], []),
         );
         if (!validation.ok) fail(422, validation.stderr || validation.stdout || "节点退役配置检查失败");
         journal = await this.#options.deploymentService.beginJournal(

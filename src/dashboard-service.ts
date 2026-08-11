@@ -14,6 +14,7 @@ import {
   nodeRPKIResources,
   nodeSessions,
   nodeStaticProtocols,
+  nodeSourcePolicies,
 } from "./inventory-domain.js";
 
 interface DashboardServiceOptions {
@@ -107,6 +108,7 @@ export class DashboardService {
         filters: [],
         rpki: [],
         staticProtocols: [],
+        sourcePolicies: [],
         selectedPeer: null,
         runtime: {
           nodeId: null,
@@ -155,6 +157,7 @@ export class DashboardService {
       filters: nodePolicyResources(state, "filters", selectedNode.id, true),
       rpki: nodeRPKIResources(state, selectedNode.id, true),
       staticProtocols: nodeStaticProtocols(state, selectedNode.id, true),
+      sourcePolicies: nodeSourcePolicies(state, selectedNode.id, true),
       selectedPeer: selected,
       runtime,
       health: summarizeInventoryHealth(state, runtimes),

@@ -79,6 +79,12 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.put<{ Params: { resourceId: string } }>("/api/rpki/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateRpki(validId(request.params.resourceId), jsonBody(request))));
   app.delete<{ Params: { resourceId: string } }>("/api/rpki/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteRpki(validId(request.params.resourceId))));
 
+  app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string } }>("/api/source-policies/:resourceId/plan", async (request, reply) => jsonReply(reply, await options.service.getSourcePolicyPlan(validId(request.params.resourceId), typeof request.query.nodeId === "string" ? request.query.nodeId : null)));
+  app.post("/api/source-policies/preview", async (request, reply) => jsonReply(reply, await options.service.previewSourcePolicy(jsonBody(request))));
+  app.post("/api/source-policies", async (request, reply) => jsonReply(reply, await options.service.createSourcePolicy(jsonBody(request))));
+  app.put<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateSourcePolicy(validId(request.params.resourceId), jsonBody(request))));
+  app.delete<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteSourcePolicy(validId(request.params.resourceId))));
+
   app.post<{ Params: { collection: string } }>("/api/:collection(defines|functions|filters)", async (request, reply) => jsonReply(reply, await options.service.createPolicy(policyCollection(request.params.collection), jsonBody(request))));
   app.post<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions)/:resourceId/move", async (request, reply) => {
     const body = jsonBody(request);

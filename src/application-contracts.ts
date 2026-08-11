@@ -20,6 +20,11 @@ export interface MutationService {
   createRpki(body: Record<string, unknown>): Promise<MutationResult>;
   updateRpki(resourceId: string, body: Record<string, unknown>): Promise<MutationResult>;
   deleteRpki(resourceId: string): Promise<MutationResult>;
+  getSourcePolicyPlan(resourceId: string, nodeId: string | null): Promise<MutationResult>;
+  previewSourcePolicy(body: Record<string, unknown>): Promise<MutationResult>;
+  createSourcePolicy(body: Record<string, unknown>): Promise<MutationResult>;
+  updateSourcePolicy(resourceId: string, body: Record<string, unknown>): Promise<MutationResult>;
+  deleteSourcePolicy(resourceId: string): Promise<MutationResult>;
   createPolicy(collection: PolicyCollection, body: Record<string, unknown>): Promise<MutationResult>;
   movePolicy(
     collection: "functions" | "defines",

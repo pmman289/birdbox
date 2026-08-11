@@ -120,6 +120,42 @@ test("maps a missing global RPKI file validation error to its resource and remed
   assert.equal(onboardingValidationError(requirements, "unrelated failure"), "unrelated failure");
 });
 
+test("rejects onboarding before SSH when a global policy depends on scoped RPKI", async () => {
+  const inventory = validateInventory({
+    nodes: [{ id: "existing", name: "Existing", transport: "ssh", sshHost: "existing.example", routerId: "192.0.2.1" }],
+    peers: [],
+    defines: [],
+    functions: [{
+      id: "function_rpki",
+      nodeIds: null,
+      label: "RPKI policy",
+      name: "function_rpki",
+      source: "function function_rpki() { return roa_check(ROA_DN42_V4, net, bgp_path.last) = ROA_VALID; }",
+      enabled: true,
+    }],
+    filters: [],
+    rpki: [{ ...globalFileRpki, nodeIds: ["existing"] }],
+    staticProtocols: [],
+    sessions: [],
+    ibgpDomains: [],
+  }, { allowInvalidResourceDependencies: true });
+  const service = new NodeOnboardingService({
+    store: { read: async () => inventory },
+    deploymentService: {},
+    withDeploymentLock: async (operation) => operation(),
+    controllerPublicKey: () => "",
+    makeId: () => "unused",
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId: null }),
+    getEvents: () => [],
+  });
+
+  await assert.rejects(
+    () => service.test({ name: "New router", sshHost: "new.example", sshUser: "birdbox", routerId: "192.0.2.2" }),
+    (error) => /作用域不兼容的 RPKI dn42_roa/.test(error.message)
+      && /Function function_rpki -> RPKI dn42_roa/.test(error.message),
+  );
+});
+
 test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async () => {
   let inventory = validateInventory({
     nodes: [
@@ -128,9 +164,16 @@ test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async 
     ],
     peers: [],
     defines: [],
-    functions: [],
+    functions: [{
+      id: "function_shared",
+      nodeIds: ["left", "right"],
+      label: "Shared RPKI policy",
+      name: "function_shared",
+      source: "function function_shared() { return roa_check(ROA_SHARED_V4, net, bgp_path.last) = ROA_VALID; }",
+      enabled: true,
+    }],
     filters: [
-      { id: "filter_shared", nodeIds: ["left", "right"], label: "Shared filter", name: "shared_filter", source: "filter shared_filter { accept; }", enabled: true },
+      { id: "filter_shared", nodeIds: ["left", "right"], label: "Shared filter", name: "shared_filter", source: "filter shared_filter { if function_shared() then accept; reject; }", enabled: true },
       { id: "filter_left", nodeIds: ["left"], label: "Left filter", name: "left_filter", source: "filter left_filter { accept; }", enabled: true },
       { id: "filter_global", nodeIds: null, label: "Global filter", name: "global_filter", source: "filter global_filter { accept; }", enabled: true },
     ],
@@ -162,6 +205,9 @@ test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async 
   const result = await service.decommission("left", true);
 
   assert.deepEqual(result.state.nodes.map((node) => node.id), ["right"]);
+  assert.deepEqual(result.state.functions.map((resource) => [resource.id, resource.nodeIds]), [
+    ["function_shared", ["right"]],
+  ]);
   assert.deepEqual(result.state.filters.map((resource) => [resource.id, resource.nodeIds]), [
     ["filter_shared", ["right"]],
     ["filter_global", null],

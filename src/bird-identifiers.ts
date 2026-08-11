@@ -9,7 +9,7 @@ export function makeStaticProtocolName(family: AddressFamily, protocolName: stri
   return `${fullName.slice(0, 64 - digest.length - 1)}_${digest}`;
 }
 
-export function birdIdentifiers(sourceInput: unknown): Set<string> {
+export function birdIdentifierList(sourceInput: unknown): string[] {
   const source = String(sourceInput ?? "");
   let code = "";
   let quote: string | null = null;
@@ -41,7 +41,11 @@ export function birdIdentifiers(sourceInput: unknown): Set<string> {
     }
     code += character;
   }
-  return new Set(code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
+  return code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
+}
+
+export function birdIdentifiers(sourceInput: unknown): Set<string> {
+  return new Set(birdIdentifierList(sourceInput));
 }
 
 export function birdSourceReferencesSymbol(source: unknown, symbol: unknown): boolean {

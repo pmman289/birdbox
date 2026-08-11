@@ -7,6 +7,7 @@ import type {
   PolicyDefine,
   PolicyFilter,
   PolicyFunction,
+  SourcePolicyEgress,
   StaticProtocol,
 } from "@birdbox/contracts/inventory";
 
@@ -87,6 +88,10 @@ function staticSummary(resource: StaticProtocol): string {
     .filter((filter) => filter.operations.length > 0 || filter.custom).length;
   const summary = `${defineNames.value.get(resource.defineId) ?? resource.defineId} · ${Object.keys(resource.routeActions ?? {}).length} 条 CIDR · ${filterCount} 条有 per-route 块`;
   return resource.raw ? `${summary} · + 自定义` : summary;
+}
+
+function sourcePolicySources(resource: SourcePolicyEgress): number {
+  return resource.groups.reduce((count, group) => count + group.sources.length, 0);
 }
 
 </script>
@@ -172,7 +177,7 @@ function staticSummary(resource: StaticProtocol): string {
     </tr>
   </template>
 
-  <template v-else>
+  <template v-else-if="kind === 'rpki'">
     <tr v-if="!inventory?.rpki.length"><td colspan="6" class="empty-cell">尚无 RPKI 来源</td></tr>
     <tr v-for="resource in inventory?.rpki ?? []" v-else :key="resource.id">
       <td><strong>{{ resource.label }}</strong><small>{{ resource.name }} · {{ resource.id }}</small></td>
@@ -181,6 +186,18 @@ function staticSummary(resource: StaticProtocol): string {
       <td><code>{{ [resource.roa4Table, resource.roa6Table].filter(Boolean).join(" / ") }}</code></td>
       <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ resource.enabled ? "已启用" : "已停用" }}</span></td>
       <td><button class="row-edit-button" type="button" title="编辑 RPKI" :aria-label="`编辑 RPKI ${resource.name}`" @click="edit('rpki', resource.id)">✎</button></td>
+    </tr>
+  </template>
+
+  <template v-else>
+    <tr v-if="!(inventory?.sourcePolicies ?? []).length"><td colspan="6" class="empty-cell">尚无源地址出口映射</td></tr>
+    <tr v-for="resource in inventory?.sourcePolicies ?? []" v-else :key="resource.id">
+      <td><strong>{{ resource.label }}</strong><small>{{ resource.id }}</small></td>
+      <td :title="resourceScopeLabel(resource, nodeNames)">{{ resourceScopeCompactLabel(resource, nodeNames) }}</td>
+      <td>{{ resource.groups.length }}</td>
+      <td>{{ sourcePolicySources(resource) }}</td>
+      <td><span class="resource-state" :class="resource.enabled ? 'enabled' : 'disabled'">{{ resource.enabled ? "BIRD 已启用 · 规则需手工同步" : "已停用" }}</span></td>
+      <td><button class="row-edit-button" type="button" title="编辑源地址出口映射" :aria-label="`编辑源地址出口映射 ${resource.label}`" @click="edit('sourcePolicies', resource.id)">✎</button></td>
     </tr>
   </template>
 </template>

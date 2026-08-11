@@ -92,7 +92,7 @@ const isSsh = computed(() => isServer.value && draft.transport === "ssh");
 const usesMd5 = computed(() => isServer.value && !isSsh.value && draft.authentication === "md5");
 
 const fieldMappings = [
-  [/可用范围|不存在的节点/, "rpkiNodeScope"],
+  [/可用范围|不存在的节点|作用域不兼容/, "rpkiNodeScope"],
   [/RPKI 资源名称/, "rpkiLabel"],
   [/RPKI 协议名称|本地 ROA 资源名称|BIRD 全局标识符冲突/, "rpkiName"],
   [/ROA Table/, "rpkiRoa4Table"],

@@ -49,8 +49,12 @@ function normalizeInventory(value: unknown): Inventory {
   return validateInventory(value) as Inventory;
 }
 
+function normalizeStoredInventory(value: unknown): Inventory {
+  return validateInventory(value, { allowInvalidResourceDependencies: true }) as Inventory;
+}
+
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 25;
+const CURRENT_INVENTORY_VERSION = 26;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -235,6 +239,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
       filters: upgradeResourceOrder(source.filters),
       rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
       staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
+      sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
       sessions: migrated.sessions,
       ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
     };
@@ -301,6 +306,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
     filters: upgradeResourceOrder(source.filters),
     rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
     staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
+    sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
     sessions: migrated.sessions,
     ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
   };
@@ -354,7 +360,7 @@ export class InventoryStore {
     for (let attempt = 0; attempt < NORMALIZATION_RETRIES; attempt += 1) {
       let record = await this.database.readState<unknown>(this.stateKey);
       if (!record) throw new Error("Birdbox 库存状态不存在");
-      const normalized = normalizeInventory(upgradeInventory(record.value));
+      const normalized = normalizeStoredInventory(upgradeInventory(record.value));
       if (isDeepStrictEqual(normalized, record.value)) return this.#track(normalized, record.revision);
       try {
         record = await this.database.replaceState<Inventory>(this.stateKey, record.revision, normalized);
@@ -368,7 +374,7 @@ export class InventoryStore {
 
   async loadLegacyInventory(): Promise<Inventory> {
     try {
-      return normalizeInventory(upgradeInventory(JSON.parse(await fs.readFile(this.inventoryPath, "utf8"))));
+      return normalizeStoredInventory(upgradeInventory(JSON.parse(await fs.readFile(this.inventoryPath, "utf8"))));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return this.createInitialInventory();
@@ -391,6 +397,7 @@ export class InventoryStore {
       filters: [],
       rpki: [],
       staticProtocols: [] as LegacyRecord[],
+      sourcePolicies: [] as LegacyRecord[],
       sessions: [] as BgpSession[],
       ibgpDomains: [] as LegacyRecord[],
     };
@@ -494,9 +501,9 @@ export class InventoryStore {
     await this.initialize();
     const operation = await this.database.mutateState<unknown, Result>(
       this.stateKey,
-      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [], ibgpDomains: [] },
+      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [] },
       async (current) => {
-        const draft = structuredClone(normalizeInventory(upgradeInventory(current)));
+        const draft = structuredClone(normalizeStoredInventory(upgradeInventory(current)));
         const result = await mutator(draft);
         const state = normalizeInventory(draft);
         return { value: state, result };

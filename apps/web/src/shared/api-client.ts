@@ -41,7 +41,7 @@ export class ApiError extends Error {
 
 function isDeploymentMutation(path: string, method: string): boolean {
   if (method === "GET") return false;
-  if (/^\/api\/(defines|functions|filters|rpki|statics)(?:\/|$)/.test(path)) return true;
+  if (/^\/api\/(defines|functions|filters|rpki|statics|source-policies)(?:\/|$)/.test(path)) return true;
   if (/^\/api\/sessions\/(?:preview|apply)$/.test(path)) return true;
   if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
   if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
@@ -64,6 +64,7 @@ function mutationWaitPresentation(path: string, method: string): MutationWaitPre
   else if (/^\/api\/peers(?:\/|$)/.test(pathname) || /\/peers$/.test(pathname)) title = method === "DELETE" ? "正在删除 Peer" : "正在保存 Peer";
   else if (/^\/api\/statics(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Static" : "正在应用 Static 变更";
   else if (/^\/api\/rpki(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 RPKI" : "正在应用 RPKI 变更";
+  else if (/^\/api\/source-policies(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除源地址出口映射" : "正在应用源地址出口映射";
   else if (/^\/api\/(defines|functions|filters)(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除策略资源" : "正在应用策略资源变更";
   else if (/^\/api\/ibgp-domains(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 iBGP 域" : "正在应用 iBGP 域变更";
   else if (pathname === "/api/auth/login") title = "正在验证登录";

@@ -784,7 +784,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 25);
+  assert.equal(state.version, 26);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.deepEqual(state.filters[0].nodeIds, ["local"]);
   assert.throws(

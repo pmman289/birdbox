@@ -57,6 +57,9 @@ const saveDisabled = computed(() => pending.value || (!editing.value && !verifie
 const globalRpkiResources = computed(() => (
   dashboard.value?.inventory.rpki.filter((resource) => resource.enabled && resource.nodeIds === null) ?? []
 ));
+const globalSourcePolicies = computed(() => (
+  dashboard.value?.inventory.sourcePolicies.filter((resource) => resource.enabled && resource.nodeIds === null) ?? []
+));
 
 const fieldMappings = [
   [/节点名称/, "nodeEditorName"],
@@ -265,6 +268,7 @@ async function retire(force: boolean): Promise<void> {
       ["Functions", inventory.functions.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["Filters", inventory.filters.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["RPKI", inventory.rpki.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
+      ["源地址出口", (inventory.sourcePolicies ?? []).filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["Static", inventory.staticProtocols.filter((item) => item.nodeId === node.id).length],
     ].map(([label, count]) => `${label} ${count}`).join("、");
     if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将处理关联资源：${counts}。多节点 Define/Function/Filter/RPKI 只会移除此节点的可用范围；操作不会清理远端配置。`)) return;
@@ -331,6 +335,11 @@ onBeforeUnmount(() => {
           <div class="node-rpki-warning-head"><strong>全节点 RPKI 前置条件</strong><span>{{ globalRpkiResources.length }} 个资源</span></div>
           <p>这些资源会自动应用到新节点。请在测试连接前完成对应处理；不适用于该节点时，请先到 RPKI 资源中把作用域改为指定节点。</p>
           <ul><li v-for="resource in globalRpkiResources" :key="resource.id"><strong>{{ resource.label }}</strong><div v-for="detail in rpkiResourceDetails(resource)" :key="`${resource.id}:${detail.label}:${detail.value}`"><span>{{ detail.label }}</span><code>{{ detail.value }}</code></div><p class="node-rpki-action"><span>处理</span>{{ rpkiResourceAction(resource) }}</p></li></ul>
+        </section>
+        <section v-if="!editing && globalSourcePolicies.length" id="nodeGlobalSourcePolicyWarning" class="node-rpki-warning full-width" role="status" aria-live="polite">
+          <div class="node-rpki-warning-head"><strong>全节点源地址出口映射</strong><span>{{ globalSourcePolicies.length }} 个映射集</span></div>
+          <p>新节点接入时会自动下发这些 BIRD 映射，但系统 ip rule 不会自动配置。节点添加成功后，请打开对应映射集并按该节点的手工操作计划完成规则配置。</p>
+          <ul><li v-for="resource in globalSourcePolicies" :key="resource.id"><strong>{{ resource.label }}</strong><div><span>规模</span><code>{{ resource.groups.length }} 个出口组 · {{ resource.groups.reduce((count, group) => count + group.sources.length, 0) }} 条源 CIDR</code></div><p class="node-rpki-action"><span>处理</span>不适用于该节点时，请先把映射集作用域改为指定节点。</p></li></ul>
         </section>
         <section v-if="!editing" id="nodeOnboardingPanel" class="node-onboarding full-width">
           <div class="node-onboarding-head"><strong>节点接入</strong><span :class="onboardingState">{{ onboardingStatus }}</span></div>

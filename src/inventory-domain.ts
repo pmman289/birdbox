@@ -8,6 +8,7 @@ import type {
   PolicyFilter,
   PolicyFunction,
   RpkiSource,
+  SourcePolicyEgress,
   StaticProtocol,
 } from "../packages/contracts/src/inventory.js";
 import {
@@ -93,15 +94,22 @@ export function nodeStaticProtocols(state: Inventory, nodeId: string, enabledOnl
   return state.staticProtocols.filter((item) => item.nodeId === nodeId && (!enabledOnly || item.enabled));
 }
 
+export function nodeSourcePolicies(state: Inventory, nodeId: string, enabledOnly = false): SourcePolicyEgress[] {
+  return state.sourcePolicies.filter((item) =>
+    resourceAppliesToNode(item, nodeId) && (!enabledOnly || item.enabled),
+  );
+}
+
 export function ownedNodePolicyResources(
   state: Inventory,
   nodeId: string,
-): Array<PolicyResource | RpkiSource | StaticProtocol> {
+): Array<PolicyResource | RpkiSource | SourcePolicyEgress | StaticProtocol> {
   return [
     ...state.defines.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.functions.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.filters.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.rpki.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
+    ...state.sourcePolicies.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.staticProtocols.filter((item) => item.nodeId === nodeId),
   ];
 }
@@ -114,9 +122,10 @@ export function resourceReferencesSymbol(
   return [...state.defines, ...state.functions, ...state.filters].some((resource) => {
     const source = "source" in resource ? resource.source : resource.type === "expression" ? resource.value : "";
     return resource.id !== excludedId && birdSourceReferencesSymbol(source, symbol);
-  }) || state.staticProtocols.some((resource) =>
-    resource.id !== excludedId && birdSourceReferencesSymbol(resource.raw, symbol),
-  );
+  }) || state.staticProtocols.some((resource) => {
+    const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
+    return resource.id !== excludedId && sources.some((source) => birdSourceReferencesSymbol(source, symbol));
+  });
 }
 
 export function configForNode(state: Inventory, node: ManagedNode): string {
@@ -129,6 +138,7 @@ export function configForNode(state: Inventory, node: ManagedNode): string {
     nodePolicyResources(state, "defines", node.id),
     nodeRPKIResources(state, node.id),
     nodeStaticProtocols(state, node.id),
+    nodeSourcePolicies(state, node.id),
   );
 }
 

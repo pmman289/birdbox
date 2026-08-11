@@ -24,4 +24,12 @@ export {
 export { parseProtocolStatus, parseProtocolStatuses, parseRouteDetails } from "./bird-runtime-parser.js";
 export { normalizeSession } from "./bird-session.js";
 export { normalizeStaticProtocol } from "./bird-static.js";
+export {
+  normalizeSourcePolicyEgress,
+  prepareSourcePolicyEgress,
+  renderSourcePolicyEgress,
+  sourcePolicyManualPlan,
+  sourcePolicyNames,
+  sourcePolicyRules,
+} from "./bird-source-policy.js";
 export { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";

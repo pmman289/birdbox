@@ -13,6 +13,7 @@ import PeerEditorDialog from "./PeerEditorDialog.vue";
 import PolicyResourceDialog from "./PolicyResourceDialog.vue";
 import StaticEditorDialog from "./StaticEditorDialog.vue";
 import RpkiEditorDialog from "./RpkiEditorDialog.vue";
+import SourcePolicyEditorDialog from "./SourcePolicyEditorDialog.vue";
 
 interface ResourceTab {
   id: ResourceWorkspaceTarget;
@@ -32,6 +33,7 @@ const tabs: ResourceTab[] = [
   { id: "functions", label: "Functions", eyebrow: "BIRD functions", title: "Functions", addLabel: "添加 Function", columns: ["显示名称 / Function", "可用范围", "顺序", "状态", "引用", "操作"], tableClass: "ordered-resource-table" },
   { id: "filters", label: "Filters", eyebrow: "BIRD filters", title: "Filters", addLabel: "添加 Filter", columns: ["显示名称 / Filter", "可用范围", "状态", "引用", "操作"] },
   { id: "rpki", label: "RPKI", eyebrow: "ROA sources", title: "RPKI", addLabel: "添加 RPKI", columns: ["资源", "来源", "可用范围", "ROA Table", "状态", "操作"] },
+  { id: "sourcePolicies", label: "源地址出口", eyebrow: "Source policy egress", title: "源地址出口映射", addLabel: "新增映射集", columns: ["映射集", "下发节点", "出口组", "源 CIDR", "状态", "操作"] },
 ];
 
 const { dashboard } = useDashboardStore();
@@ -105,6 +107,7 @@ function rowsDomId(target: ResourceWorkspaceTarget): string {
     functions: "managementFunctionRows",
     filters: "managementFilterRows",
     rpki: "managementRPKIRows",
+    sourcePolicies: "managementSourcePolicyRows",
   };
   return names[target];
 }
@@ -137,7 +140,7 @@ onBeforeUnmount(() => {
     <button v-for="(tab, index) in tabs" :id="tabDomId(tab.id)" :key="tab.id" class="resource-tab" :class="{ active: activeTab === tab.id }" type="button" role="tab" :aria-selected="activeTab === tab.id" :aria-controls="`resource-${tab.id}`" :data-resource-tab="tab.id" :tabindex="activeTab === tab.id ? 0 : -1" @click="selectTab(tab.id)" @keydown="moveTab($event, index)">{{ tab.label }}</button>
   </nav>
   <section :id="`resource-${active.id}`" class="resource-section resource-panel" role="tabpanel">
-    <div class="section-heading compact"><div><p class="eyebrow">{{ active.eyebrow }}</p><h3>{{ active.title }}</h3></div><button class="primary-button compact-command" type="button" :disabled="(active.id === 'peers' || active.id === 'statics') && !nodesAvailable" @click="create(active.id)">+ {{ active.addLabel }}</button></div>
+    <div class="section-heading compact"><div><p class="eyebrow">{{ active.eyebrow }}</p><h3>{{ active.title }}</h3></div><button class="primary-button compact-command" type="button" :disabled="(active.id === 'peers' || active.id === 'statics' || active.id === 'sourcePolicies') && !nodesAvailable" @click="create(active.id)">+ {{ active.addLabel }}</button></div>
     <div class="resource-table-wrap"><table :class="active.tableClass"><thead><tr><th v-for="column in active.columns" :key="column">{{ column }}</th></tr></thead><tbody :id="rowsDomId(active.id)"><ResourceTable :kind="active.id" /></tbody></table></div>
   </section>
   <NodeEditorDialog />
@@ -145,4 +148,5 @@ onBeforeUnmount(() => {
   <PolicyResourceDialog />
   <StaticEditorDialog />
   <RpkiEditorDialog />
+  <SourcePolicyEditorDialog />
 </template>
