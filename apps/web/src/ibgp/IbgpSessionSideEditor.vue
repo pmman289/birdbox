@@ -59,7 +59,7 @@ const visibleFilters = computed(() =>
   props.filters.filter(
     (resource) =>
       resource.enabled &&
-      (resource.nodeId === null || resource.nodeId === model.value.nodeId),
+      resourceAppliesToNode(resource, model.value.nodeId),
   ),
 );
 </script>

@@ -66,7 +66,7 @@ test("refuses a newer inventory format without changing the stored document", as
   const dataDir = path.join(root, "data");
   const database = new MemoryDatabase();
   const futureInventory = {
-    version: 25,
+    version: 26,
     futureOnly: { preserve: true },
     nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [],
   };
@@ -87,7 +87,7 @@ test("refuses a newer inventory format without changing the stored document", as
   assert.deepEqual(persisted.value, futureInventory);
 });
 
-test("migrates legacy single-node Define and Function scopes to nodeIds", async (context) => {
+test("migrates legacy shared-resource scopes to nodeIds", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-resource-scope-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));
   const database = new MemoryDatabase();
@@ -100,7 +100,9 @@ test("migrates legacy single-node Define and Function scopes to nodeIds", async 
     peers: [],
     defines: [{ id: "legacy_define", nodeId: "left", label: "Legacy", name: "LEGACY", type: "expression", value: "1", enabled: true }],
     functions: [{ id: "legacy_function", nodeId: null, label: "Global helper", name: "global_helper", source: "function global_helper() { return true; }", enabled: true }],
-    filters: [], rpki: [], staticProtocols: [], sessions: [], ibgpDomains: [],
+    filters: [{ id: "legacy_filter", nodeId: "right", label: "Legacy filter", name: "legacy_filter", source: "filter legacy_filter { accept; }", enabled: true }],
+    rpki: [{ id: "legacy_rpki", nodeId: "left", label: "Legacy ROA", name: "legacy_roa", sourceType: "file", roa4Table: "LEGACY_ROA4", roa6Table: null, file4: "/dev/null", file6: null, enabled: true }],
+    staticProtocols: [], sessions: [], ibgpDomains: [],
   });
   const store = new InventoryStore({
     database,
@@ -110,11 +112,15 @@ test("migrates legacy single-node Define and Function scopes to nodeIds", async 
   });
 
   const state = await store.read();
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.deepEqual(state.defines[0].nodeIds, ["left"]);
   assert.deepEqual(state.functions[0].nodeIds, null);
+  assert.deepEqual(state.filters[0].nodeIds, ["right"]);
+  assert.deepEqual(state.rpki[0].nodeIds, ["left"]);
   assert.equal(Object.hasOwn(state.defines[0], "nodeId"), false);
   assert.equal(Object.hasOwn(state.functions[0], "nodeId"), false);
+  assert.equal(Object.hasOwn(state.filters[0], "nodeId"), false);
+  assert.equal(Object.hasOwn(state.rpki[0], "nodeId"), false);
   assert.deepEqual((await database.readState("inventory")).value, state);
 });
 
@@ -146,7 +152,7 @@ test("migrates v22 iBGP members to one transport address", async (context) => {
   });
 
   const state = await store.read();
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.deepEqual(state.ibgpDomains[0].members, [
     { nodeId: "left", address: "192.0.2.1" },
     { nodeId: "right", address: "192.0.2.2" },
@@ -186,7 +192,7 @@ test("migrates Static channel policies to node resources while upgrading v18 inv
     legacySessionPath: path.join(root, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.equal(state.sessions[0].localAddress, null);
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);
   assert.deepEqual(state.staticProtocols.map((resource) => ({
@@ -241,7 +247,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v19", a
   });
   const state = await store.read();
 
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.equal(state.nodes[0].address, undefined);
   assert.equal(state.nodes[0].asn, undefined);
   assert.equal(state.sessions[0].localAddress, "192.0.2.10");
@@ -299,7 +305,7 @@ test("migrates v8 Function order and combined policies to ordered v19 channel st
     legacySessionPath: path.join(dataDir, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.deepEqual(state.staticProtocols, []);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "none");
   assert.deepEqual(state.functions.map((resource) => resource.name), ["guard", "late"]);
@@ -345,7 +351,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v19 resource
   });
   const state = await store.read();
 
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.deepEqual(state.defines.map((resource) => [resource.id, resource.type]), [
     ["prefix_global", "cidr4"],
     ["define_pref", "expression"],
@@ -385,7 +391,7 @@ test("migrates v14 export policy and Static settings to a v19 node resource", as
   await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
   const store = new InventoryStore({ database: new MemoryDatabase(), dataDir, nodesPath: "", legacySessionPath: "" });
   const state = await store.read();
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
   assert.equal(state.sessions[0].channels.ipv6.exportPolicy.formAction, "none");
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);

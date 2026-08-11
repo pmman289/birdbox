@@ -10,6 +10,7 @@ import type {
 } from "@birdbox/contracts/inventory";
 
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
+import MultiNodeScopeField from "../shared/MultiNodeScopeField.vue";
 import { api } from "../shared/api-client";
 import { deploymentSummary } from "../shared/deployment";
 import { dispatchToast } from "../shared/events";
@@ -26,8 +27,7 @@ type PolicyResource = PolicyDefine | PolicyFunction | PolicyFilter;
 type DefineType = PolicyDefine["type"];
 
 interface Draft {
-  nodeId: string | null;
-  nodeIds: string[];
+  nodeIds: string[] | null;
   type: DefineType;
   label: string;
   name: string;
@@ -52,14 +52,11 @@ const line = ref(1);
 const column = ref(1);
 const nameEdited = ref(false);
 const sourceEdited = ref(false);
-const allNodesScope = ref(true);
 const scopeError = ref(false);
-const scopeSearch = ref("");
 const { dashboard } = useDashboardStore();
 
 const draft = reactive<Draft>({
-  nodeId: null,
-  nodeIds: [],
+  nodeIds: null,
   type: "cidr4",
   label: "",
   name: "",
@@ -84,18 +81,6 @@ const sourcePlaceholder = computed(() => collection.value === "functions"
 const lineNumbers = computed(() => Array.from({ length: Math.max(1, draft.source.split("\n").length) }, (_, index) => index + 1).join("\n"));
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
 const nodeNames = computed(() => new Map(nodes.value.map((node) => [node.id, node.name])));
-const usesMultiNodeScope = computed(() => collection.value === "defines" || collection.value === "functions");
-const selectedScopeNodeIds = computed(() => allNodesScope.value ? null : draft.nodeIds);
-const visibleScopeNodes = computed(() => {
-  const query = scopeSearch.value.trim().toLocaleLowerCase();
-  return query
-    ? nodes.value.filter((node) => `${node.name} ${node.id}`.toLocaleLowerCase().includes(query))
-    : nodes.value;
-});
-
-function referenceScope(): { nodeIds: string[] | null } | { nodeId: string | null } {
-  return usesMultiNodeScope.value ? { nodeIds: selectedScopeNodeIds.value } : { nodeId: draft.nodeId };
-}
 
 const referenceGroups = computed<ReferenceGroup[]>(() => {
   const inventory = dashboard.value?.inventory;
@@ -103,7 +88,7 @@ const referenceGroups = computed<ReferenceGroup[]>(() => {
     inventory,
     collection: collection.value,
     currentId: editingId.value ?? "",
-    ...referenceScope(),
+    nodeIds: draft.nodeIds,
   });
   const normalizedQuery = search.value.trim().toLocaleLowerCase();
   const matches = (resource: PolicyReferenceResource, kind: ReferenceGroup["kind"]): boolean => {
@@ -129,7 +114,7 @@ const referenceTotal = computed(() => {
     inventory: dashboard.value?.inventory,
     collection: collection.value,
     currentId: editingId.value ?? "",
-    ...referenceScope(),
+    nodeIds: draft.nodeIds,
   });
   return available.defines.length + available.functions.length;
 });
@@ -187,22 +172,10 @@ function resourceSource(resource: PolicyResource): string {
   return resource.entries.join("\n");
 }
 
-function setScopeMode(mode: "all" | "selected"): void {
-  allNodesScope.value = mode === "all";
-  scopeError.value = false;
-}
-
-function setAllScopeNodes(selected: boolean): void {
-  draft.nodeIds = selected ? nodes.value.map((node) => node.id) : [];
-  scopeError.value = false;
-}
-
 function open(nextCollection: PolicyCollection, resource: PolicyResource | null): void {
   collection.value = nextCollection;
   editingId.value = resource?.id ?? null;
-  draft.nodeId = resource && "nodeId" in resource ? resource.nodeId : null;
-  draft.nodeIds = resource && "nodeIds" in resource && resource.nodeIds !== null ? [...resource.nodeIds] : [];
-  allNodesScope.value = !resource || !("nodeIds" in resource) || resource.nodeIds === null;
+  draft.nodeIds = resource?.nodeIds === null || !resource ? null : [...resource.nodeIds];
   draft.type = resource && "type" in resource ? resource.type : "cidr4";
   draft.label = resource?.label ?? resource?.name ?? "";
   draft.name = resource?.name ?? "";
@@ -211,7 +184,6 @@ function open(nextCollection: PolicyCollection, resource: PolicyResource | null)
   nameEdited.value = Boolean(resource);
   sourceEdited.value = Boolean(resource);
   search.value = "";
-  scopeSearch.value = "";
   scopeError.value = false;
   if (!resource) syncName();
   if (form.value) clearFormValidation(form.value);
@@ -304,7 +276,7 @@ function referenceSymbol(resource: PolicyReferenceResource, kind: ReferenceGroup
 }
 
 async function save(): Promise<void> {
-  scopeError.value = usesMultiNodeScope.value && !allNodesScope.value && draft.nodeIds.length === 0;
+  scopeError.value = draft.nodeIds !== null && draft.nodeIds.length === 0;
   if (scopeError.value) {
     document.querySelector<HTMLElement>("#policyResourceNodeScope")?.focus();
     dispatchToast("请至少选择一个可用节点", "error");
@@ -315,24 +287,20 @@ async function save(): Promise<void> {
   const id = editingId.value;
   const body = collection.value === "defines"
     ? {
-        nodeIds: selectedScopeNodeIds.value,
+        nodeIds: draft.nodeIds,
         label: draft.label,
         name: draft.name,
         enabled: draft.enabled,
         type: draft.type,
         ...(isCidrDefine.value ? { entries: draft.source } : { value: draft.source }),
       }
-    : collection.value === "functions"
-      ? { nodeIds: selectedScopeNodeIds.value, label: draft.label, name: draft.name, enabled: draft.enabled, source: draft.source }
-      : { nodeId: draft.nodeId, label: draft.label, name: draft.name, enabled: draft.enabled, source: draft.source };
+    : { nodeIds: draft.nodeIds, label: draft.label, name: draft.name, enabled: draft.enabled, source: draft.source };
   try {
     const result = await api<ResourceMutationResponse<PolicyResource>>(id ? `/api/${collection.value}/${encodeURIComponent(id)}` : `/api/${collection.value}`, {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(body),
     });
-    const selectedNodeId = usesMultiNodeScope.value
-      ? selectedScopeNodeIds.value?.[0] ?? dashboard.value?.node?.id ?? null
-      : draft.nodeId ?? dashboard.value?.node?.id ?? null;
+    const selectedNodeId = draft.nodeIds?.[0] ?? dashboard.value?.node?.id ?? null;
     await loadDashboard(selectedNodeId, dashboard.value?.selectedPeer?.id ?? null);
     window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: collection.value } }));
     dialog.value?.close();
@@ -351,9 +319,7 @@ async function remove(): Promise<void> {
   pending.value = true;
   try {
     await api(`/api/${collection.value}/${encodeURIComponent(resource.id)}`, { method: "DELETE" });
-    const selectedNodeId = "nodeIds" in resource
-      ? resource.nodeIds?.[0] ?? dashboard.value?.node?.id ?? null
-      : resource.nodeId ?? dashboard.value?.node?.id ?? null;
+    const selectedNodeId = resource.nodeIds?.[0] ?? dashboard.value?.node?.id ?? null;
     await loadDashboard(selectedNodeId, dashboard.value?.selectedPeer?.id ?? null);
     window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: collection.value } }));
     dialog.value?.close();
@@ -391,19 +357,7 @@ onBeforeUnmount(() => {
     <form id="policyResourceForm" ref="form" novalidate :aria-busy="pending" @submit.prevent="save">
       <div class="dialog-head"><span id="policyResourceIcon" class="dialog-icon">{{ icon }}</span><div><p class="eyebrow">BIRD Policy</p><h2 id="policyResourceDialogTitle">{{ editing ? "编辑" : "添加" }} {{ kindLabel }}</h2></div></div>
       <div class="dialog-grid">
-        <div v-if="usesMultiNodeScope" id="policyResourceNodeScope" class="field full-width policy-scope-field" :class="{ 'field-invalid': scopeError }" :aria-invalid="scopeError ? 'true' : undefined" tabindex="-1">
-          <div class="policy-scope-heading"><span class="field-label">可用范围</span><span>{{ allNodesScope ? "所有节点" : `已选择 ${draft.nodeIds.length} 个节点` }}</span></div>
-          <div class="segmented-control" role="radiogroup" aria-label="策略资源可用范围"><label><input type="radio" name="policyResourceScopeMode" value="all" :checked="allNodesScope" @change="setScopeMode('all')"><span>所有节点</span></label><label><input type="radio" name="policyResourceScopeMode" value="selected" :checked="!allNodesScope" @change="setScopeMode('selected')"><span>指定节点</span></label></div>
-          <div v-if="!allNodesScope" class="policy-scope-selector">
-            <div class="policy-scope-toolbar"><input id="policyResourceScopeSearch" v-model.trim="scopeSearch" type="search" autocomplete="off" placeholder="搜索节点"><span><button class="compact-command" type="button" @click="setAllScopeNodes(true)">全选</button><button class="compact-command" type="button" @click="setAllScopeNodes(false)">清空</button></span></div>
-            <div class="policy-scope-node-list">
-              <label v-for="node in visibleScopeNodes" :key="node.id" class="policy-scope-node"><input v-model="draft.nodeIds" type="checkbox" :value="node.id" @change="scopeError = false"><span><strong>{{ node.name }}</strong><code>{{ node.id }}</code></span></label>
-              <span v-if="!visibleScopeNodes.length" class="code-reference-empty">没有匹配的节点</span>
-            </div>
-            <p v-if="scopeError" class="field-error" role="alert">请至少选择一个节点</p>
-          </div>
-        </div>
-        <div v-else id="policyResourceNodeScope" class="field full-width"><label for="policyResourceNodeId">可用范围</label><select id="policyResourceNodeId" v-model="draft.nodeId"><option :value="null">所有节点</option><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }}</option></select></div>
+        <MultiNodeScopeField id="policyResourceNodeScope" v-model="draft.nodeIds" :nodes="nodes" :invalid="scopeError" @change="scopeError = false" />
         <div v-if="collection === 'defines'" id="policyResourceTypeField" class="field"><label for="policyResourceType">Define 类型</label><select id="policyResourceType" v-model="draft.type" @change="changeType"><option value="cidr4">IPv4 CIDR 列表</option><option value="cidr6">IPv6 CIDR 列表</option><option value="expression">表达式</option></select></div>
         <div id="policyResourceLabelField" class="field"><label for="policyResourceLabel">显示名称 / 备注</label><input id="policyResourceLabel" v-model.trim="draft.label" maxlength="80" required placeholder="例如：上游导入优先级" @input="syncName"></div>
         <div class="field full-width"><label for="policyResourceName">BIRD 名称（自动，可编辑）</label><input id="policyResourceName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" required @input="nameEdited = true"></div>

@@ -392,7 +392,7 @@ export function renderBirdConfig(
   const defines = defineInputs.map(normalizeDefine).filter((item) => item.enabled);
   const functions = functionInputs.map(normalizePolicyFunction).filter((item) => item.enabled);
   const filters = filterInputs.map(normalizePolicyFilter).filter((item) => item.enabled);
-  const rpki = rpkiInputs.map(normalizeRPKISource).filter((item) => item.enabled && (item.nodeId === null || item.nodeId === node.id));
+  const rpki = rpkiInputs.map(normalizeRPKISource).filter((item) => item.enabled && resourceAppliesToNode(item, node.id));
   const staticProtocols = staticInputs.map(normalizeStaticProtocol).filter((item) => item.enabled && item.nodeId === node.id);
   const sessions = sessionInputs.map(normalizeSession).filter((item) => item.enabled);
   const defineMap = new Map(defines.map((item) => [item.id, item]));

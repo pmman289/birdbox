@@ -141,7 +141,7 @@ sh birdbox-node-setup.sh
 
 ### Define
 
-Define 可以是全局资源，也可以只属于某个节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
+Define 可以应用于所有节点，也可以限制到一个或多个指定节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
 
 ### Static Protocol
 
@@ -151,11 +151,11 @@ Static 是节点级资源，不属于任何 BGP 会话。一个节点可以创�
 
 ### Function 和 Filter
 
-Function 用于可复用的策略步骤，Filter 用于完整的自定义路由过滤器。Birdbox 会在目标节点的完整配置中解析它们，并阻止引用不存在、禁用或作用域不匹配的资源。
+Function 用于可复用的策略步骤，Filter 用于完整的自定义路由过滤器。两者均可应用于所有节点或多个指定节点；Birdbox 会在每个目标节点的完整配置中解析它们，并阻止引用不存在、禁用或作用域不匹配的资源。
 
 ### RPKI
 
-RPKI 资源支持本地 ROA 文件和 RPKI-RTR 缓存。IPv4、IPv6 ROA Table 可以分别启用，并在 Filter 中通过 `roa_check()` 使用。
+RPKI 资源支持本地 ROA 文件和 RPKI-RTR 缓存，可应用于所有节点或多个指定节点。IPv4、IPv6 ROA Table 可以分别启用，并在 Filter 中通过 `roa_check()` 使用。
 
 ## 数据、备份和升级
 

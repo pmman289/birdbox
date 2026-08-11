@@ -191,7 +191,7 @@ function openResource(target: ResourceWorkspaceTarget): void {
       <div class="field-label-row"><label>完整 Filter</label><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Filter" aria-label="前往资源管理 Tab 管理 Filter" @click="openResource('filters')">?</button></div>
       <select :value="policy.filterId ?? ''" :disabled="disabled" required @change="setFilter(($event.currentTarget as HTMLSelectElement).value)">
         <option value="">选择 Filter</option>
-        <option v-for="resource in filters" :key="resource.id" :value="resource.id">{{ resource.label ?? resource.name }} · {{ resource.name }}{{ resource.nodeId === null ? " · 所有节点" : "" }}</option>
+        <option v-for="resource in filters" :key="resource.id" :value="resource.id">{{ resource.label ?? resource.name }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource) }}</option>
       </select>
     </div>
   </section>

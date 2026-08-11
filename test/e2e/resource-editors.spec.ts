@@ -20,7 +20,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
     dashboard.inventory.rpki = [
       {
         id: "e2e_global_roa",
-        nodeId: null,
+        nodeIds: null,
         label: "E2E 全局 ROA",
         name: "e2e_global_roa",
         enabled: true,
@@ -32,7 +32,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
       },
       {
         id: "e2e_global_rtr",
-        nodeId: null,
+        nodeIds: null,
         label: "E2E 全局 RTR",
         name: "e2e_global_rtr",
         enabled: true,
@@ -95,7 +95,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator('#managementDefineRows .row-edit-button[title="编辑 Define"]').click();
   await expect(page.locator("#policyResourceDialog")).toBeVisible();
   await expect(page.locator("#policyResourceSourceLabel")).toContainText("CIDR");
-  await expect(page.locator('input[name="policyResourceScopeMode"][value="selected"]')).toBeChecked();
+  await expect(page.locator('#policyResourceNodeScope input[value="selected"]')).toBeChecked();
   await expect(page.locator('.policy-scope-node input[value="local"]')).toBeChecked();
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
@@ -109,6 +109,15 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(page.locator("#policySourceReferences")).toContainText("e2e_peer CIDRs");
   await page.locator('.policy-scope-node input[value="edge"]').check();
   await expect(page.locator("#policySourceReferences")).not.toContainText("e2e_peer CIDRs");
+  await expect(page.locator("#policyResourceNodeScope")).toContainText("已选择 2 个节点");
+  await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
+
+  await page.locator("#resourceFiltersTab").click();
+  await page.locator("#resource-filters .primary-button").click();
+  await expect(page.locator("#policyResourceDialog")).toBeVisible();
+  await page.locator("#policyResourceNodeScope .segmented-control label").filter({ hasText: "指定节点" }).click();
+  await page.locator('.policy-scope-node input[value="local"]').check();
+  await page.locator('.policy-scope-node input[value="edge"]').check();
   await expect(page.locator("#policyResourceNodeScope")).toContainText("已选择 2 个节点");
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
@@ -137,6 +146,10 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator("#resourceRpkiTab").click();
   await page.locator("#resource-rpki .primary-button").click();
   await expect(page.locator("#rpkiDialog")).toBeVisible();
+  await page.locator("#rpkiNodeScope .segmented-control label").filter({ hasText: "指定节点" }).click();
+  await page.locator('#rpkiNodeScope .policy-scope-node input[value="local"]').check();
+  await page.locator('#rpkiNodeScope .policy-scope-node input[value="edge"]').check();
+  await expect(page.locator("#rpkiNodeScope")).toContainText("已选择 2 个节点");
   await page.locator("#rpkiSourceType").selectOption("server");
   await expect(page.locator("#rpkiServerFields")).toBeVisible();
   await page.locator("#rpkiTransport").selectOption("ssh");

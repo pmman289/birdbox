@@ -63,7 +63,7 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
       body: JSON.stringify({
         domains: [existingDomain],
         inventory: {
-          version: 24,
+          version: 25,
           nodes: [
             { id: "local", kind: "managed-node", name: "E2E Router", transport: "local", sshHost: null, sshPort: null, sshUser: null, sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/local.conf", socketPath: "/tmp/local.ctl", routerId: "192.0.2.1", listenPort: 179 },
             { id: "edge", kind: "managed-node", name: "E2E Edge", transport: "ssh", sshHost: "192.0.2.22", sshPort: 22, sshUser: "birdbox", sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/edge.conf", socketPath: "/tmp/edge.ctl", routerId: "192.0.2.22", listenPort: 179 },

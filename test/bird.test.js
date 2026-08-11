@@ -784,8 +784,9 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 24);
+  assert.equal(state.version, 25);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
+  assert.deepEqual(state.filters[0].nodeIds, ["local"]);
   assert.throws(
     () => validateInventory({
       nodes: [node], peers: [peers[0]], defines: [cidrDefines[0]],
@@ -826,10 +827,13 @@ test("validates policy scope, enabled state, callability, and global names", () 
     source: "function shared_function() { return net ~ SHARED_EXPORTS; }",
   };
   const multiState = validateInventory({
-    nodes: [node, otherNode], peers: [], defines: [sharedDefine], functions: [sharedFunction], filters: [], sessions: [],
+    nodes: [node, otherNode], peers: [], defines: [sharedDefine], functions: [sharedFunction],
+    filters: [{ ...policyFilters[0], nodeIds: ["local", "other"], source: "filter custom_import { if net ~ SHARED_EXPORTS then accept; reject; }" }],
+    sessions: [],
   });
   assert.deepEqual(multiState.defines[0].nodeIds, ["local", "other"]);
   assert.deepEqual(multiState.functions[0].nodeIds, ["local", "other"]);
+  assert.deepEqual(multiState.filters[0].nodeIds, ["local", "other"]);
   assert.throws(
     () => validateInventory({
       nodes: [node, otherNode], peers: [],
@@ -1096,6 +1100,8 @@ test("renders local ROA files and RPKI-RTR sources for roa_check filters", () =>
   });
   assert.equal(fileSource.sourceType, "file");
   assert.equal(serverSource.sourceType, "server");
+  assert.deepEqual(fileSource.nodeIds, ["local"]);
+  assert.deepEqual(serverSource.nodeIds, ["local"]);
   const config = renderBirdConfig(node, [], [], [], [], [], [fileSource, serverSource]);
   assert.match(config, /roa4 table ROA4_LOCAL;/);
   assert.match(config, /roa6 table ROA6_LOCAL;/);
@@ -1103,6 +1109,11 @@ test("renders local ROA files and RPKI-RTR sources for roa_check filters", () =>
   assert.match(config, /protocol static local_roa_v6[\s\S]*roa6 \{ table ROA6_LOCAL; \};/);
   assert.match(config, /protocol rpki rtr_cache[\s\S]*remote 127\.0\.0\.1 port 323;/);
   assert.match(config, /max version 2;/);
+  const otherNode = { ...node, id: "other", name: "Other", routerId: "192.0.2.2", transport: "ssh", sshHost: "other.example" };
+  const otherConfig = renderBirdConfig(otherNode, [], [], [], [], [], [fileSource, serverSource]);
+  assert.doesNotMatch(otherConfig, /ROA4_LOCAL|ROA4_REMOTE|local_roa|rtr_cache/);
+  const sharedFileSource = normalizeRPKI({ ...fileSource, id: "rpki_shared", name: "shared_roa", nodeIds: ["local", "other"] });
+  assert.match(renderBirdConfig(otherNode, [], [], [], [], [], [sharedFileSource]), /ROA4_LOCAL|shared_roa/);
   assert.throws(() => normalizeRPKI({
     id: "rpki_bad", nodeId: "local", label: "Bad", name: "bad_rpki", sourceType: "file",
     roa4Table: "ROA4_BAD", file4: "relative.conf",

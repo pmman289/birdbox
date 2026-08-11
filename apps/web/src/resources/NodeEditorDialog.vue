@@ -55,7 +55,7 @@ const editing = computed(() => editingId.value !== null);
 const isSsh = computed(() => draft.transport === "ssh");
 const saveDisabled = computed(() => pending.value || (!editing.value && !verified.value));
 const globalRpkiResources = computed(() => (
-  dashboard.value?.inventory.rpki.filter((resource) => resource.enabled && resource.nodeId === null) ?? []
+  dashboard.value?.inventory.rpki.filter((resource) => resource.enabled && resource.nodeIds === null) ?? []
 ));
 
 const fieldMappings = [
@@ -263,11 +263,11 @@ async function retire(force: boolean): Promise<void> {
       ["Peers", inventory.peers.filter((item) => item.nodeId === node.id).length],
       ["Defines", inventory.defines.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["Functions", inventory.functions.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
-      ["Filters", inventory.filters.filter((item) => item.nodeId === node.id).length],
-      ["RPKI", inventory.rpki.filter((item) => item.nodeId === node.id).length],
+      ["Filters", inventory.filters.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
+      ["RPKI", inventory.rpki.filter((item) => resourceExplicitlyScopesNode(item, node.id)).length],
       ["Static", inventory.staticProtocols.filter((item) => item.nodeId === node.id).length],
     ].map(([label, count]) => `${label} ${count}`).join("、");
-    if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将处理关联资源：${counts}。多节点 Define/Function 只会移除此节点的可用范围；操作不会清理远端配置。`)) return;
+    if (!window.confirm(`强制遗忘 ${node.name} (${node.sshHost}:${node.sshPort})？将处理关联资源：${counts}。多节点 Define/Function/Filter/RPKI 只会移除此节点的可用范围；操作不会清理远端配置。`)) return;
     const confirmation = `遗忘 ${node.id}`;
     if (window.prompt(`请输入“${confirmation}”以确认：`) !== confirmation) return;
   }

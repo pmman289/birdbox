@@ -5,6 +5,7 @@ import type { ResourceMutationResponse } from "@birdbox/contracts/api";
 import type { RpkiSource, SwitchSetting } from "@birdbox/contracts/inventory";
 
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
+import MultiNodeScopeField from "../shared/MultiNodeScopeField.vue";
 import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import OptionalTextInput from "../shared/OptionalTextInput.vue";
 import { api } from "../shared/api-client";
@@ -14,7 +15,7 @@ import { clearFormValidation, presentFormError, validateForm } from "../shared/f
 import { uniqueBirdName } from "../shared/resource-names";
 
 interface RpkiDraft {
-  nodeId: string | null;
+  nodeIds: string[] | null;
   label: string;
   name: string;
   sourceType: "file" | "server";
@@ -51,10 +52,11 @@ const existingPassword = ref(false);
 const nameEdited = ref(false);
 const roa4Edited = ref(false);
 const roa6Edited = ref(false);
+const scopeError = ref(false);
 const { dashboard } = useDashboardStore();
 
 const draft = reactive<RpkiDraft>({
-  nodeId: null,
+  nodeIds: null,
   label: "",
   name: "",
   sourceType: "file",
@@ -90,7 +92,7 @@ const isSsh = computed(() => isServer.value && draft.transport === "ssh");
 const usesMd5 = computed(() => isServer.value && !isSsh.value && draft.authentication === "md5");
 
 const fieldMappings = [
-  [/可用范围|不存在的节点/, "rpkiNodeId"],
+  [/可用范围|不存在的节点/, "rpkiNodeScope"],
   [/RPKI 资源名称/, "rpkiLabel"],
   [/RPKI 协议名称|本地 ROA 资源名称|BIRD 全局标识符冲突/, "rpkiName"],
   [/ROA Table/, "rpkiRoa4Table"],
@@ -134,7 +136,7 @@ function changeTransport(): void {
 function open(resource: RpkiSource | null): void {
   editingId.value = resource?.id ?? null;
   Object.assign(draft, {
-    nodeId: resource?.nodeId ?? null,
+    nodeIds: resource?.nodeIds === null || !resource ? null : [...resource.nodeIds],
     label: resource?.label ?? "",
     name: resource?.name ?? "",
     sourceType: resource?.sourceType ?? "file",
@@ -166,6 +168,7 @@ function open(resource: RpkiSource | null): void {
   nameEdited.value = Boolean(resource);
   roa4Edited.value = Boolean(resource);
   roa6Edited.value = Boolean(resource);
+  scopeError.value = false;
   if (form.value) clearFormValidation(form.value);
   if (!dialog.value?.open) dialog.value?.showModal();
   void nextTick(() => document.querySelector<HTMLInputElement>("#rpkiLabel")?.focus());
@@ -177,7 +180,7 @@ function close(): void {
 
 function payload(): Record<string, unknown> {
   const base = {
-    nodeId: draft.nodeId,
+    nodeIds: draft.nodeIds,
     label: draft.label,
     name: draft.name,
     sourceType: draft.sourceType,
@@ -215,6 +218,12 @@ function payload(): Record<string, unknown> {
 }
 
 async function save(): Promise<void> {
+  scopeError.value = draft.nodeIds !== null && draft.nodeIds.length === 0;
+  if (scopeError.value) {
+    document.querySelector<HTMLElement>("#rpkiNodeScope")?.focus();
+    dispatchToast("请至少选择一个可用节点", "error");
+    return;
+  }
   if (!form.value || !validateForm(form.value)) return;
   pending.value = true;
   const id = editingId.value;
@@ -223,7 +232,7 @@ async function save(): Promise<void> {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(payload()),
     });
-    await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
+    await loadDashboard(draft.nodeIds?.[0] ?? dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
     window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: "rpki" } }));
     dialog.value?.close();
     dispatchToast(`${id ? "RPKI 已更新" : "RPKI 已添加"}，${deploymentSummary(result.deployment)}`, "success");
@@ -276,7 +285,7 @@ onBeforeUnmount(() => {
     <form id="rpkiForm" ref="form" novalidate :aria-busy="pending" @submit.prevent="save">
       <div class="dialog-head"><span class="dialog-icon">R</span><div><p class="eyebrow">BIRD RPKI</p><h2 id="rpkiDialogTitle">{{ editing ? "编辑 RPKI 资源" : "添加 RPKI 资源" }}</h2></div></div>
       <div class="dialog-grid">
-        <div class="field full-width"><label for="rpkiNodeId">可用范围</label><select id="rpkiNodeId" v-model="draft.nodeId"><option :value="null">所有节点</option><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }}</option></select></div>
+        <MultiNodeScopeField id="rpkiNodeScope" v-model="draft.nodeIds" :nodes="nodes" :invalid="scopeError" @change="scopeError = false" />
         <div class="field"><label for="rpkiLabel">显示名称</label><input id="rpkiLabel" v-model.trim="draft.label" maxlength="80" required @input="syncNames"></div>
         <div class="field"><label for="rpkiName">BIRD 名称（自动，可编辑）</label><input id="rpkiName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required @input="nameEdited = true"></div>
         <div class="field full-width"><label for="rpkiSourceType">来源类型</label><select id="rpkiSourceType" v-model="draft.sourceType" @change="changeSourceType"><option value="file">本地 ROA 文件</option><option value="server">RPKI-RTR 服务器</option></select></div>

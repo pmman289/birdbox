@@ -7,10 +7,11 @@ import {
   globalRpkiFileRequirements,
   onboardingValidationError,
 } from "../src/node-onboarding-service.js";
+import { validateInventory } from "../src/bird.js";
 
 const globalFileRpki = {
   id: "rpki_global_files",
-  nodeId: null,
+  nodeIds: null,
   label: "DN42 ROA",
   name: "dn42_roa",
   enabled: true,
@@ -23,7 +24,7 @@ const globalFileRpki = {
 
 function inventoryWithRpki(rpki) {
   return {
-    version: 24,
+    version: 25,
     nodes: [],
     peers: [],
     defines: [],
@@ -52,10 +53,10 @@ test("adds actionable global RPKI file requirements to node onboarding", async (
   const inventory = inventoryWithRpki([
     globalFileRpki,
     { ...globalFileRpki, id: "rpki_disabled", label: "Disabled ROA", enabled: false },
-    { ...globalFileRpki, id: "rpki_scoped", label: "Scoped ROA", nodeId: "existing" },
+    { ...globalFileRpki, id: "rpki_scoped", label: "Scoped ROA", nodeIds: ["existing"] },
     {
       id: "rpki_global_server",
-      nodeId: null,
+      nodeIds: null,
       label: "RPKI RTR",
       name: "rpki_rtr",
       enabled: true,
@@ -117,4 +118,56 @@ test("maps a missing global RPKI file validation error to its resource and remed
   assert.match(message, /请先在目标节点部署并持续更新该文件/);
   assert.match(message, /BIRD 原始错误/);
   assert.equal(onboardingValidationError(requirements, "unrelated failure"), "unrelated failure");
+});
+
+test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async () => {
+  let inventory = validateInventory({
+    nodes: [
+      { id: "left", name: "Left", transport: "ssh", sshHost: "left.example", routerId: "192.0.2.1" },
+      { id: "right", name: "Right", transport: "ssh", sshHost: "right.example", routerId: "192.0.2.2" },
+    ],
+    peers: [],
+    defines: [],
+    functions: [],
+    filters: [
+      { id: "filter_shared", nodeIds: ["left", "right"], label: "Shared filter", name: "shared_filter", source: "filter shared_filter { accept; }", enabled: true },
+      { id: "filter_left", nodeIds: ["left"], label: "Left filter", name: "left_filter", source: "filter left_filter { accept; }", enabled: true },
+      { id: "filter_global", nodeIds: null, label: "Global filter", name: "global_filter", source: "filter global_filter { accept; }", enabled: true },
+    ],
+    rpki: [
+      { ...globalFileRpki, id: "rpki_shared", name: "shared_roa", nodeIds: ["left", "right"], roa4Table: "ROA_SHARED_V4", roa6Table: "ROA_SHARED_V6" },
+      { ...globalFileRpki, id: "rpki_left", name: "left_roa", nodeIds: ["left"], roa4Table: "ROA_LEFT_V4", roa6Table: "ROA_LEFT_V6" },
+      { ...globalFileRpki, id: "rpki_global", name: "global_roa", nodeIds: null, roa4Table: "ROA_GLOBAL_V4", roa6Table: "ROA_GLOBAL_V6" },
+    ],
+    staticProtocols: [],
+    sessions: [],
+    ibgpDomains: [],
+  });
+  const service = new NodeOnboardingService({
+    store: {
+      read: async () => inventory,
+      replace: async (_current, replacement) => {
+        inventory = replacement;
+        return replacement;
+      },
+    },
+    deploymentService: {},
+    withDeploymentLock: async (operation) => operation(),
+    controllerPublicKey: () => "",
+    makeId: () => "unused",
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId: null }),
+    getEvents: () => [],
+  });
+
+  const result = await service.decommission("left", true);
+
+  assert.deepEqual(result.state.nodes.map((node) => node.id), ["right"]);
+  assert.deepEqual(result.state.filters.map((resource) => [resource.id, resource.nodeIds]), [
+    ["filter_shared", ["right"]],
+    ["filter_global", null],
+  ]);
+  assert.deepEqual(result.state.rpki.map((resource) => [resource.id, resource.nodeIds]), [
+    ["rpki_shared", ["right"]],
+    ["rpki_global", null],
+  ]);
 });

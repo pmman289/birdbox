@@ -273,6 +273,7 @@ exit 0
     }),
   });
   assert.equal(scopedFilter.status, 201);
+  assert.deepEqual(scopedFilter.body.resource.nodeIds, [nodeId]);
   const scopedRpki = await authenticatedRequest("/api/rpki", {
     method: "POST",
     body: JSON.stringify({
@@ -286,6 +287,7 @@ exit 0
     }),
   });
   assert.equal(scopedRpki.status, 201);
+  assert.deepEqual(scopedRpki.body.resource.nodeIds, [nodeId]);
   const scopedStatic = await authenticatedRequest("/api/statics", {
     method: "POST",
     body: JSON.stringify({

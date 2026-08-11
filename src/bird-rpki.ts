@@ -7,11 +7,11 @@ import {
   normalizeId,
   normalizeIPAddress,
   normalizeLabel,
+  normalizeMultiNodeResourceScope,
   normalizeOptionalInteger,
   normalizeOptionalName,
   normalizeOptionalString,
   normalizePort,
-  normalizeResourceScope,
 } from "./bird-normalize-common.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -50,7 +50,7 @@ export function normalizeRPKISource(inputValue: unknown): RpkiSource {
   assertValidation(roa4Table === null || roa4Table !== roa6Table, "IPv4 与 IPv6 ROA Table 名称必须不同");
   const base = {
     id: normalizeId(input.id, "RPKI 资源 ID"),
-    nodeId: normalizeResourceScope(input.nodeId),
+    nodeIds: normalizeMultiNodeResourceScope(input.nodeIds, input.nodeId),
     label: normalizeLabel(input.label ?? input.name, "RPKI 资源名称"),
     name: normalizeId(input.name, "RPKI 协议名称"),
     roa4Table,

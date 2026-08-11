@@ -143,11 +143,11 @@ export function validateInventory(inputValue: unknown): Inventory {
     validateReferences(resource, resource.source);
   }
   for (const resource of filters) {
-    assertValidation(resource.nodeId === null || nodeMap.has(resource.nodeId), `策略 ${resource.name} 引用了不存在的节点`);
+    assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `策略 ${resource.name} 引用了不存在的节点`);
     validateReferences(resource, resource.source);
   }
   for (const resource of rpki) {
-    assertValidation(resource.nodeId === null || nodeMap.has(resource.nodeId), `RPKI 资源 ${resource.name} 引用了不存在的节点`);
+    assertValidation(scopedNodeIds(resource)?.every((nodeId) => nodeMap.has(nodeId)) ?? true, `RPKI 资源 ${resource.name} 引用了不存在的节点`);
   }
   for (const resource of staticProtocols) {
     const node = nodeMap.get(resource.nodeId);
@@ -215,7 +215,7 @@ export function validateInventory(inputValue: unknown): Inventory {
         }
         if (policy.filterId !== null) {
           const resource = filterMap.get(policy.filterId);
-          assertValidation(resource && resource.enabled && (resource.nodeId === null || resource.nodeId === node.id), `会话 ${session.protocolName} 的 ${family.toUpperCase()} ${label} Filter 不可用`);
+          assertValidation(resource && resource.enabled && resourceAppliesToNode(resource, node.id), `会话 ${session.protocolName} 的 ${family.toUpperCase()} ${label} Filter 不可用`);
         }
       }
     }
@@ -224,8 +224,8 @@ export function validateInventory(inputValue: unknown): Inventory {
     const nodeSessions = sessions.filter((item) => item.nodeId === node.id);
     const nodeDefines = defines.filter((item) => resourceAppliesToNode(item, node.id));
     const nodeFunctions = functions.filter((item) => resourceAppliesToNode(item, node.id));
-    const nodeFilters = filters.filter((item) => item.nodeId === null || item.nodeId === node.id);
-    const nodeRPKI = rpki.filter((item) => item.enabled && (item.nodeId === null || item.nodeId === node.id));
+    const nodeFilters = filters.filter((item) => resourceAppliesToNode(item, node.id));
+    const nodeRPKI = rpki.filter((item) => item.enabled && resourceAppliesToNode(item, node.id));
     const nodeStaticProtocols = staticProtocols.filter((item) => item.nodeId === node.id);
     assertValidation(new Set(nodeSessions.map((item) => item.peerId)).size === nodeSessions.length, `节点 ${node.name} 对同一 Peer 存在多个会话`);
     assertValidation(new Set(nodeSessions.map((item) => item.protocolName)).size === nodeSessions.length, `节点 ${node.name} 的协议名称重复`);
@@ -265,7 +265,7 @@ export function validateInventory(inputValue: unknown): Inventory {
   }
 
   return {
-    version: 24,
+    version: 25,
     nodes,
     peers,
     defines,

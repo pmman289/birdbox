@@ -50,7 +50,7 @@ function normalizeInventory(value: unknown): Inventory {
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 24;
+const CURRENT_INVENTORY_VERSION = 25;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {

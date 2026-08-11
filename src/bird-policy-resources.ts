@@ -4,7 +4,6 @@ import {
   normalizeId,
   normalizeLabel,
   normalizeMultiNodeResourceScope,
-  normalizeResourceScope,
 } from "./bird-normalize-common.js";
 import { parseBirdPrefixEntries } from "./bird-prefix.js";
 
@@ -182,7 +181,7 @@ function normalizePolicyResource(inputValue: unknown, kind: PolicyKind): PolicyF
         nodeIds: normalizeMultiNodeResourceScope(input.nodeIds, input.nodeId),
         callable: declaration.callable,
       }
-    : { ...base, nodeId: normalizeResourceScope(input.nodeId) };
+    : { ...base, nodeIds: normalizeMultiNodeResourceScope(input.nodeIds, input.nodeId) };
 }
 
 export function normalizePolicyFunction(input: unknown): PolicyFunction {

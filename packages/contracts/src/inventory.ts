@@ -54,10 +54,6 @@ interface MultiNodePolicyResourceBase extends NamedPolicyResourceBase {
   nodeIds: MultiNodeResourceScope;
 }
 
-interface SingleNodePolicyResourceBase extends NamedPolicyResourceBase {
-  nodeId: ResourceScope;
-}
-
 export interface CidrDefine extends MultiNodePolicyResourceBase {
   type: "cidr4" | "cidr6";
   entries: string[];
@@ -75,7 +71,7 @@ export interface PolicyFunction extends MultiNodePolicyResourceBase {
   callable: boolean;
 }
 
-export interface PolicyFilter extends SingleNodePolicyResourceBase {
+export interface PolicyFilter extends MultiNodePolicyResourceBase {
   source: string;
 }
 
@@ -107,7 +103,7 @@ export interface StaticProtocol {
   enabled: boolean;
 }
 
-interface RpkiBase extends SingleNodePolicyResourceBase {
+interface RpkiBase extends MultiNodePolicyResourceBase {
   sourceType: "file" | "server";
   roa4Table: string | null;
   roa6Table: string | null;
@@ -317,7 +313,7 @@ export interface IbgpDomain {
 }
 
 export interface Inventory {
-  version: 24;
+  version: 25;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];

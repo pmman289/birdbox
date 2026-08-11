@@ -33,7 +33,7 @@ test("expands a manual iBGP adjacency into independently configurable equal-ASN 
   expanded.sessions[0].bgp.rrClient = true;
   expanded.sessions[0].bgp.rrClusterId = "192.0.2.254";
   const configured = expandIbgpDomain(domain, nodes, expanded.sessions);
-  const inventory = validateInventory({ version: 24, nodes, peers: configured.peers, defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: configured.sessions, ibgpDomains: [domain] });
+  const inventory = validateInventory({ version: 25, nodes, peers: configured.peers, defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: configured.sessions, ibgpDomains: [domain] });
   const config = renderBirdConfig(nodes[0], configured.peers.filter((peer) => peer.nodeId === "rr"), configured.sessions.filter((session) => session.nodeId === "rr"));
   assert.match(config, /local 192\.0\.2\.1 port 179 as 65000;/);
   assert.match(config, /neighbor 192\.0\.2\.2 port 179 as 65000;/);

@@ -81,7 +81,7 @@ function normalizeOnboardingNode(inputValue: unknown, id = "node_onboarding"): M
 
 export function globalRpkiFileRequirements(inventory: Inventory): NodeOnboardingRpkiRequirement[] {
   return inventory.rpki.flatMap((resource) => {
-    if (!resource.enabled || resource.nodeId !== null || resource.sourceType !== "file") return [];
+    if (!resource.enabled || resource.nodeIds !== null || resource.sourceType !== "file") return [];
     return [
       ...(resource.file4 === null ? [] : [{
         resourceId: resource.id,
@@ -612,8 +612,8 @@ export class NodeOnboardingService {
             sessions: current.sessions.filter((item) => item.nodeId !== targetNode.id),
             defines: removeNodeFromMultiScope(current.defines, targetNode.id),
             functions: removeNodeFromMultiScope(current.functions, targetNode.id),
-            filters: current.filters.filter((item) => item.nodeId !== targetNode.id),
-            rpki: current.rpki.filter((item) => item.nodeId !== targetNode.id),
+            filters: removeNodeFromMultiScope(current.filters, targetNode.id),
+            rpki: removeNodeFromMultiScope(current.rpki, targetNode.id),
             staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== targetNode.id),
           });
           const state = await this.#options.store.replace(current, inventory);

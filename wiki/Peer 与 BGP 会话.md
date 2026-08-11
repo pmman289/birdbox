@@ -85,7 +85,7 @@ filter export_customer
 }
 ```
 
-Filter 必须已启用，且作用域为所有节点或当前节点。选择自定义 Filter 后，表单基础动作和 Function 步骤不参与该方向的生成配置。
+Filter 必须已启用，且作用域包含当前节点。选择自定义 Filter 后，表单基础动作和 Function 步骤不参与该方向的生成配置。
 
 ## 安全的默认策略
 

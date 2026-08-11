@@ -85,7 +85,7 @@ export function nodePolicyResources<Collection extends PolicyCollection>(
 
 export function nodeRPKIResources(state: Inventory, nodeId: string, enabledOnly = false): RpkiSource[] {
   return state.rpki.filter((item) =>
-    (item.nodeId === null || item.nodeId === nodeId) && (!enabledOnly || item.enabled),
+    resourceAppliesToNode(item, nodeId) && (!enabledOnly || item.enabled),
   );
 }
 
@@ -100,8 +100,8 @@ export function ownedNodePolicyResources(
   return [
     ...state.defines.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.functions.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
-    ...state.filters.filter((item) => item.nodeId === nodeId),
-    ...state.rpki.filter((item) => item.nodeId === nodeId),
+    ...state.filters.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
+    ...state.rpki.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.staticProtocols.filter((item) => item.nodeId === nodeId),
   ];
 }

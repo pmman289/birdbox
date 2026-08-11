@@ -174,7 +174,7 @@ export function createResourceApplicationService(
     if (!resource) fail(404, "RPKI 资源不存在");
     resource.enabled = true;
     const state = validateInventory(probe);
-    const nodes = resource.nodeId === null ? state.nodes : [findNode(state, resource.nodeId)];
+    const nodes = resourceNodeIds(state, resource).map((nodeId) => findNode(state, nodeId));
     for (const node of nodes) {
       const validation = await stageAndValidate(node, configForNode(state, node));
       if (!validation.ok) fail(422, validation.stderr || `${resource.name} 的 BIRD 语法检查失败`);
@@ -348,7 +348,7 @@ export function createResourceApplicationService(
       if (!resource.enabled) await preflightRPKIResource(candidate, resource.id);
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
-    event("success", `已添加 RPKI 资源 ${resource.name}`, resource.nodeId);
+    event("success", `已添加 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 201, payload: { resource, inventory: state, deployment, events } };
   },
 
@@ -359,11 +359,10 @@ export function createResourceApplicationService(
       if (index < 0) fail(404, "RPKI 资源不存在");
       const previous = draft.rpki[index];
       if (!previous) fail(404, "RPKI 资源不存在");
-      const nodeId = Object.hasOwn(body, "nodeId")
-        ? (body.nodeId === null || body.nodeId === "" ? null : String(body.nodeId))
-        : previous.nodeId;
-      if (nodeId !== null) findNode(draft, nodeId);
-      const updated = normalizeRPKI({ ...previous, ...body, id: resourceId, nodeId });
+      const scopeCompatibleBody = Object.hasOwn(body, "nodeId") && !Object.hasOwn(body, "nodeIds")
+        ? { ...body, nodeIds: body.nodeId }
+        : body;
+      const updated = normalizeRPKI({ ...previous, ...scopeCompatibleBody, id: resourceId });
       for (const symbol of [previous.name, previous.roa4Table, previous.roa6Table]) {
         if (symbol && symbol !== updated.name && symbol !== updated.roa4Table && symbol !== updated.roa6Table && resourceReferencesSymbol(draft, symbol)) {
           fail(409, `请先更新引用 RPKI 符号 ${symbol} 的策略`);
@@ -375,7 +374,7 @@ export function createResourceApplicationService(
       if (!updated.enabled) await preflightRPKIResource(candidate, resourceId);
       return updated;
     }, () => affectedNodeIds);
-    event("success", `已更新 RPKI 资源 ${resource.name}`, resource.nodeId);
+    event("success", `已更新 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { resource, inventory: state, deployment, events } };
   },
 
@@ -393,7 +392,7 @@ export function createResourceApplicationService(
       draft.rpki.splice(index, 1);
       return target;
     }, () => affectedNodeIds);
-    event("success", `已删除 RPKI 资源 ${resource.name}`, resource.nodeId);
+    event("success", `已删除 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { inventory: state, deployment, events } };
   },
 
@@ -447,8 +446,7 @@ export function createResourceApplicationService(
       if (index < 0) fail(404, `${kind} 不存在`);
       const previous = resources[index];
       if (!previous) fail(404, `${kind} 不存在`);
-      const scopeCompatibleBody = collection !== "filters"
-        && Object.hasOwn(body, "nodeId")
+      const scopeCompatibleBody = Object.hasOwn(body, "nodeId")
         && !Object.hasOwn(body, "nodeIds")
         ? { ...body, nodeIds: body.nodeId }
         : body;

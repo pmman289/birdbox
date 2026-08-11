@@ -29,7 +29,7 @@ flowchart LR
   I -->|include| M[系统 bird.conf]
 ```
 
-一个 Peer 只属于一个节点，一个节点与同一个 Peer 只能有一个会话。Static 是节点级资源，不属于某个 BGP 会话。Define、Function、Filter 和 RPKI 可以设为全局资源，也可以限制在单个节点。
+一个 Peer 只属于一个节点，一个节点与同一个 Peer 只能有一个会话。Static 是节点级资源，不属于某个 BGP 会话。Define、Function、Filter 和 RPKI 可以设为全局资源，也可以限制到多个指定节点。
 
 ## 推荐阅读顺序
 
