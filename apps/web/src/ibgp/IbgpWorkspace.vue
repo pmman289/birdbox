@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import type {
   IbgpDomainPreviewResponse,
@@ -20,6 +20,7 @@ import type {
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
+import { cloneReactive } from "../shared/clone-reactive";
 import { uniqueBirdName } from "../shared/resource-names";
 import PolicyActionDialog from "../sessions/PolicyActionDialog.vue";
 import { defaultBgpOptions, defaultChannel } from "../sessions/session-draft";
@@ -155,7 +156,7 @@ const rightPreview = computed(() =>
 );
 
 function clone<T>(value: T): T {
-  return structuredClone(toRaw(value as object)) as T;
+  return cloneReactive(value);
 }
 
 function domainNodes(domain: IbgpDomain): ManagedNode[] {

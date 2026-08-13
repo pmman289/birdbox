@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { reactive } from "vue";
 
 import {
   createSessionDraft,
@@ -56,4 +57,22 @@ test("forces Extended Next Hop for IPv4 over an IPv6 neighbor", () => {
   const ipv4Peer = { ...value.peers[0], address: "192.0.2.2" };
   const ipv4TransportPayload = toSessionMutationRequest(draft, ipv4Peer);
   assert.equal(ipv4TransportPayload.channels.ipv6.extendedNextHop, false);
+});
+
+test("creates a plain mutation payload from deeply reactive policy arrays", () => {
+  const value = inventory();
+  const dashboard = { inventory: value, node: value.nodes[0], selectedPeer: value.peers[0] };
+  const draft = reactive(createSessionDraft(dashboard));
+  draft.localAsn = 64512;
+  draft.channels.ipv4.importPolicy.steps = reactive([
+    { type: "function", functionId: "function_test", action: "execute" },
+    { type: "form" },
+  ]);
+
+  const payload = toSessionMutationRequest(draft, value.peers[0]);
+  assert.deepEqual(payload.channels.ipv4.importPolicy.steps, [
+    { type: "function", functionId: "function_test", action: "execute" },
+    { type: "form" },
+  ]);
+  assert.doesNotThrow(() => structuredClone(payload));
 });

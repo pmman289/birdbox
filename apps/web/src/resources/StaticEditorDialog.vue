@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 import type { ResourceDeleteResponse, ResourceMutationResponse, StaticMutationRequest } from "@birdbox/contracts/api";
 import type {
@@ -13,6 +13,7 @@ import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
 
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
+import { cloneReactive } from "../shared/clone-reactive";
 import { deploymentSummary } from "../shared/deployment";
 import { dispatchToast } from "../shared/events";
 import { clearFormValidation, markFieldInvalid, presentFormError, validateForm } from "../shared/form-validation";
@@ -131,11 +132,11 @@ function emptyFilter(): StaticRouteFilter {
 }
 
 function cloneFilter(filter: StaticRouteFilter | undefined): StaticRouteFilter {
-  return structuredClone(toRaw(filter ?? emptyFilter()));
+  return cloneReactive(filter ?? emptyFilter());
 }
 
 function cloneOperation(operation: StaticRouteFilterOperation): StaticRouteFilterOperation {
-  return structuredClone(toRaw(operation));
+  return cloneReactive(operation);
 }
 
 function clearRecord<Value>(record: Record<string, Value>): void {
@@ -299,7 +300,7 @@ function open(resource: StaticProtocol | null): void {
   });
   clearRecord(routeActions);
   clearRecord(routeFilters);
-  Object.assign(routeActions, structuredClone(toRaw(resource?.routeActions ?? {})));
+  Object.assign(routeActions, cloneReactive(resource?.routeActions ?? {}));
   for (const [prefix, filter] of Object.entries(resource?.routeFilters ?? {})) routeFilters[prefix] = cloneFilter(filter);
   const defaultAction = resource?.action ?? Object.values(resource?.routeActions ?? {})[0] ?? (resource?.defineId ? "blackhole" : "");
   const parts = actionParts(defaultAction);

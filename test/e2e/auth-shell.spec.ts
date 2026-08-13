@@ -50,10 +50,16 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#dashboardRuntimeApp .protocol-table-wrap")).toContainText("e2e_peer");
   await expect(page.locator("#sessionEditorApp #protocolName")).toHaveValue("e2e_peer");
   await expect(page.locator('#sessionEditorApp [data-field="localAsn"] input')).toHaveValue("64512");
+  let sessionPreviewRequests = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/sessions/preview") sessionPreviewRequests += 1;
+  });
   const localAddress = page.locator('#sessionEditorApp [data-field="localAddress"] input');
-  await localAddress.fill("192.0.2.1");
-  await page.waitForTimeout(700);
+  await localAddress.fill("192.0.2.10");
+  await expect.poll(() => sessionPreviewRequests).toBeGreaterThan(0);
   await expect(localAddress).toBeFocused();
+  await page.locator("#dashboardRuntimeApp #localConfigTab").click();
+  await expect(page.locator("#dashboardRuntimeApp #localConfig")).toContainText("local 192.0.2.10");
   await page.locator("#sessionEditorApp .afi-tab").filter({ hasText: "IPv6" }).click();
   await expect(page.locator("#sessionEditorApp .afi-channel-panel.active")).toContainText("IPv6 Channel");
   await page.locator("#sessionEditorApp .afi-channel-panel.active .compact-action-button").first().click();

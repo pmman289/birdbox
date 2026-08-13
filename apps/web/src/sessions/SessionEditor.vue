@@ -51,6 +51,7 @@ const policyActionContext = ref<{ family: AddressFamily; direction: "import" | "
 const errorMessage = ref("");
 const errorField = ref<string | null>(null);
 let autoPreviewTimer: number | null = null;
+let autoPreviewQueued = false;
 
 const node = computed(() => dashboard.value?.node ?? null);
 const peer = computed(() => {
@@ -178,8 +179,21 @@ function updateDashboardPreview(config: string | undefined, events: ChangeEvent[
   });
 }
 
+function currentPayloadSignature(): string | null {
+  try {
+    const payload = sessionPayload();
+    return payload ? JSON.stringify(payload) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function preview(silent = false): Promise<boolean> {
-  if (previewPending.value || applyPending.value || !validateDraft(!silent)) return false;
+  if (previewPending.value) {
+    autoPreviewQueued = true;
+    return false;
+  }
+  if (applyPending.value || !validateDraft(!silent)) return false;
   let payload;
   try {
     payload = sessionPayload();
@@ -201,6 +215,11 @@ async function preview(silent = false): Promise<boolean> {
       signal: controller.signal,
       mutationWait: !silent,
     });
+    if (controller.signal.aborted || previewController.value !== controller) return false;
+    if (signature !== currentPayloadSignature()) {
+      autoPreviewQueued = true;
+      return false;
+    }
     updateDashboardPreview(result.config, result.events);
     lastPreviewSignature.value = signature;
     lastPreviewFailureSignature.value = null;
@@ -209,18 +228,28 @@ async function preview(silent = false): Promise<boolean> {
     return true;
   } catch (error) {
     if (controller.signal.aborted) return false;
+    if (signature !== currentPayloadSignature()) {
+      autoPreviewQueued = true;
+      return false;
+    }
     const data = error instanceof ApiError ? error.data as SessionErrorData : undefined;
     updateDashboardPreview(data?.config, data?.events);
     lastPreviewFailureSignature.value = signature;
     if (!silent) await presentError(error instanceof Error ? error.message : "候选配置检查失败");
     return false;
   } finally {
-    if (previewController.value === controller) previewController.value = null;
-    previewPending.value = false;
+    if (previewController.value === controller) {
+      previewController.value = null;
+      previewPending.value = false;
+      if (autoPreviewQueued) {
+        autoPreviewQueued = false;
+        scheduleAutoPreview(0);
+      }
+    }
   }
 }
 
-function scheduleAutoPreview(): void {
+function scheduleAutoPreview(delay = 500): void {
   if (autoPreviewTimer !== null) window.clearTimeout(autoPreviewTimer);
   autoPreviewTimer = window.setTimeout(() => {
     autoPreviewTimer = null;
@@ -228,7 +257,7 @@ function scheduleAutoPreview(): void {
     if (!signature || signature === lastPreviewSignature.value || signature === lastPreviewFailureSignature.value) return;
     if (dashboardLoading.value || applyPending.value || !validateDraft(false)) return;
     void preview(true);
-  }, 500);
+  }, delay);
 }
 
 function openApplyDialog(): void {
@@ -305,6 +334,7 @@ watch(draftSignature, (signature) => {
 
 onBeforeUnmount(() => {
   if (autoPreviewTimer !== null) window.clearTimeout(autoPreviewTimer);
+  autoPreviewQueued = false;
   previewController.value?.abort();
 });
 </script>
