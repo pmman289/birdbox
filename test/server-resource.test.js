@@ -313,6 +313,13 @@ exit 0
   assert.equal(disabledSession.body.enabled, false);
   const afterDisable = await authenticatedRequest("/api/dashboard");
   assert.equal(afterDisable.body.inventory.sessions[0].enabled, false);
+  const runtimeOnly = await authenticatedRequest("/api/nodes/local/runtime");
+  assert.equal(runtimeOnly.status, 200);
+  assert.equal(runtimeOnly.body.nodeId, "local");
+  assert.equal(runtimeOnly.body.runtime.nodeId, "local");
+  assert.equal(runtimeOnly.body.sessions[0].id, "session_test");
+  assert.match(runtimeOnly.body.config, /router id 192\.0\.2\.1/);
+  assert.ok(Array.isArray(runtimeOnly.body.events));
 
   const rejected = await authenticatedRequest("/api/defines/define_test", {
     method: "PUT",

@@ -86,6 +86,8 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.delete<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteSourcePolicy(validId(request.params.resourceId))));
 
   app.post<{ Params: { collection: string } }>("/api/:collection(defines|functions|filters)", async (request, reply) => jsonReply(reply, await options.service.createPolicy(policyCollection(request.params.collection), jsonBody(request))));
+  app.post("/api/defines/irr/resolve", async (request, reply) => jsonReply(reply, await options.service.resolveIrrDefine(jsonBody(request))));
+  app.post<{ Params: { resourceId: string } }>("/api/defines/:resourceId/sync", async (request, reply) => jsonReply(reply, await options.service.syncIrrDefine(validId(request.params.resourceId))));
   app.post<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions)/:resourceId/move", async (request, reply) => {
     const body = jsonBody(request);
     const direction = String(body.direction ?? "");

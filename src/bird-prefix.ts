@@ -37,7 +37,7 @@ export function normalizeBirdPrefixPattern(value: unknown, expectedFamily: IpFam
   return pattern;
 }
 
-export function parseBirdPrefixEntries(value: unknown, expectedFamily: IpFamily | null = null): string[] {
+export function parseBirdPrefixEntries(value: unknown, expectedFamily: IpFamily | null = null, maximumEntries = 256): string[] {
   let entries: string[];
   if (Array.isArray(value)) {
     entries = value.map((item) => normalizeBirdPrefixPattern(item, expectedFamily));
@@ -60,7 +60,7 @@ export function parseBirdPrefixEntries(value: unknown, expectedFamily: IpFamily 
     if (current.trim()) entries.push(normalizeBirdPrefixPattern(current, expectedFamily));
   }
   if (entries.length < 1) validationError("CIDR 列表至少需要一个条目");
-  if (entries.length > 256) validationError("单个 CIDR 列表最多支持 256 个条目");
+  if (entries.length > maximumEntries) validationError(`单个 CIDR 列表最多支持 ${maximumEntries} 个条目`);
   if (new Set(entries).size !== entries.length) validationError("CIDR 列表包含重复条目");
   return entries;
 }

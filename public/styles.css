@@ -659,6 +659,11 @@ dialog.editor-dialog { width: min(580px, calc(100vw - 32px)); }
 dialog.editor-dialog { max-height: calc(100vh - 32px); overflow: auto; }
 dialog.static-editor-dialog { width: min(1080px, calc(100vw - 32px)); }
 dialog.policy-editor-dialog { width: min(860px, calc(100vw - 32px)); }
+.irr-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.irr-actions > span { margin-left: auto; color: var(--muted); font-size: 11px; }
+.irr-sync-status { display: grid; gap: 4px; padding: 11px 12px; color: var(--ink-soft); background: var(--surface-soft); border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+.irr-sync-status.error { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, var(--line)); }
+.code-input .policy-source-editor[readonly] { color: var(--ink-soft); background: var(--surface-soft); cursor: text; }
 dialog.source-policy-editor-dialog { width: min(1120px, calc(100vw - 32px)); }
 .policy-scope-field { outline: none; }
 .policy-scope-heading { min-height: 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

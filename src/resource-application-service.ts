@@ -34,6 +34,7 @@ import {
   resourceReferencesSymbol,
   staticValidationError,
 } from "./inventory-domain.js";
+import { resolveIrrAsSet, type IrrResolveRequest } from "./irr-as-set.js";
 import type { NodeOnboardingService } from "./node-onboarding-service.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
 import { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
@@ -60,6 +61,46 @@ export function createResourceApplicationService(
   const event = options.addEvent;
   const withDeploymentLock = options.withDeploymentLock;
   const mutateAndApply = options.deploymentService.mutateAndApply.bind(options.deploymentService);
+
+  function irrRequest(body: Record<string, unknown>): IrrResolveRequest {
+    const entrySource = body.entrySource && typeof body.entrySource === "object" && !Array.isArray(body.entrySource)
+      ? body.entrySource as Record<string, unknown>
+      : body;
+    return {
+      family: String(body.type) === "cidr6" || Number(body.family) === 6 ? 6 : 4,
+      asSet: String(entrySource.asSet ?? ""),
+      server: String(entrySource.server ?? "rr.ntt.net"),
+      databases: Array.isArray(entrySource.databases) ? entrySource.databases.map(String) : String(entrySource.databases ?? "").split(","),
+      prefixLimit: Number(entrySource.prefixLimit ?? 10_000),
+      allowMoreSpecific: entrySource.allowMoreSpecific === true,
+    };
+  }
+
+  function sourceSignature(source: unknown): string {
+    return JSON.stringify(source);
+  }
+
+  async function materializeIrrBody(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const source = body.entrySource && typeof body.entrySource === "object" && !Array.isArray(body.entrySource)
+      ? body.entrySource as Record<string, unknown>
+      : null;
+    if (source?.kind !== "irr-as-set") return body;
+    const result = await resolveIrrAsSet(irrRequest(body));
+    const now = new Date();
+    const interval = Number(source.refreshIntervalSeconds ?? 86400);
+    return {
+      ...body,
+      entries: result.entries,
+      sync: {
+        status: "ready",
+        lastAttemptAt: now.toISOString(),
+        lastSuccessAt: now.toISOString(),
+        nextRefreshAt: new Date(now.getTime() + interval * 1000).toISOString(),
+        error: null,
+        contentHash: result.contentHash,
+      },
+    };
+  }
 
   function domainNodeIds(domain: IbgpDomain): string[] {
     return uniqueNodeIds(domain.members.map((member) => member.nodeId));
@@ -531,7 +572,8 @@ export function createResourceApplicationService(
   async createPolicy(collection, body) {
     const kind = collection === "functions" ? "Function" : collection === "filters" ? "Filter" : "Define";
     const idPrefix = collection === "functions" ? "function" : collection === "filters" ? "filter" : "define";
-    const resource = normalizePolicyResource(collection, { ...body, id: makeId(idPrefix) });
+    const materialized = collection === "defines" ? await materializeIrrBody(body) : body;
+    const resource = normalizePolicyResource(collection, { ...materialized, id: makeId(idPrefix) });
     const { state, deployment } = await mutateAndApply(async (draft) => {
       policyResources(draft, collection).push(resource);
       const candidate = validateInventory(draft);
@@ -572,16 +614,17 @@ export function createResourceApplicationService(
   async updatePolicy(collection, resourceId, body) {
     const kind = collection === "functions" ? "Function" : collection === "filters" ? "Filter" : "Define";
     let affectedNodeIds: string[] = [];
+    const materializedBody = collection === "defines" ? await materializeIrrBody(body) : body;
     const { state, result: resource, deployment } = await mutateAndApply(async (draft) => {
       const resources = policyResources(draft, collection);
       const index = resources.findIndex((item) => item.id === resourceId);
       if (index < 0) fail(404, `${kind} 不存在`);
       const previous = resources[index];
       if (!previous) fail(404, `${kind} 不存在`);
-      const scopeCompatibleBody = Object.hasOwn(body, "nodeId")
-        && !Object.hasOwn(body, "nodeIds")
-        ? { ...body, nodeIds: body.nodeId }
-        : body;
+      const scopeCompatibleBody = Object.hasOwn(materializedBody, "nodeId")
+        && !Object.hasOwn(materializedBody, "nodeIds")
+        ? { ...materializedBody, nodeIds: materializedBody.nodeId }
+        : materializedBody;
       const updated = normalizePolicyResource(collection, { ...previous, ...scopeCompatibleBody, id: resourceId });
       if ((collection === "defines" || collection === "functions") && updated.name !== previous.name && resourceReferencesSymbol(draft, previous.name, resourceId)) {
         fail(409, `请先更新引用 ${kind} ${previous.name} 的资源`);
@@ -625,6 +668,63 @@ export function createResourceApplicationService(
     }, () => affectedNodeIds);
     event("success", `已删除 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
     return { status: 200, payload: { inventory: state, deployment, events } };
+  },
+
+  async resolveIrrDefine(body) {
+    const result = await resolveIrrAsSet(irrRequest(body));
+    return { status: 200, payload: { entries: result.entries, count: result.entries.length, contentHash: result.contentHash } };
+  },
+
+  async syncIrrDefine(resourceId) {
+    const before = await store.read();
+    const define = before.defines.find((item) => item.id === resourceId);
+    if (!define || define.type === "expression") fail(404, "CIDR Define 不存在");
+    if (define.entrySource.kind !== "irr-as-set") fail(409, "该 Define 不是 AS-SET 自动来源");
+    const signature = sourceSignature(define.entrySource);
+    let resolved;
+    try {
+      resolved = await resolveIrrAsSet({
+        family: define.type === "cidr4" ? 4 : 6,
+        ...define.entrySource,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await mutateAndApply((draft) => {
+        const current = draft.defines.find((item) => item.id === resourceId);
+        if (!current || current.type === "expression" || current.entrySource.kind !== "irr-as-set") return null;
+        const failedAt = new Date();
+        current.sync = {
+          ...current.sync,
+          status: "error",
+          lastAttemptAt: failedAt.toISOString(),
+          nextRefreshAt: new Date(failedAt.getTime() + current.entrySource.refreshIntervalSeconds * 1000).toISOString(),
+          error: message.slice(0, 2048),
+        };
+        return null;
+      }, []);
+      event("error", `AS-SET Define ${define.name} 同步失败：${message}`, resourceSingleNodeId(define));
+      throw error;
+    }
+    const now = new Date();
+    let changed = false;
+    const { state, result: resource, deployment } = await mutateAndApply((draft) => {
+      const current = draft.defines.find((item) => item.id === resourceId);
+      if (!current || current.type === "expression" || current.entrySource.kind !== "irr-as-set") fail(409, "Define 在同步期间已被修改");
+      if (sourceSignature(current.entrySource) !== signature) fail(409, "AS-SET 来源在同步期间已被修改，请重新同步");
+      changed = current.sync.contentHash !== resolved.contentHash;
+      current.entries = resolved.entries;
+      current.sync = {
+        status: "ready",
+        lastAttemptAt: now.toISOString(),
+        lastSuccessAt: now.toISOString(),
+        nextRefreshAt: new Date(now.getTime() + current.entrySource.refreshIntervalSeconds * 1000).toISOString(),
+        error: null,
+        contentHash: resolved.contentHash,
+      };
+      return current;
+    }, (_result, inventory) => changed ? resourceNodeIds(inventory, define) : []);
+    if (changed) event("success", `AS-SET Define ${resource?.name ?? define.name} 已更新为 ${resolved.entries.length} 条前缀`, resourceSingleNodeId(define));
+    return { status: 200, payload: { resource, inventory: state, deployment, changed, events } };
   },
 
   async listIbgpDomains() {

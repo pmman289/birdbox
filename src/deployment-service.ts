@@ -13,13 +13,14 @@ import {
 import type { StateDatabase } from "./database.js";
 import { uniqueNodeIds } from "./resource-impact.js";
 import type { InventoryStore } from "./store.js";
+import type { NodeConfigBundle } from "./config-bundle.js";
 
 type UnknownRecord = Record<string, unknown>;
 type DeploymentDirection = "forward" | "rollback";
 
 interface DeploymentTarget {
   node: ManagedNode;
-  config: string;
+  config: NodeConfigBundle;
 }
 
 export interface ActiveDeploymentJournal {
@@ -43,8 +44,8 @@ interface DeploymentServiceOptions {
     operation: () => Promise<Result> | Result,
     options?: { allowPendingJournal?: boolean },
   ): Promise<Result>;
-  configForNode(inventory: Inventory, node: ManagedNode): string;
-  emptyConfigForNode(node: ManagedNode): string;
+  configForNode(inventory: Inventory, node: ManagedNode): NodeConfigBundle;
+  emptyConfigForNode(node: ManagedNode): NodeConfigBundle;
   findNode(inventory: Inventory, nodeId: string): ManagedNode;
   validationError(config: string, diagnostic: unknown, fallback: string): string;
   addEvent(level: string, message: unknown, nodeId?: string | null): unknown;
@@ -76,13 +77,17 @@ export class DeploymentService {
     nodeIds: string[],
     fallbackNodes: ManagedNode[] = [],
   ): Promise<ActiveDeploymentJournal> {
+    const forwardTargets = this.#targets(after, nodeIds, fallbackNodes);
+    const rollbackTargets = this.#targets(before, nodeIds, fallbackNodes);
+    this.#markRemovedResources(forwardTargets, rollbackTargets);
+    this.#markRemovedResources(rollbackTargets, forwardTargets);
     const active: ActiveDeploymentJournal = {
       id: `deployment_${randomUUID()}`,
       direction: "forward",
       before,
       after,
-      forwardTargets: this.#targets(after, nodeIds, fallbackNodes),
-      rollbackTargets: this.#targets(before, nodeIds, fallbackNodes),
+      forwardTargets,
+      rollbackTargets,
     };
     await this.#options.database.mutateState<DeploymentJournal, void>(DEPLOYMENT_JOURNAL_KEY, EMPTY_DEPLOYMENT_JOURNAL, (current) => {
       const journal = this.#validateJournal(current);
@@ -127,7 +132,7 @@ export class DeploymentService {
           if (!validation.ok) throw new Error(validation.stderr || validation.stdout || `${target.node.name} 的恢复配置检查失败`);
         }
         for (const target of targets) {
-          const applied = await applyStagedConfig(target.node);
+          const applied = await applyStagedConfig(target.node, target.config);
           if (!applied.ok) throw new Error(applied.stderr || applied.stdout || `${target.node.name} 的恢复配置应用失败`);
         }
       }
@@ -156,12 +161,13 @@ export class DeploymentService {
         for (const node of nodes) {
           const config = this.#options.configForNode(inventory, node);
           const validation = await stageAndValidate(node, config);
-          if (!validation.ok) this.#options.fail(422, this.#options.validationError(config, validation.stderr || validation.stdout, `${node.name} 的 BIRD 语法检查失败`));
+          if (!validation.ok) this.#options.fail(422, this.#options.validationError(config.main, validation.stderr || validation.stdout, `${node.name} 的 BIRD 语法检查失败`));
         }
         if (nodes.length) journal = await this.beginJournal(current, inventory, nodeIds, nodes);
         for (const node of nodes) {
           attemptedNodes.push(node);
-          const applied = await applyStagedConfig(node);
+          const target = journal?.forwardTargets.find((item) => item.node.id === node.id);
+          const applied = await applyStagedConfig(node, target?.config ?? this.#options.configForNode(inventory, node));
           if (!applied.ok) this.#options.fail(500, applied.stderr || applied.stdout || `${node.name} 的 BIRD 配置应用失败`);
         }
         const state = await this.#options.store.replace(current, inventory);
@@ -184,7 +190,8 @@ export class DeploymentService {
           }
           let rollbackSucceeded = true;
           for (const node of attemptedNodes.reverse()) {
-            const rollback = await rollbackNode(node);
+            const target = journal?.forwardTargets.find((item) => item.node.id === node.id);
+            const rollback = await rollbackNode(node, target?.config ?? { main: "", resources: [] });
             if (!rollback.ok) {
               rollbackSucceeded = false;
               this.#options.addEvent("error", `${node.name} 回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
@@ -217,6 +224,16 @@ export class DeploymentService {
     });
   }
 
+  #markRemovedResources(targets: DeploymentTarget[], previousTargets: DeploymentTarget[]): void {
+    const previousByNode = new Map(previousTargets.map((target) => [target.node.id, target]));
+    for (const target of targets) {
+      const current = new Set(target.config.resources.map((resource) => resource.relativePath));
+      target.config.removedResources = (previousByNode.get(target.node.id)?.config.resources ?? [])
+        .map((resource) => resource.relativePath)
+        .filter((relativePath) => !current.has(relativePath));
+    }
+  }
+
   #validateJournal(value: unknown): DeploymentJournal {
     const input = value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : null;
     if (!input || input.version !== 1 || !Object.hasOwn(input, "active")) throw new Error("部署恢复日志格式不兼容");
@@ -237,9 +254,20 @@ export class DeploymentService {
           ? targetValue as UnknownRecord
           : null;
         const node = normalizeNode(target?.node);
-        if (seen.has(node.id) || typeof target?.config !== "string") throw new Error("部署恢复日志节点目标不合法");
+        const configValue = target?.config;
+        const config = typeof configValue === "string"
+          ? { main: configValue, resources: [] }
+          : configValue && typeof configValue === "object" && !Array.isArray(configValue)
+            ? configValue as unknown as NodeConfigBundle
+            : null;
+        if (seen.has(node.id) || !config || typeof config.main !== "string" || !Array.isArray(config.resources)
+          || config.resources.some((resource) => !resource || typeof resource.relativePath !== "string" || typeof resource.content !== "string")) {
+          throw new Error("部署恢复日志节点目标不合法");
+        }
+        config.removedResources = Array.isArray(config.removedResources) && config.removedResources.every((item) => typeof item === "string")
+          ? config.removedResources : [];
         seen.add(node.id);
-        return { node, config: target.config };
+        return { node, config };
       });
     };
     return {

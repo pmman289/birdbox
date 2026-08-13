@@ -3,7 +3,7 @@ export { validateInventory } from "./bird-inventory.js";
 export { RUNTIME, normalizeNode, normalizePeer } from "./bird-normalize-common.js";
 export { normalizeDefine, normalizePolicyFilter, normalizePolicyFunction } from "./bird-policy-resources.js";
 export { normalizeBirdPrefixPattern, parseBirdPrefixEntries } from "./bird-prefix.js";
-export { locateStaticRouteDiagnostic, renderBirdConfig } from "./bird-render.js";
+export { locateStaticRouteDiagnostic, renderBirdConfig, renderBirdConfigBundle } from "./bird-render.js";
 export { normalizeRPKI } from "./bird-rpki.js";
 export {
   ACTIVE_BIRD_INCLUDE_AWK,

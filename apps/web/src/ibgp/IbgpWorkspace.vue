@@ -228,7 +228,7 @@ function makeSession(
     peerId,
     protocolName: uniqueBirdName(
       currentInventory.value ?? {
-        version: 26,
+        version: 27,
         nodes: [],
         peers: [],
         defines: [],

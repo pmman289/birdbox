@@ -11,6 +11,19 @@ COPY public ./public
 COPY src ./src
 RUN npm run build
 
+FROM node:24-alpine AS bgpq4-build
+
+ARG BGPQ4_VERSION=1.12
+ARG BGPQ4_COMMIT=95d3a4c12b18dce45a1fbb62a2327ed302a8f046
+RUN apk add --no-cache autoconf automake build-base git libtool \
+    && git clone --quiet --depth 1 --branch "${BGPQ4_VERSION}" https://github.com/bgp/bgpq4.git /src/bgpq4 \
+    && test "$(git -C /src/bgpq4 rev-parse HEAD)" = "${BGPQ4_COMMIT}" \
+    && cd /src/bgpq4 \
+    && ./bootstrap \
+    && ./configure \
+    && make -j"$(getconf _NPROCESSORS_ONLN)" \
+    && strip bgpq4
+
 FROM node:24-alpine
 
 ARG BIRDBOX_VERSION=dev
@@ -39,6 +52,7 @@ RUN apk add --no-cache ca-certificates openssh-client tini \
     && install -d -o birdbox -g birdbox -m 0750 /var/lib/birdbox
 
 WORKDIR /app
+COPY --from=bgpq4-build /src/bgpq4/bgpq4 /usr/local/bin/bgpq4
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=web-build /app/dist ./dist

@@ -1,4 +1,4 @@
-import type { ChangeEvent, NodeRuntime, ProtocolRuntime } from "../packages/contracts/src/api.js";
+import type { ChangeEvent } from "../packages/contracts/src/api.js";
 import type {
   BgpSession,
   CidrDefine,
@@ -9,13 +9,11 @@ import type {
 import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import {
   applyStagedConfig,
-  inspectNode,
   normalizeSession,
   rollbackNode,
   stageAndValidate,
   validateInventory,
 } from "./bird.js";
-import { protocolFor } from "./dashboard-service.js";
 import type { ActiveDeploymentJournal, DeploymentService } from "./deployment-service.js";
 import { fail, optionalRecord, record, safeErrorMessage, type UnknownRecord } from "./errors.js";
 import { configForNode, findNode, findPeer, findPolicyResource } from "./inventory-domain.js";
@@ -114,23 +112,16 @@ export class SessionApplicationService {
             },
           };
         }
-        const status = await waitForProtocol(staged.node, staged.session.protocolName);
-        this.#options.addEvent(
-          status.protocol.established ? "success" : "warning",
-          status.protocol.established
-            ? `与 ${staged.peer.name} 的 BGP 会话已 Established`
-            : `配置已应用，正在等待 ${staged.peer.name}`,
-          staged.node.id,
-        );
+        this.#options.addEvent("success", `会话 ${staged.session.protocolName} 配置已应用`, staged.node.id);
         return {
-          status: status.protocol.established ? 200 : 202,
+          status: 202,
           payload: {
             applied: true,
             enabled: true,
-            established: status.protocol.established,
+            established: false,
             session: staged.session,
             config: staged.config,
-            status,
+            status: null,
             events: this.#options.getEvents(),
           },
         };
@@ -295,21 +286,5 @@ export class SessionApplicationService {
     const prepared = this.#prepareSession(state, payload);
     const validation = await stageAndValidate(prepared.node, prepared.config);
     return { ...prepared, validation, valid: validation.ok };
-  }
-}
-
-async function waitForProtocol(
-  node: ManagedNode,
-  protocolName: string,
-  timeoutMs = 25000,
-): Promise<{ runtime: NodeRuntime; protocol: ProtocolRuntime }> {
-  const deadline = Date.now() + timeoutMs;
-  let runtime = await inspectNode(node);
-  let protocol = protocolFor(runtime, protocolName);
-  while (true) {
-    if (protocol.established || Date.now() >= deadline) return { runtime, protocol };
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    runtime = await inspectNode(node);
-    protocol = protocolFor(runtime, protocolName);
   }
 }

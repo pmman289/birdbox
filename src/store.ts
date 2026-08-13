@@ -54,7 +54,7 @@ function normalizeStoredInventory(value: unknown): Inventory {
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 26;
+const CURRENT_INVENTORY_VERSION = 27;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -234,6 +234,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
         ...item,
         label: item.label ?? item.name,
         type: item.type === "cidr" ? "cidr4" : (item.type ?? "expression"),
+        ...(item.type === "expression" ? {} : { entrySource: item.entrySource ?? item.source ?? { kind: "manual" } }),
       })),
       functions: upgradeResourceOrder(source.functions),
       filters: upgradeResourceOrder(source.filters),
@@ -293,6 +294,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
         label: item.name,
         name: item.symbol,
         type: "cidr4",
+        entrySource: { kind: "manual" },
         entries: item.entries,
         enabled: true,
       })),

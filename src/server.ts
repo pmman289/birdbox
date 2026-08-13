@@ -10,7 +10,7 @@ import { createDatabaseFromEnvironment } from "./database.js";
 import { DeploymentService } from "./deployment-service.js";
 import { fail } from "./errors.js";
 import { createHttpApplication } from "./http/application.js";
-import { configForNode, findNode, staticValidationError } from "./inventory-domain.js";
+import { configBundleForNode, findNode, staticValidationError } from "./inventory-domain.js";
 import { NodeOnboardingService } from "./node-onboarding-service.js";
 import { createResourceApplicationService } from "./resource-application-service.js";
 import { SessionApplicationService } from "./session-application-service.js";
@@ -46,6 +46,14 @@ function normalizeShutdownTimeout(value: unknown): number {
   return normalized;
 }
 
+function normalizeIrrSchedulerInterval(value: unknown): number {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 250 || normalized > 3_600_000) {
+    throw new Error("BIRDBOX_IRR_SCHEDULER_INTERVAL_MS 必须是 250 到 3600000 之间的整数");
+  }
+  return normalized;
+}
+
 const rootDirectory = resolveApplicationRoot(import.meta.url);
 const publicDirectory = path.join(rootDirectory, "public");
 const dataDirectory = process.env.BIRDBOX_DATA_DIR ?? path.join(rootDirectory, "data");
@@ -58,6 +66,9 @@ const secureCookieSetting = normalizeEnvironmentBoolean(
 );
 const shutdownTimeoutMs = normalizeShutdownTimeout(
   process.env.BIRDBOX_SHUTDOWN_TIMEOUT_MS ?? 1800000,
+);
+const irrSchedulerIntervalMs = normalizeIrrSchedulerInterval(
+  process.env.BIRDBOX_IRR_SCHEDULER_INTERVAL_MS ?? 60_000,
 );
 const controllerSshDirectory = path.join(dataDirectory, "ssh");
 const controllerSshKeyPath = process.env.BIRDBOX_SSH_KEY_PATH
@@ -111,8 +122,8 @@ deploymentService = new DeploymentService({
   database,
   store,
   withDeploymentLock,
-  configForNode,
-  emptyConfigForNode: (node) => renderBirdConfig(node, [], [], [], [], [], [], []),
+  configForNode: configBundleForNode,
+  emptyConfigForNode: (node) => ({ main: renderBirdConfig(node, [], [], [], [], [], [], []), resources: [], removedResources: [] }),
   findNode,
   validationError: staticValidationError,
   addEvent,
@@ -152,6 +163,8 @@ const mutationService = createResourceApplicationService({
   addEvent,
   getEvents,
 });
+let irrSchedulerStopped = false;
+let activeIrrSchedule: Promise<void> | null = null;
 
 await database.initialize();
 await authStore.initialize();
@@ -182,9 +195,30 @@ const app = await createHttpApplication({
 await app.listen({ port, host });
 console.log(`Birdbox Demo listening on http://${host}:${port}`);
 
+async function runIrrSchedule(): Promise<void> {
+  if (irrSchedulerStopped || activeIrrSchedule) return;
+  activeIrrSchedule = (async () => {
+    const inventory = await store.read();
+    const now = Date.now();
+    for (const define of inventory.defines) {
+      if (irrSchedulerStopped) break;
+      if (define.type === "expression" || define.entrySource.kind !== "irr-as-set" || !define.enabled) continue;
+      const dueAt = define.sync.nextRefreshAt ? Date.parse(define.sync.nextRefreshAt) : 0;
+      if (Number.isFinite(dueAt) && dueAt > now) continue;
+      try { await mutationService.syncIrrDefine(define.id); } catch (error) { console.error(`AS-SET Define ${define.id} 自动同步失败`, error); }
+    }
+  })().finally(() => { activeIrrSchedule = null; });
+  await activeIrrSchedule;
+}
+const irrScheduleTimer = setInterval(() => void runIrrSchedule(), irrSchedulerIntervalMs);
+irrScheduleTimer.unref();
+void runIrrSchedule();
+
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  irrSchedulerStopped = true;
+  clearInterval(irrScheduleTimer);
   console.log(`Received ${signal}, shutting down`);
   const forcedExit = setTimeout(() => process.exit(1), shutdownTimeoutMs);
   forcedExit.unref();
@@ -193,6 +227,7 @@ async function shutdown(signal: string): Promise<void> {
   try {
     const deployment = activeDeployment;
     if (deployment) await deployment.catch(() => undefined);
+    if (activeIrrSchedule) await activeIrrSchedule.catch(() => undefined);
     app.server.closeIdleConnections?.();
     await serverClosed;
     await database.close();

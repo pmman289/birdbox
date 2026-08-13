@@ -81,3 +81,23 @@ test("marks a timed out deployment write as an unknown outcome", async (context)
     "birdbox:mutation-end",
   ]);
 });
+
+test("marks a disconnected deployment response as an unknown outcome", async (context) => {
+  const browser = installBrowserFakes(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  context.after(() => browser.restore());
+
+  await assert.rejects(
+    api("/api/sessions/apply", { method: "POST", body: "{}" }),
+    (error) => error instanceof ApiError
+      && error.code === "NETWORK_ERROR"
+      && error.unknownOutcome
+      && /正在自动刷新/.test(error.message),
+  );
+  assert.deepEqual(browser.events.map((event) => event.type), [
+    "birdbox:mutation-start",
+    "birdbox:unknown-mutation-outcome",
+    "birdbox:mutation-end",
+  ]);
+});

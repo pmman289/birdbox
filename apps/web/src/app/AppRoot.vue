@@ -9,7 +9,7 @@ import DashboardOverview from "../dashboard/DashboardOverview.vue";
 import DashboardRuntime from "../dashboard/DashboardRuntime.vue";
 import RouteDetailsDialog from "../dashboard/RouteDetailsDialog.vue";
 import SessionControlButton from "../dashboard/SessionControlButton.vue";
-import { clearDashboard, loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
+import { clearDashboard, loadDashboard, refreshDashboardRuntime, useDashboardStore } from "../dashboard/dashboard-store";
 import ResourceWorkspace from "../resources/ResourceWorkspace.vue";
 import SessionEditor from "../sessions/SessionEditor.vue";
 import IbgpWorkspace from "../ibgp/IbgpWorkspace.vue";
@@ -24,6 +24,7 @@ interface ToastItem {
 }
 
 const THEME_STORAGE_KEY = "birdbox-theme";
+const RUNTIME_REFRESH_INTERVAL_MS = 3_000;
 const authenticated = ref(false);
 const activeWorkspace = ref<"sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace">("sessionWorkspace");
 const accountDialog = ref<HTMLDialogElement | null>(null);
@@ -41,6 +42,7 @@ const mutations = reactive(new Map<number, MutationWaitPresentation>());
 const { dashboard, loading } = useDashboardStore();
 let toastSequence = 0;
 let authMonitorTimer: number | null = null;
+let runtimeMonitorTimer: number | null = null;
 let unknownOutcomeTimer: number | null = null;
 let systemThemeQuery: MediaQueryList | null = null;
 
@@ -123,8 +125,30 @@ function stopAuthMonitor(): void {
   authMonitorTimer = null;
 }
 
+function stopRuntimeMonitor(): void {
+  if (runtimeMonitorTimer !== null) window.clearInterval(runtimeMonitorTimer);
+  runtimeMonitorTimer = null;
+}
+
+function refreshRuntimeInBackground(): void {
+  if (!authenticated.value || document.hidden || loading.value || mutations.size) return;
+  void refreshDashboardRuntime().catch(() => {
+    // Background polling is best effort; explicit refresh surfaces connectivity errors.
+  });
+}
+
+function startRuntimeMonitor(): void {
+  stopRuntimeMonitor();
+  runtimeMonitorTimer = window.setInterval(refreshRuntimeInBackground, RUNTIME_REFRESH_INTERVAL_MS);
+}
+
+function handleVisibilityChange(): void {
+  if (!document.hidden) refreshRuntimeInBackground();
+}
+
 function showAuthentication(status: Pick<AuthStatusResponse, "configured"> = { configured: true }): void {
   stopAuthMonitor();
+  stopRuntimeMonitor();
   authenticated.value = false;
   dashboardError.value = false;
   clearDashboard();
@@ -155,6 +179,7 @@ async function showApplication(): Promise<void> {
   window.dispatchEvent(new CustomEvent("birdbox:app-ready"));
   startAuthMonitor();
   await refresh(null, null);
+  startRuntimeMonitor();
 }
 
 async function logout(): Promise<void> {
@@ -247,7 +272,8 @@ function handleMutationEnd(event: CustomEvent<{ requestId: number }>): void {
   if (!mutations.size && mutationDialog.value?.open) mutationDialog.value.close();
 }
 
-function handleUnknownOutcome(): void {
+function handleUnknownOutcome(event: CustomEvent<{ path: string; method: string }>): void {
+  if (event.detail.path === "/api/sessions/apply") return;
   if (unknownOutcomeTimer !== null) window.clearTimeout(unknownOutcomeTimer);
   unknownOutcomeTimer = window.setTimeout(async () => {
     unknownOutcomeTimer = null;
@@ -255,7 +281,7 @@ function handleUnknownOutcome(): void {
       await refresh();
       toast("请求结果未知，已刷新库存和节点状态", "success");
     } catch {
-      // The timeout error remains visible and manual refresh can retry reconciliation.
+      // The network error remains visible and manual refresh can retry reconciliation.
     }
   }, 0);
 }
@@ -279,6 +305,7 @@ onMounted(() => {
   systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
   systemThemeQuery.addEventListener("change", followSystemTheme);
   document.addEventListener("click", handleDelegatedThemeToggle);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("birdbox:authenticated", showApplication);
   window.addEventListener("birdbox:auth-required", handleAuthRequired);
   window.addEventListener("birdbox:toast", handleToast);
@@ -291,9 +318,11 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopAuthMonitor();
+  stopRuntimeMonitor();
   if (unknownOutcomeTimer !== null) window.clearTimeout(unknownOutcomeTimer);
   systemThemeQuery?.removeEventListener("change", followSystemTheme);
   document.removeEventListener("click", handleDelegatedThemeToggle);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("birdbox:authenticated", showApplication);
   window.removeEventListener("birdbox:auth-required", handleAuthRequired);
   window.removeEventListener("birdbox:toast", handleToast);

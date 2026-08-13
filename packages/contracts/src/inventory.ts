@@ -56,7 +56,24 @@ interface MultiNodePolicyResourceBase extends NamedPolicyResourceBase {
 
 export interface CidrDefine extends MultiNodePolicyResourceBase {
   type: "cidr4" | "cidr6";
+  entrySource: { kind: "manual" } | {
+    kind: "irr-as-set";
+    asSet: string;
+    server: string;
+    databases: string[];
+    refreshIntervalSeconds: number;
+    prefixLimit: number;
+    allowMoreSpecific: boolean;
+  };
   entries: string[];
+  sync: {
+    status: "never" | "ready" | "error";
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    nextRefreshAt: string | null;
+    error: string | null;
+    contentHash: string | null;
+  };
 }
 
 export interface ExpressionDefine extends MultiNodePolicyResourceBase {
@@ -332,7 +349,7 @@ export interface IbgpDomain {
 }
 
 export interface Inventory {
-  version: 26;
+  version: 27;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];

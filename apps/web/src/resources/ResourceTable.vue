@@ -73,13 +73,18 @@ function defineReferenceCount(resource: PolicyDefine): number {
 }
 
 function defineType(resource: PolicyDefine): string {
-  if (resource.type === "cidr4") return "IPv4 CIDR";
-  if (resource.type === "cidr6") return "IPv6 CIDR";
+  if (resource.type === "cidr4") return resource.entrySource.kind === "irr-as-set" ? "IPv4 · AS-SET" : "IPv4 CIDR";
+  if (resource.type === "cidr6") return resource.entrySource.kind === "irr-as-set" ? "IPv6 · AS-SET" : "IPv6 CIDR";
   return "表达式";
 }
 
 function defineValue(resource: PolicyDefine): string {
-  return resource.type === "expression" ? resource.value : resource.entries.join(", ");
+  if (resource.type === "expression") return resource.value;
+  if (resource.entrySource.kind === "irr-as-set") {
+    const state = resource.sync.status === "error" ? `同步失败 · 旧快照 ${resource.entries.length} 条` : `${resource.entrySource.asSet} · ${resource.entries.length} 条`;
+    return `${state} · ${resource.entrySource.server}`;
+  }
+  return resource.entries.join(", ");
 }
 
 function staticSummary(resource: StaticProtocol): string {

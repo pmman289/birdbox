@@ -143,6 +143,8 @@ sh birdbox-node-setup.sh
 
 Define 可以应用于所有节点，也可以限制到一个或多个指定节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
 
+CIDR Define 的条目可以手工填写，也可以绑定 IRR AS-SET，由控制器使用 `bgpq4` 定期展开并同步。用户可以设置 IRR Server、Database、刷新间隔、前缀数量上限和是否匹配更具体前缀。动态前缀以独立的哈希版本文件下发，主生成配置只包含 Include；同步失败、结果为空、超过限制或节点预检失败时继续使用最近一次成功快照。官方 Docker 镜像已经内置 `bgpq4`，受管节点不需要安装。
+
 ### Static Protocol
 
 Static 是节点级资源，不属于任何 BGP 会话。一个节点可以创建多个 IPv4 或 IPv6 Static Protocol；每个资源可选择匹配地址族的 CIDR Define 和标准路由动作，也可以填写自定义 Static 指令。Import、Export 均可独立选择 `all` 或 `none`，默认值为 `import all`、`export none`。

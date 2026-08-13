@@ -13,6 +13,7 @@ import {
   normalizeOptionalName,
 } from "./bird-normalize-common.js";
 import { parseProtocolStatuses, parseRouteDetails } from "./bird-runtime-parser.js";
+import { configBundle, type NodeConfigBundle } from "./config-bundle.js";
 
 interface ManagedSshConfiguration {
   identityFile: string | null;
@@ -310,8 +311,89 @@ fi
   };
 }
 
-export async function stageAndValidate(nodeInput: unknown, config: string): Promise<NodeCommandResult> {
+function validateBundle(bundleInput: string | NodeConfigBundle): NodeConfigBundle {
+  const bundle = configBundle(bundleInput);
+  const seen = new Set<string>();
+  for (const resource of bundle.resources) {
+    assertValidation(/^define_[A-Za-z_][A-Za-z0-9_]*\.conf$/.test(resource.relativePath), "资源片段路径不合法");
+    assertValidation(!seen.has(resource.relativePath), "资源片段路径重复");
+    seen.add(resource.relativePath);
+  }
+  for (const relativePath of bundle.removedResources ?? []) {
+    assertValidation(/^define_[A-Za-z_][A-Za-z0-9_]*\.conf$/.test(relativePath), "待删除资源片段路径不合法");
+    assertValidation(!seen.has(relativePath), "资源片段不能同时更新和删除");
+    seen.add(relativePath);
+  }
+  return bundle;
+}
+
+async function stageResourceFiles(node: ManagedNode, bundle: NodeConfigBundle, baseDirectory: string): Promise<NodeCommandResult> {
+  for (const resource of bundle.resources) {
+    const activePath = `${baseDirectory}/resources/${resource.relativePath}`;
+    const resourceDirectory = `${baseDirectory}/resources`;
+    const versionDirectory = `${resourceDirectory}/versions`;
+    const hash = createHash("sha256").update(resource.content).digest("hex").slice(0, 16);
+    const versionName = `${resource.relativePath.replace(/\.conf$/, "")}.${hash}.conf`;
+    const versionPath = `${versionDirectory}/${versionName}`;
+    const result = await runOnNode(node, [
+      "set -eu", "umask 0077",
+      `if [ -S '${node.socketPath}' ]; then bird_group=$(stat -c '%G' '${node.socketPath}'); else bird_group=$(id -gn bird); fi`,
+      `mkdir -p '${versionDirectory}'`,
+      `chgrp "$bird_group" '${resourceDirectory}' '${versionDirectory}'`,
+      `chmod 0750 '${resourceDirectory}' '${versionDirectory}'`,
+      `current_file=$(readlink -f '${activePath}' 2>/dev/null || true)`,
+      `candidate_file=$(readlink -f '${activePath}.candidate' 2>/dev/null || true)`,
+      `for file in '${versionDirectory}/${resource.relativePath.replace(/\.conf$/, "")}.'*.conf '${versionDirectory}/${resource.relativePath.replace(/\.conf$/, "")}.'*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file"); if [ "$file_target" != "$current_file" ] && [ "$file_target" != "$candidate_file" ]; then rm -f -- "$file"; fi; done`,
+      `cat > '${versionPath}.tmp'`,
+      `chgrp "$bird_group" '${versionPath}.tmp'`, `chmod 0640 '${versionPath}.tmp'`,
+      `mv -f '${versionPath}.tmp' '${versionPath}'`,
+      `ln -sfn 'versions/${versionName}' '${activePath}.candidate'`,
+    ].join("\n"), { timeout: 15_000, input: resource.content });
+    if (!result.ok) return result;
+  }
+  return { ok: true, stdout: "", stderr: "" };
+}
+
+function resourceSwitchCommands(bundle: NodeConfigBundle, baseDirectory: string, mode: "check" | "apply"): string[] {
+  return bundle.resources.flatMap((resource) => {
+    const active = `${baseDirectory}/resources/${resource.relativePath}`;
+    const candidate = `${active}.candidate`;
+    const rollback = `${active}.rollback`;
+    const swap = `${active}.switch`;
+    if (mode === "check") return [
+      `if [ -L '${active}' ]; then old_target=$(readlink '${active}'); else old_target=''; fi`,
+      `new_target=$(readlink '${candidate}')`,
+      `ln -sfn "$new_target" '${swap}'`, `mv -f '${swap}' '${active}'`,
+      `resource_restore_commands="$resource_restore_commands if [ -n '$old_target' ]; then ln -sfn '$old_target' '${swap}'; mv -f '${swap}' '${active}'; else rm -f '${active}'; fi;"`,
+    ];
+    return [
+      `if [ -L '${active}' ]; then old_target=$(readlink '${active}'); ln -sfn "$old_target" '${rollback}'; else rm -f '${rollback}'; fi`,
+      `new_target=$(readlink '${candidate}')`, `ln -sfn "$new_target" '${swap}'`, `mv -f '${swap}' '${active}'`,
+    ];
+  });
+}
+
+function resourceRollbackCommands(bundle: NodeConfigBundle, baseDirectory: string): string[] {
+  return [...bundle.resources.map((resource) => resource.relativePath), ...(bundle.removedResources ?? [])].flatMap((relativePath) => {
+    const active = `${baseDirectory}/resources/${relativePath}`;
+    const rollback = `${active}.rollback`;
+    const swap = `${active}.switch`;
+    return [`if [ -L '${rollback}' ]; then target=$(readlink '${rollback}'); ln -sfn "$target" '${swap}'; mv -f '${swap}' '${active}'; else rm -f '${active}'; fi`];
+  });
+}
+
+function resourceRemovalCommands(bundle: NodeConfigBundle, baseDirectory: string): string[] {
+  return (bundle.removedResources ?? []).flatMap((relativePath) => {
+    const active = `${baseDirectory}/resources/${relativePath}`;
+    const rollback = `${active}.rollback`;
+    return [`if [ -L '${active}' ]; then old_target=$(readlink '${active}'); ln -sfn "$old_target" '${rollback}'; rm -f '${active}'; else rm -f '${rollback}'; fi`];
+  });
+}
+
+export async function stageAndValidate(nodeInput: unknown, bundleInput: string | NodeConfigBundle): Promise<NodeCommandResult> {
   const node = normalizeNode(nodeInput);
+  const bundle = validateBundle(bundleInput);
+  const config = bundle.main;
   if (node.deploymentMode === "include") {
     const activePath = node.generatedConfigPath;
     const directory = path.posix.dirname(activePath);
@@ -321,6 +403,8 @@ export async function stageAndValidate(nodeInput: unknown, config: string): Prom
     const candidateTarget = `versions/${versionName}`;
     const candidateLink = `${activePath}.candidate`;
     const switchLink = `${activePath}.switch`;
+    const stagedResources = await stageResourceFiles(node, bundle, directory);
+    if (!stagedResources.ok) return stagedResources;
     const command = [
       "set -eu",
       "umask 0077",
@@ -343,7 +427,9 @@ export async function stageAndValidate(nodeInput: unknown, config: string): Prom
       `chmod 0640 '${versionPath}.tmp'`,
       `mv -f '${versionPath}.tmp' '${versionPath}'`,
       `ln -sfn '${candidateTarget}' '${candidateLink}'`,
-      `restore_active() { ln -sfn "$current_target" '${switchLink}'; mv -f '${switchLink}' '${activePath}'; }`,
+      "resource_restore_commands=''",
+      ...resourceSwitchCommands(bundle, directory, "check"),
+      `restore_active() { eval "$resource_restore_commands"; ln -sfn "$current_target" '${switchLink}'; mv -f '${switchLink}' '${activePath}'; }`,
       "trap restore_active EXIT HUP INT TERM",
       `ln -sfn '${candidateTarget}' '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
@@ -351,6 +437,8 @@ export async function stageAndValidate(nodeInput: unknown, config: string): Prom
     ].join("\n");
     return runOnNode(node, command, { timeout: 15_000, input: config });
   }
+  const stagedResources = await stageResourceFiles(node, bundle, RUNTIME.baseDir);
+  if (!stagedResources.ok) return stagedResources;
   const command = [
     "set -eu",
     "umask 0077",
@@ -358,13 +446,18 @@ export async function stageAndValidate(nodeInput: unknown, config: string): Prom
     `cat > '${RUNTIME.configPath}.candidate'`,
     `chown bird:bird '${RUNTIME.configPath}.candidate'`,
     `chmod 0640 '${RUNTIME.configPath}.candidate'`,
+    "resource_restore_commands=''",
+    ...resourceSwitchCommands(bundle, RUNTIME.baseDir, "check"),
+    `restore_resources() { eval "$resource_restore_commands"; }`,
+    "trap restore_resources EXIT HUP INT TERM",
     `bird -p -c '${RUNTIME.configPath}.candidate'`,
   ].join("\n");
   return runOnNode(node, command, { timeout: 15_000, input: config });
 }
 
-export async function applyStagedConfig(nodeInput: unknown): Promise<NodeCommandResult> {
+export async function applyStagedConfig(nodeInput: unknown, bundleInput: string | NodeConfigBundle = ""): Promise<NodeCommandResult> {
   const node = normalizeNode(nodeInput);
+  const bundle = validateBundle(bundleInput);
   if (node.deploymentMode === "include") {
     const activePath = node.generatedConfigPath;
     const directory = path.posix.dirname(activePath);
@@ -384,11 +477,14 @@ export async function applyStagedConfig(nodeInput: unknown): Promise<NodeCommand
       "test -n \"$candidate_target\"",
       "test -n \"$current_file\"",
       "test -n \"$candidate_file\"",
+      ...resourceSwitchCommands(bundle, directory, "apply"),
+      ...resourceRemovalCommands(bundle, directory),
       `ln -sfn "$current_target" '${rollbackLink}'`,
       `ln -sfn "$candidate_target" '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
       `cleanup_versions() { for file in '${directory}/versions/'${basename}.*.conf '${directory}/versions/'${basename}.*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file"); if [ "$file_target" != "$candidate_file" ] && [ "$file_target" != "$current_file" ]; then rm -f -- "$file"; fi; done; }`,
       `if birdc -s '${node.socketPath}' 'configure check' && birdc -s '${node.socketPath}' configure; then cleanup_versions || true; exit 0; fi`,
+      ...resourceRollbackCommands(bundle, directory),
       `ln -sfn "$current_target" '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
       `birdc -s '${node.socketPath}' configure >/dev/null 2>&1 || true`,
@@ -397,17 +493,25 @@ export async function applyStagedConfig(nodeInput: unknown): Promise<NodeCommand
     return runOnNode(node, command, { timeout: 20_000 });
   }
   const command = [
+    "set -eu",
+    ...resourceSwitchCommands(bundle, RUNTIME.baseDir, "apply"),
+    ...resourceRemovalCommands(bundle, RUNTIME.baseDir),
     `test -f '${RUNTIME.configPath}.candidate'`,
     `if [ -f '${RUNTIME.configPath}' ]; then cp -a '${RUNTIME.configPath}' '${RUNTIME.configPath}.rollback'; else rm -f '${RUNTIME.configPath}.rollback'; fi`,
     `mv -f '${RUNTIME.configPath}.candidate' '${RUNTIME.configPath}'`,
     `chown bird:bird '${RUNTIME.configPath}' && chmod 0640 '${RUNTIME.configPath}'`,
-    `if [ -S '${RUNTIME.socketPath}' ] && birdc -s '${RUNTIME.socketPath}' 'show status' >/dev/null 2>&1; then birdc -s '${RUNTIME.socketPath}' configure; else rm -f '${RUNTIME.socketPath}' '${RUNTIME.pidPath}'; bird -c '${RUNTIME.configPath}' -s '${RUNTIME.socketPath}' -P '${RUNTIME.pidPath}' -u bird -g bird; fi`,
-  ].join(" && ");
+    `if [ -S '${RUNTIME.socketPath}' ] && birdc -s '${RUNTIME.socketPath}' 'show status' >/dev/null 2>&1; then status=0; birdc -s '${RUNTIME.socketPath}' configure || status=$?; else rm -f '${RUNTIME.socketPath}' '${RUNTIME.pidPath}'; status=0; bird -c '${RUNTIME.configPath}' -s '${RUNTIME.socketPath}' -P '${RUNTIME.pidPath}' -u bird -g bird || status=$?; fi`,
+    "if [ \"$status\" -eq 0 ]; then exit 0; fi",
+    ...resourceRollbackCommands(bundle, RUNTIME.baseDir),
+    `if [ -f '${RUNTIME.configPath}.rollback' ]; then cp -a '${RUNTIME.configPath}.rollback' '${RUNTIME.configPath}'; if [ -S '${RUNTIME.socketPath}' ]; then birdc -s '${RUNTIME.socketPath}' configure >/dev/null 2>&1 || true; fi; else rm -f '${RUNTIME.configPath}'; fi`,
+    "exit 1",
+  ].join("\n");
   return runOnNode(node, command, { timeout: 20_000 });
 }
 
-export async function rollbackNode(nodeInput: unknown): Promise<NodeCommandResult> {
+export async function rollbackNode(nodeInput: unknown, bundleInput: string | NodeConfigBundle = ""): Promise<NodeCommandResult> {
   const node = normalizeNode(nodeInput);
+  const bundle = validateBundle(bundleInput);
   if (node.deploymentMode === "include") {
     const activePath = node.generatedConfigPath;
     const rollbackLink = `${activePath}.rollback`;
@@ -418,6 +522,7 @@ export async function rollbackNode(nodeInput: unknown): Promise<NodeCommandResul
       `test -L '${rollbackLink}'`,
       `current_target=$(readlink '${activePath}')`,
       `rollback_target=$(readlink '${rollbackLink}')`,
+      ...resourceRollbackCommands(bundle, path.posix.dirname(activePath)),
       `ln -sfn "$rollback_target" '${switchLink}'`,
       `mv -f '${switchLink}' '${activePath}'`,
       `if birdc -s '${node.socketPath}' 'configure check' && birdc -s '${node.socketPath}' configure; then ln -sfn "$current_target" '${rollbackLink}'; exit 0; fi`,
@@ -428,7 +533,7 @@ export async function rollbackNode(nodeInput: unknown): Promise<NodeCommandResul
     ].join("\n");
     return runOnNode(node, command, { timeout: 20_000 });
   }
-  const command = `if [ -f '${RUNTIME.configPath}.rollback' ]; then cp -a '${RUNTIME.configPath}.rollback' '${RUNTIME.configPath}'; bird -p -c '${RUNTIME.configPath}'; if [ -S '${RUNTIME.socketPath}' ]; then birdc -s '${RUNTIME.socketPath}' configure; else bird -c '${RUNTIME.configPath}' -s '${RUNTIME.socketPath}' -P '${RUNTIME.pidPath}' -u bird -g bird; fi; else if [ -S '${RUNTIME.socketPath}' ]; then birdc -s '${RUNTIME.socketPath}' down || true; fi; rm -f '${RUNTIME.configPath}'; fi`;
+  const command = [...resourceRollbackCommands(bundle, RUNTIME.baseDir), `if [ -f '${RUNTIME.configPath}.rollback' ]; then cp -a '${RUNTIME.configPath}.rollback' '${RUNTIME.configPath}'; bird -p -c '${RUNTIME.configPath}'; if [ -S '${RUNTIME.socketPath}' ]; then birdc -s '${RUNTIME.socketPath}' configure; else bird -c '${RUNTIME.configPath}' -s '${RUNTIME.socketPath}' -P '${RUNTIME.pidPath}' -u bird -g bird; fi; else if [ -S '${RUNTIME.socketPath}' ]; then birdc -s '${RUNTIME.socketPath}' down || true; fi; rm -f '${RUNTIME.configPath}'; fi`].join("\n");
   return runOnNode(node, command, { timeout: 20_000 });
 }
 

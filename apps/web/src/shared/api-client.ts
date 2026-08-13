@@ -86,8 +86,8 @@ function dispatchMutationEnd(requestId: number): void {
   window.dispatchEvent(new CustomEvent("birdbox:mutation-end", { detail: { requestId } }));
 }
 
-function dispatchUnknownMutationOutcome(): void {
-  window.dispatchEvent(new CustomEvent("birdbox:unknown-mutation-outcome"));
+function dispatchUnknownMutationOutcome(path: string, method: string): void {
+  window.dispatchEvent(new CustomEvent("birdbox:unknown-mutation-outcome", { detail: { path, method } }));
 }
 
 let requestSequence = 0;
@@ -139,11 +139,21 @@ export async function api<Response>(path: string, options: ApiRequestOptions = {
   } catch (error) {
     if (timedOut) {
       const unknownOutcome = method !== "GET";
-      if (unknownOutcome && isDeploymentMutation(path, method)) dispatchUnknownMutationOutcome();
+      if (unknownOutcome && isDeploymentMutation(path, method)) dispatchUnknownMutationOutcome(path, method);
       throw new ApiError("请求超时，服务端可能仍在处理；请刷新状态后确认结果", {
         code: "REQUEST_TIMEOUT",
         unknownOutcome,
       });
+    }
+    if (error instanceof TypeError && method !== "GET") {
+      const unknownOutcome = isDeploymentMutation(path, method);
+      if (unknownOutcome) dispatchUnknownMutationOutcome(path, method);
+      throw new ApiError(
+        unknownOutcome
+          ? "连接中断，变更可能已经生效；正在自动刷新状态确认结果"
+          : "无法连接服务器",
+        { code: "NETWORK_ERROR", unknownOutcome },
+      );
     }
     throw error;
   } finally {

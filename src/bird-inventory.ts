@@ -308,7 +308,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   }
 
   return {
-    version: 26,
+    version: 27,
     nodes,
     peers,
     defines,

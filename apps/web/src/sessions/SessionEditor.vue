@@ -8,12 +8,14 @@ import type {
 } from "@birdbox/contracts/inventory";
 import type {
   ChangeEvent,
+  SessionMutationRequest,
   SessionApplyResponse,
   SessionDeleteResponse,
   SessionPreviewResponse,
 } from "@birdbox/contracts/api";
+import type { BgpSession } from "@birdbox/contracts/inventory";
 
-import { loadDashboard, setDashboardSnapshot, useDashboardStore } from "../dashboard/dashboard-store";
+import { loadDashboard, refreshDashboardRuntime, setDashboardSnapshot, useDashboardStore } from "../dashboard/dashboard-store";
 import { isEbgpDashboardPeer } from "../dashboard/peer-kind";
 import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import OptionalTextInput from "../shared/OptionalTextInput.vue";
@@ -40,6 +42,7 @@ const {
   lastPreviewSignature,
   lastPreviewFailureSignature,
   draftSignature,
+  resetDraft,
   sessionPayload,
 } = useSessionStore();
 const form = ref<HTMLFormElement | null>(null);
@@ -188,6 +191,95 @@ function currentPayloadSignature(): string | null {
   }
 }
 
+function storedSessionSignature(session: BgpSession | null): string | null {
+  if (!session) return null;
+  const { id: _id, managedBy: _managedBy, ...payload } = session;
+  return stableSignature(payload);
+}
+
+function stableSignature(value: unknown): string {
+  const normalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (!item || typeof item !== "object") return item;
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, normalize(child)]),
+    );
+  };
+  return JSON.stringify(normalize(value));
+}
+
+async function reconcileAppliedSession(
+  payload: SessionMutationRequest,
+  nodeId: string,
+  peerId: string,
+): Promise<boolean> {
+  const expected = stableSignature(payload);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+    try {
+      const snapshot = await refreshDashboardRuntime();
+      if (snapshot?.node?.id === nodeId
+        && snapshot.selectedPeer?.id === peerId
+        && storedSessionSignature(snapshot.selectedPeer.session) === expected) return true;
+    } catch {
+      // Retry while the controller or reverse proxy recovers.
+    }
+  }
+  return false;
+}
+
+function commitAppliedSession(result: SessionApplyResponse): void {
+  const current = dashboard.value;
+  if (!current) return;
+  const sessions = current.inventory.sessions.some((session) => session.id === result.session.id)
+    ? current.inventory.sessions.map((session) => session.id === result.session.id ? result.session : session)
+    : [...current.inventory.sessions, result.session];
+  const peers = current.peers.map((item) => item.id === result.session.peerId
+    ? {
+        ...item,
+        session: result.session,
+        protocol: result.session.enabled ? {
+          name: result.session.protocolName,
+          configured: true,
+          disabled: false,
+          state: "Starting",
+          established: false,
+          neighbor: item.address,
+          neighborAs: item.asn,
+          imported: null,
+          exported: null,
+        } : null,
+      }
+    : item);
+  const selectedPeer = peers.find((item) => item.id === current.selectedPeer?.id) ?? null;
+  const activeSessions = sessions.filter((session) => session.enabled).length;
+  const wasEstablished = current.peers.find((item) => item.id === result.session.peerId)?.protocol?.established === true;
+  const normalSessions = Math.min(
+    Math.max(0, current.health.normalSessions - (wasEstablished ? 1 : 0)),
+    activeSessions,
+  );
+  setDashboardSnapshot({
+    ...current,
+    inventory: { ...current.inventory, sessions },
+    peers,
+    selectedPeer,
+    config: result.config,
+    events: result.events,
+    health: {
+      ...current.health,
+      activeSessions,
+      normalSessions,
+      abnormalSessions: activeSessions - normalSessions,
+      status: current.health.onlineNodes < current.health.totalNodes
+        ? "error"
+        : activeSessions > normalSessions ? "warning" : "ready",
+    },
+  });
+  resetDraft();
+}
+
 async function preview(silent = false): Promise<boolean> {
   if (previewPending.value) {
     autoPreviewQueued = true;
@@ -276,11 +368,22 @@ async function applySession(): Promise<void> {
   const peerId = peer.value.id;
   try {
     const result = await api<SessionApplyResponse>("/api/sessions/apply", { method: "POST", body: JSON.stringify(payload) });
+    commitAppliedSession(result);
     dispatchToast(result.enabled === false
       ? "会话已停用"
       : result.established ? "BGP 会话已建立" : "配置已应用，正在等待远端 Peer", result.enabled === false || result.established ? "success" : "");
-    await loadDashboard(nodeId, peerId);
+    void refreshDashboardRuntime();
   } catch (error) {
+    if (error instanceof ApiError && error.unknownOutcome) {
+      dispatchToast(error.message);
+      if (await reconcileAppliedSession(payload, nodeId, peerId)) {
+        resetDraft();
+        dispatchToast("会话变更已生效，最新运行状态已同步", "success");
+      } else {
+        await presentError("连接中断，暂时无法确认会话变更结果；后台状态刷新仍会继续", false);
+      }
+      return;
+    }
     await loadDashboard(nodeId, peerId);
     await presentError(error instanceof Error ? error.message : "应用会话失败");
   } finally {

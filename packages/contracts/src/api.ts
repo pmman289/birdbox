@@ -101,6 +101,14 @@ export interface DashboardResponse {
   events: ChangeEvent[];
 }
 
+export interface DashboardRuntimeResponse {
+  nodeId: string;
+  runtime: NodeRuntime;
+  sessions: BgpSession[];
+  config: string;
+  events: ChangeEvent[];
+}
+
 export interface DeploymentReport {
   applied: boolean;
   nodeIds: string[];

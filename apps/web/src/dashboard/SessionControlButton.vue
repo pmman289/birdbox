@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
-import { loadDashboard, useDashboardStore } from "./dashboard-store";
+import { refreshDashboardRuntime, setSessionProtocolEnabled, useDashboardStore } from "./dashboard-store";
 import { isEbgpDashboardPeer } from "./peer-kind";
 import { api } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
@@ -31,13 +31,13 @@ async function control(): Promise<void> {
   if (!window.confirm(`${action === "enable" ? "启动" : "停止"} ${node.name} 上的 BGP 会话 ${selectedSession.protocolName}？`)) return;
   pending.value = true;
   try {
-    await api<SessionControlResponse>(`/api/sessions/${selectedSession.id}/control`, {
+    const result = await api<SessionControlResponse>(`/api/sessions/${selectedSession.id}/control`, {
       method: "POST",
       body: JSON.stringify({ action }),
     });
+    setSessionProtocolEnabled(selectedSession.id, result.enabled);
     dispatchToast(action === "enable" ? "BGP 会话已启动" : "BGP 会话已停止", "success");
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-    await loadDashboard(node.id, selectedPeer.id);
+    window.setTimeout(() => void refreshDashboardRuntime().catch(() => undefined), 1_500);
   } catch (error) {
     dispatchToast(error instanceof Error ? error.message : "更新 BGP 会话状态失败", "error");
   } finally {

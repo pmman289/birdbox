@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 
-import type { ChangeEvent, RouteDetailsResponse } from "../../packages/contracts/src/api.js";
+import type { ChangeEvent, DashboardRuntimeResponse, RouteDetailsResponse } from "../../packages/contracts/src/api.js";
 import type { Inventory, ManagedNode } from "../../packages/contracts/src/inventory.js";
 import type { AuthStore } from "../auth.js";
-import { inspectProtocolRoutes, setProtocolState } from "../bird.js";
+import { inspectNode, inspectProtocolRoutes, setProtocolState } from "../bird.js";
+import { configForNode } from "../inventory-domain.js";
 import type { InventoryStore } from "../store.js";
 import { requestSessionToken, sessionCookie } from "./auth-routes.js";
 
@@ -59,6 +60,20 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
     return jsonReply(reply, 401, { error: "请先登录", code: "AUTH_REQUIRED" }, {
       "set-cookie": sessionCookie(request, "", options.secureCookieSetting, 0),
     });
+  });
+
+  app.get<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/runtime", async (request, reply) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.params.nodeId)) throw routeError(404, "接口不存在");
+    const state = await options.store.read();
+    const node = findNode(state, request.params.nodeId);
+    const payload: DashboardRuntimeResponse = {
+      nodeId: node.id,
+      runtime: await inspectNode(node),
+      sessions: state.sessions.filter((session) => session.nodeId === node.id),
+      config: configForNode(state, node),
+      events: options.getEvents(),
+    };
+    return jsonReply(reply, 200, payload);
   });
 
   app.get<{

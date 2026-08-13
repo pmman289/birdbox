@@ -6,7 +6,7 @@ Birdbox 的迁移必须原位兼容现有用户数据。禁止要求用户清空
 
 | 数据 | 权威位置 | 当前版本 | 兼容入口 |
 | --- | --- | ---: | --- |
-| 库存 | MySQL `birdbox_state:inventory` | 20 | `InventoryStore` |
+| 库存 | MySQL `birdbox_state:inventory` | 27 | `InventoryStore` |
 | 认证 | MySQL `birdbox_state:auth` | 2 | `AuthStore` |
 | 数据库结构 | `birdbox_schema_migrations` | 1 | `MySqlDatabase` |
 | 部署恢复日志 | MySQL `birdbox_state:deployment_journal` | 1 | deployment service |
@@ -15,7 +15,7 @@ Birdbox 的迁移必须原位兼容现有用户数据。禁止要求用户清空
 
 ## 必须保持的兼容性
 
-- 库存版本 2、8、10、14、18、19 和 20 必须可升级到当前版本。
+- 库存版本 2、8、10、14、18、19、20、22、23、25 和 26 必须可升级到当前版本。
 - v18 及更早的 Session Static 配置必须迁移为节点级 Static 资源。
 - 旧 prefix list、Define 顺序、Function 顺序、组合策略和导出策略引用必须保留。
 - 认证 v1 的有效 token 在数据库内升级时保持有效；从旧 JSON 导入时必须主动失效，避免复制文件后复用登录。

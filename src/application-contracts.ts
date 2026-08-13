@@ -37,6 +37,8 @@ export interface MutationService {
     body: Record<string, unknown>,
   ): Promise<MutationResult>;
   deletePolicy(collection: PolicyCollection, resourceId: string): Promise<MutationResult>;
+  resolveIrrDefine(body: Record<string, unknown>): Promise<MutationResult>;
+  syncIrrDefine(resourceId: string): Promise<MutationResult>;
   previewSession(body: Record<string, unknown>): Promise<MutationResult>;
   applySession(body: Record<string, unknown>): Promise<MutationResult>;
   deleteSession(sessionId: string): Promise<MutationResult>;

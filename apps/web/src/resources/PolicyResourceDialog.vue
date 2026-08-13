@@ -32,6 +32,14 @@ interface Draft {
   label: string;
   name: string;
   source: string;
+  entrySourceKind: "manual" | "irr-as-set";
+  asSet: string;
+  server: string;
+  databases: string;
+  refreshIntervalSeconds: number;
+  prefixLimit: number;
+  allowMoreSpecific: boolean;
+  sync: Record<string, unknown> | null;
   enabled: boolean;
 }
 
@@ -47,6 +55,7 @@ const editor = ref<HTMLTextAreaElement | null>(null);
 const editingId = ref<string | null>(null);
 const collection = ref<PolicyCollection>("defines");
 const pending = ref(false);
+const resolving = ref(false);
 const search = ref("");
 const line = ref(1);
 const column = ref(1);
@@ -61,6 +70,14 @@ const draft = reactive<Draft>({
   label: "",
   name: "",
   source: "",
+  entrySourceKind: "manual",
+  asSet: "",
+  server: "rr.ntt.net",
+  databases: "RIPE,ARIN,APNIC,LACNIC,AFRINIC",
+  refreshIntervalSeconds: 86400,
+  prefixLimit: 10000,
+  allowMoreSpecific: false,
+  sync: null,
   enabled: true,
 });
 
@@ -68,6 +85,7 @@ const editing = computed(() => editingId.value !== null);
 const kindLabel = computed(() => collection.value === "functions" ? "Function" : collection.value === "filters" ? "Filter" : "Define");
 const icon = computed(() => collection.value === "functions" ? "ƒ" : collection.value === "filters" ? "F" : "D");
 const isCidrDefine = computed(() => collection.value === "defines" && draft.type !== "expression");
+const isIrrDefine = computed(() => isCidrDefine.value && draft.entrySourceKind === "irr-as-set");
 const sourceLabel = computed(() => collection.value !== "defines" ? "源码" : draft.type === "cidr4" ? "IPv4 CIDR 条目" : draft.type === "cidr6" ? "IPv6 CIDR 条目" : "值 / 表达式");
 const sourcePlaceholder = computed(() => collection.value === "functions"
   ? "function allow_route()\n{\n  return true;\n}"
@@ -126,6 +144,10 @@ const fieldMappings = [
   [/显示名称/, "policyResourceLabel"],
   [/BIRD 全局标识符冲突|BIRD .*名称|Define 名称|策略名称|声明开始/, "policyResourceName"],
   [/CIDR 列表|Define 表达式|策略源码|源码|顶层声明|花括号|括号|依赖形成循环|声明顺序/, "policyResourceSource"],
+  [/AS-SET/, "policyResourceAsSet"],
+  [/IRR Server/, "policyResourceIrrServer"],
+  [/Database/, "policyResourceIrrDatabases"],
+  [/前缀上限/, "policyResourcePrefixLimit"],
 ] as const;
 
 function defaultSource(kind: PolicyCollection, name: string): string {
@@ -180,6 +202,15 @@ function open(nextCollection: PolicyCollection, resource: PolicyResource | null)
   draft.label = resource?.label ?? resource?.name ?? "";
   draft.name = resource?.name ?? "";
   draft.source = resource ? resourceSource(resource) : "";
+  const cidr = resource && "type" in resource && resource.type !== "expression" ? resource : null;
+  draft.entrySourceKind = cidr?.entrySource.kind ?? "manual";
+  draft.asSet = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.asSet : "";
+  draft.server = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.server : "rr.ntt.net";
+  draft.databases = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.databases.join(",") : "RIPE,ARIN,APNIC,LACNIC,AFRINIC";
+  draft.refreshIntervalSeconds = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.refreshIntervalSeconds : 86400;
+  draft.prefixLimit = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.prefixLimit : 10000;
+  draft.allowMoreSpecific = cidr?.entrySource.kind === "irr-as-set" ? cidr.entrySource.allowMoreSpecific : false;
+  draft.sync = cidr?.sync ? { ...cidr.sync } : null;
   draft.enabled = resource?.enabled ?? true;
   nameEdited.value = Boolean(resource);
   sourceEdited.value = Boolean(resource);
@@ -292,7 +323,19 @@ async function save(): Promise<void> {
         name: draft.name,
         enabled: draft.enabled,
         type: draft.type,
-        ...(isCidrDefine.value ? { entries: draft.source } : { value: draft.source }),
+        ...(isCidrDefine.value ? {
+          entries: draft.source,
+          entrySource: draft.entrySourceKind === "manual" ? { kind: "manual" } : {
+            kind: "irr-as-set",
+            asSet: draft.asSet,
+            server: draft.server,
+            databases: draft.databases.split(",").map((item) => item.trim()).filter(Boolean),
+            refreshIntervalSeconds: draft.refreshIntervalSeconds,
+            prefixLimit: draft.prefixLimit,
+            allowMoreSpecific: draft.allowMoreSpecific,
+          },
+          ...(draft.sync ? { sync: draft.sync } : {}),
+        } : { value: draft.source }),
       }
     : { nodeIds: draft.nodeIds, label: draft.label, name: draft.name, enabled: draft.enabled, source: draft.source };
   try {
@@ -310,6 +353,48 @@ async function save(): Promise<void> {
   } finally {
     pending.value = false;
   }
+}
+
+async function resolvePreview(): Promise<void> {
+  if (!form.value || !validateForm(form.value)) return;
+  resolving.value = true;
+  try {
+    const result = await api<{ entries: string[]; count: number }>("/api/defines/irr/resolve", {
+      method: "POST",
+      body: JSON.stringify({
+        type: draft.type,
+        entrySource: {
+          kind: "irr-as-set", asSet: draft.asSet, server: draft.server,
+          databases: draft.databases.split(",").map((item) => item.trim()).filter(Boolean),
+          prefixLimit: draft.prefixLimit, allowMoreSpecific: draft.allowMoreSpecific,
+        },
+      }),
+    });
+    draft.source = result.entries.join("\n");
+    dispatchToast(`测试展开成功，共 ${result.count} 条前缀`, "success");
+  } catch (error) { presentFormError(form.value, error, fieldMappings); }
+  finally { resolving.value = false; }
+}
+
+async function syncNow(): Promise<void> {
+  if (!editingId.value) return;
+  pending.value = true;
+  try {
+    const result = await api<ResourceMutationResponse<PolicyDefine> & { changed: boolean }>(`/api/defines/${encodeURIComponent(editingId.value)}/sync`, { method: "POST" });
+    await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
+    const resource = result.resource;
+    if (resource.type !== "expression") {
+      draft.source = resource.entries.join("\n");
+      draft.sync = { ...resource.sync };
+    }
+    dispatchToast(result.changed ? "AS-SET 快照已更新并应用" : "AS-SET 快照没有变化", "success");
+  } catch (error) {
+    await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null).catch(() => undefined);
+    const current = dashboard.value?.inventory.defines.find((item) => item.id === editingId.value);
+    if (current && current.type !== "expression") draft.sync = { ...current.sync };
+    presentFormError(form.value!, error, fieldMappings);
+  }
+  finally { pending.value = false; }
 }
 
 async function remove(): Promise<void> {
@@ -359,13 +444,24 @@ onBeforeUnmount(() => {
       <div class="dialog-grid">
         <MultiNodeScopeField id="policyResourceNodeScope" v-model="draft.nodeIds" :nodes="nodes" :invalid="scopeError" @change="scopeError = false" />
         <div v-if="collection === 'defines'" id="policyResourceTypeField" class="field"><label for="policyResourceType">Define 类型</label><select id="policyResourceType" v-model="draft.type" @change="changeType"><option value="cidr4">IPv4 CIDR 列表</option><option value="cidr6">IPv6 CIDR 列表</option><option value="expression">表达式</option></select></div>
+        <div v-if="isCidrDefine" class="field"><label for="policyResourceEntrySource">条目来源</label><select id="policyResourceEntrySource" v-model="draft.entrySourceKind"><option value="manual">手工填写</option><option value="irr-as-set">AS-SET 自动展开</option></select></div>
         <div id="policyResourceLabelField" class="field"><label for="policyResourceLabel">显示名称 / 备注</label><input id="policyResourceLabel" v-model.trim="draft.label" maxlength="80" required placeholder="例如：上游导入优先级" @input="syncName"></div>
         <div class="field full-width"><label for="policyResourceName">BIRD 名称（自动，可编辑）</label><input id="policyResourceName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" required @input="nameEdited = true"></div>
+        <template v-if="isIrrDefine">
+          <div class="field"><label for="policyResourceAsSet">AS-SET</label><input id="policyResourceAsSet" v-model.trim="draft.asSet" required placeholder="AS219332:AS-PMMAN"></div>
+          <div class="field"><label for="policyResourceIrrServer">IRR Server</label><input id="policyResourceIrrServer" v-model.trim="draft.server" required placeholder="rr.ntt.net"></div>
+          <div class="field full-width"><label for="policyResourceIrrDatabases">IRR Databases（逗号分隔，留空使用服务器默认）</label><input id="policyResourceIrrDatabases" v-model.trim="draft.databases" placeholder="RIPE,ARIN,APNIC"></div>
+          <div class="field"><label for="policyResourceRefreshInterval">刷新间隔（秒）</label><input id="policyResourceRefreshInterval" v-model.number="draft.refreshIntervalSeconds" type="number" min="900" max="2592000" required></div>
+          <div class="field"><label for="policyResourcePrefixLimit">前缀上限</label><input id="policyResourcePrefixLimit" v-model.number="draft.prefixLimit" type="number" min="1" max="100000" required></div>
+          <label class="toggle-row full-width" for="policyResourceMoreSpecific"><span><strong>允许匹配更具体前缀</strong></span><input id="policyResourceMoreSpecific" v-model="draft.allowMoreSpecific" type="checkbox"><i aria-hidden="true"></i></label>
+          <div class="irr-actions full-width"><button class="secondary-button" type="button" :disabled="pending || resolving" @click="resolvePreview">{{ resolving ? "正在展开" : "测试展开" }}</button><button v-if="editing" class="secondary-button" type="button" :disabled="pending || resolving" @click="syncNow">立即同步并应用</button><span>{{ draft.source ? `${draft.source.split('\n').filter(Boolean).length} 条前缀` : "尚无快照" }}</span></div>
+          <div v-if="draft.sync" class="irr-sync-status full-width" :class="String(draft.sync.status)"><strong>{{ draft.sync.status === 'error' ? '最近同步失败，节点继续使用旧快照' : '动态快照状态' }}</strong><span v-if="draft.sync.lastSuccessAt">最近成功：{{ new Date(String(draft.sync.lastSuccessAt)).toLocaleString() }}</span><span v-if="draft.sync.nextRefreshAt">下次刷新：{{ new Date(String(draft.sync.nextRefreshAt)).toLocaleString() }}</span><span v-if="draft.sync.error">{{ draft.sync.error }}</span></div>
+        </template>
         <div id="policyResourceSourceField" class="field full-width">
           <label id="policyResourceSourceLabel" for="policyResourceSource">{{ sourceLabel }}</label>
           <div class="code-input">
             <pre id="policySourceLines" class="code-input-lines" aria-hidden="true">{{ lineNumbers }}</pre>
-            <textarea id="policyResourceSource" ref="editor" v-model="draft.source" class="policy-source-editor" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" required :placeholder="sourcePlaceholder" @input="sourceEdited = true; updateCursor()" @keydown="handleEditorKeydown" @click="updateCursor" @keyup="updateCursor"></textarea>
+            <textarea id="policyResourceSource" ref="editor" v-model="draft.source" class="policy-source-editor" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" :required="!isIrrDefine" :readonly="isIrrDefine" :placeholder="isIrrDefine ? '点击测试展开查看前缀快照' : sourcePlaceholder" @input="sourceEdited = true; updateCursor()" @keydown="handleEditorKeydown" @click="updateCursor" @keyup="updateCursor"></textarea>
             <div class="code-input-status"><span>BIRD</span><span id="policySourcePosition">Ln {{ line }}, Col {{ column }}</span></div>
           </div>
           <div v-if="!isCidrDefine" id="policySourceReferencePanel" class="code-references">

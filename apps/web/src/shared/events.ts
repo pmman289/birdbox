@@ -54,7 +54,7 @@ declare global {
     "birdbox:resource-tab-select": CustomEvent<{ target: ResourceWorkspaceTarget }>;
     "birdbox:mutation-start": CustomEvent<MutationStartEventDetail>;
     "birdbox:mutation-end": CustomEvent<{ requestId: number }>;
-    "birdbox:unknown-mutation-outcome": CustomEvent<void>;
+    "birdbox:unknown-mutation-outcome": CustomEvent<{ path: string; method: string }>;
     "birdbox:toast": CustomEvent<ToastEventDetail>;
     "birdbox:workspace-resource-open": CustomEvent<{ target: ResourceWorkspaceTarget }>;
   }

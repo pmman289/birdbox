@@ -6,11 +6,32 @@ import {
   normalizeMultiNodeResourceScope,
 } from "./bird-normalize-common.js";
 import { parseBirdPrefixEntries } from "./bird-prefix.js";
+import { createHash } from "node:crypto";
+import { isIrrAsSetName, normalizeIrrAsSetName } from "./irr-name.js";
 
 type UnknownRecord = Record<string, unknown>;
 type PolicyKind = "function" | "filter";
 
 const MAX_POLICY_SOURCE_LENGTH = 32 * 1024;
+const MAX_IRR_PREFIXES = 100_000;
+const MIN_IRR_REFRESH_SECONDS = (() => {
+  if (process.env.NODE_ENV !== "test") return 900;
+  const configured = Number(process.env.BIRDBOX_IRR_MIN_REFRESH_INTERVAL_SECONDS ?? 900);
+  return Number.isSafeInteger(configured) && configured >= 1 && configured <= 900 ? configured : 900;
+})();
+
+function integer(value: unknown, fallback: number, minimum: number, maximum: number, label: string): number {
+  const normalized = value === undefined || value === null || value === "" ? fallback : Number(value);
+  assertValidation(Number.isSafeInteger(normalized) && normalized >= minimum && normalized <= maximum, `${label}必须是 ${minimum} 到 ${maximum} 之间的整数`);
+  return normalized;
+}
+
+function nullableDate(value: unknown, label: string): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  const normalized = String(value);
+  assertValidation(!Number.isNaN(Date.parse(normalized)), `${label}不合法`);
+  return normalized;
+}
 const RESERVED_PROTOCOL_NAMES = new Set(["birdbox_device", "birdbox_static", "birdbox_static4", "birdbox_static6", "birdbox_bfd"]);
 
 function record(value: unknown, message: string): UnknownRecord {
@@ -81,7 +102,53 @@ export function normalizeDefine(inputValue: unknown): PolicyDefine {
     enabled: input.enabled !== false,
   };
   if (type === "expression") return { ...base, type, value: normalizeDefineValue(input.value) };
-  return { ...base, type, entries: parseBirdPrefixEntries(input.entries, prefixFamily(type)) };
+  const sourceInput = input.entrySource && typeof input.entrySource === "object" && !Array.isArray(input.entrySource)
+    ? input.entrySource as UnknownRecord
+    : { kind: "manual" };
+  const sourceKind = String(sourceInput.kind ?? "manual");
+  assertValidation(sourceKind === "manual" || sourceKind === "irr-as-set", "CIDR Define 条目来源不合法");
+  if (sourceKind === "manual") {
+    const entries = parseBirdPrefixEntries(input.entries, prefixFamily(type));
+    return {
+      ...base, type, entrySource: { kind: "manual" } as const, entries,
+      sync: { status: "ready" as const, lastAttemptAt: null, lastSuccessAt: null, nextRefreshAt: null, error: null, contentHash: createHash("sha256").update(entries.join("\n")).digest("hex") },
+    };
+  }
+  const asSet = normalizeIrrAsSetName(sourceInput.asSet);
+  const server = String(sourceInput.server ?? "rr.ntt.net").trim().toLowerCase();
+  assertValidation(isIrrAsSetName(asSet), "AS-SET 名称不合法");
+  assertValidation(/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])(?::[0-9]{1,5})?$/.test(server) && !/[\s'"`$\\]/.test(server), "IRR Server 不合法");
+  const databases = Array.isArray(sourceInput.databases)
+    ? sourceInput.databases.map((item) => String(item).trim().toUpperCase()).filter(Boolean)
+    : String(sourceInput.databases ?? "").split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);
+  assertValidation(databases.length <= 32 && databases.every((item) => /^[A-Z0-9_-]{1,32}$/.test(item)), "IRR Database 列表不合法");
+  const prefixLimit = integer(sourceInput.prefixLimit, 10_000, 1, MAX_IRR_PREFIXES, "前缀上限");
+  const entries = parseBirdPrefixEntries(input.entries, prefixFamily(type), MAX_IRR_PREFIXES);
+  assertValidation(entries.length <= prefixLimit, `AS-SET 展开结果超过用户设置的 ${prefixLimit} 条前缀上限`);
+  const syncInput = input.sync && typeof input.sync === "object" && !Array.isArray(input.sync) ? input.sync as UnknownRecord : {};
+  const status = syncInput.status === "error" || syncInput.status === "ready" ? syncInput.status : "never";
+  return {
+    ...base,
+    type,
+    entrySource: {
+      kind: "irr-as-set" as const,
+      asSet,
+      server,
+      databases,
+      refreshIntervalSeconds: integer(sourceInput.refreshIntervalSeconds, 86400, MIN_IRR_REFRESH_SECONDS, 2_592_000, "刷新间隔"),
+      prefixLimit,
+      allowMoreSpecific: sourceInput.allowMoreSpecific === true,
+    },
+    entries,
+    sync: {
+      status,
+      lastAttemptAt: nullableDate(syncInput.lastAttemptAt, "最近尝试时间"),
+      lastSuccessAt: nullableDate(syncInput.lastSuccessAt, "最近成功时间"),
+      nextRefreshAt: nullableDate(syncInput.nextRefreshAt, "下次刷新时间"),
+      error: syncInput.error === null || syncInput.error === undefined ? null : String(syncInput.error).slice(0, 2048),
+      contentHash: syncInput.contentHash === null || syncInput.contentHash === undefined ? null : String(syncInput.contentHash),
+    },
+  };
 }
 
 function skipBirdTrivia(source: string, start = 0): number {

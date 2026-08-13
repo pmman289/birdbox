@@ -322,6 +322,24 @@ exit 0
   assert.doesNotMatch(appliedMessages, /正在检查 .*候选配置|候选配置检查通过|正在向 .*应用配置|BIRD 2 实例已接受配置/);
   assert.match(appliedMessages, /会话 preview_bgp 已停用/);
 
+  const enabledApplyStarted = Date.now();
+  const enabledSession = await authenticatedRequest("/api/sessions/apply", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeId,
+      peerId: peer.body.peer.id,
+      protocolName: "preview_bgp",
+      localAddress: "192.0.2.1",
+      localAsn: 65001,
+      localPort: 179,
+      enabled: true,
+    }),
+  });
+  assert.equal(enabledSession.status, 202);
+  assert.equal(enabledSession.body.applied, true);
+  assert.equal(enabledSession.body.established, false);
+  assert.ok(Date.now() - enabledApplyStarted < 5000, "会话应用接口不应等待 BGP 状态建立");
+
   const sshLogBeforeForce = await fs.readFile(fakeLog, "utf8");
   const forgotten = await authenticatedRequest(`/api/nodes/${nodeId}?force=true`, { method: "DELETE" });
   assert.equal(forgotten.status, 200);

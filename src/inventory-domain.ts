@@ -22,6 +22,7 @@ import {
   normalizePolicyFilter,
   normalizePolicyFunction,
   renderBirdConfig,
+  renderBirdConfigBundle,
 } from "./bird.js";
 import { fail } from "./errors.js";
 
@@ -130,6 +131,20 @@ export function resourceReferencesSymbol(
 
 export function configForNode(state: Inventory, node: ManagedNode): string {
   return renderBirdConfig(
+    node,
+    nodePeers(state, node.id),
+    nodeSessions(state, node.id),
+    nodePolicyResources(state, "functions", node.id),
+    nodePolicyResources(state, "filters", node.id),
+    nodePolicyResources(state, "defines", node.id),
+    nodeRPKIResources(state, node.id),
+    nodeStaticProtocols(state, node.id),
+    nodeSourcePolicies(state, node.id),
+  );
+}
+
+export function configBundleForNode(state: Inventory, node: ManagedNode) {
+  return renderBirdConfigBundle(
     node,
     nodePeers(state, node.id),
     nodeSessions(state, node.id),

@@ -46,7 +46,7 @@ function resource(overrides = {}) {
 
 function inventory(overrides = {}) {
   return {
-    version: 26,
+    version: 27,
     nodes: [local, remote],
     peers: [],
     defines: [],
