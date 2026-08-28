@@ -154,6 +154,8 @@ test("supports password setup and manages multiple active admin sessions", async
   assert.match(setupScript.body.script, /init 脚本已恢复/);
   assert.doesNotMatch(setupScript.body.script, /REQUIRED_COMMAND in[^\n]*\binstall\b/);
   assert.match(setupScript.body.script, /runuser -u "\$BIRDBOX_USER"/);
+  assert.match(setupScript.body.script, /setpriv --reuid="\$BIRDBOX_USER_ID"/);
+  assert.match(setupScript.body.script, /OpenWrt 未提供 runuser\/su/);
   assert.match(setupScript.body.script, /无法执行登录 Shell/);
   assert.match(setupScript.body.script, /\/usr\/bin 通常应为 0755/);
   assert.match(setupScript.body.script, /file_gid\(\)/);

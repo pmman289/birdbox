@@ -313,6 +313,15 @@ elif command -v su >/dev/null 2>&1; then
     echo "$BIRDBOX_USER 无法执行登录 Shell $USER_SHELL；请检查 Shell 文件及其父目录权限（例如 /usr/bin 通常应为 0755）" >&2
     exit 1
   }
+elif command -v setpriv >/dev/null 2>&1; then
+  setpriv --reuid="$BIRDBOX_USER_ID" --regid="$PRIMARY_GROUP_ID" --init-groups "$USER_SHELL" -c ':' >/dev/null 2>&1 || {
+    echo "$BIRDBOX_USER 无法执行登录 Shell $USER_SHELL；请检查 Shell 文件及其父目录权限（例如 /usr/bin 通常应为 0755）" >&2
+    exit 1
+  }
+elif [ "$IS_OPENWRT" -eq 1 ]; then
+  # 精简版 OpenWrt 常不包含 su/runuser；Dropbear 会直接按 passwd 中的
+  # Shell 启动会话，因此前面的路径、权限和 /etc/shells 校验已足够。
+  echo "OpenWrt 未提供 runuser/su，已跳过切换用户 Shell 验证；Dropbear 将使用 $USER_SHELL 启动 $BIRDBOX_USER 会话" >&2
 else
   echo "无法验证 $BIRDBOX_USER 的登录 Shell：缺少 runuser/su" >&2
   exit 1
