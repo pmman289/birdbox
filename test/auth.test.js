@@ -156,6 +156,9 @@ test("supports password setup and manages multiple active admin sessions", async
   assert.match(setupScript.body.script, /runuser -u "\$BIRDBOX_USER"/);
   assert.match(setupScript.body.script, /无法执行登录 Shell/);
   assert.match(setupScript.body.script, /\/usr\/bin 通常应为 0755/);
+  assert.match(setupScript.body.script, /file_gid\(\)/);
+  assert.match(setupScript.body.script, /ls -ldn/);
+  assert.doesNotMatch(setupScript.body.script, /for REQUIRED_COMMAND in[^\n]*\bstat\b/);
   assert.match(setupScript.body.script, /BACKUP_CANDIDATE=\$\(mktemp/);
   assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" 'configure check'/);
   assert.match(setupScript.body.script, /birdc -s "\$SOCKET_PATH" configure/);

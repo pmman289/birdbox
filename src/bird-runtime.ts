@@ -59,6 +59,18 @@ const OPENSSH_INFORMATION_LINES = new Set([
   "** The server may need to be upgraded. See https://openssh.com/pq.html",
 ]);
 
+// OpenWrt BusyBox images may omit the stat applet. Keep ownership discovery
+// numeric so resource deployment can still use chgrp with the socket GID.
+const REMOTE_FILE_GID_HELPER = `
+file_gid() {
+  if command -v stat >/dev/null 2>&1; then
+    stat -c '%g' "$1"
+  else
+    LC_ALL=C ls -ldn "$1" | awk 'NR == 1 { print $4; exit }'
+  fi
+}
+`.trim();
+
 let managedSshConfiguration: ManagedSshConfiguration = { identityFile: null, knownHostsFile: null };
 
 function commandStderr(node: ManagedNode, value: unknown): string {
@@ -337,7 +349,8 @@ async function stageResourceFiles(node: ManagedNode, bundle: NodeConfigBundle, b
     const versionPath = `${versionDirectory}/${versionName}`;
     const result = await runOnNode(node, [
       "set -eu", "umask 0077",
-      `if [ -S '${node.socketPath}' ]; then bird_group=$(stat -c '%G' '${node.socketPath}'); else bird_group=$(id -gn bird); fi`,
+      REMOTE_FILE_GID_HELPER,
+      `if [ -S '${node.socketPath}' ]; then bird_group=$(file_gid '${node.socketPath}'); else bird_group=$(id -g bird); fi`,
       `mkdir -p '${versionDirectory}'`,
       `chgrp "$bird_group" '${resourceDirectory}' '${versionDirectory}'`,
       `chmod 0750 '${resourceDirectory}' '${versionDirectory}'`,
@@ -411,8 +424,9 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
       `test -S '${node.socketPath}'`,
       `test -L '${activePath}'`,
       `test -w '${directory}'`,
-      `bird_group=$(stat -c '%G' '${node.socketPath}')`,
-      `test -n "$bird_group" && test "$bird_group" != UNKNOWN`,
+      REMOTE_FILE_GID_HELPER,
+      `bird_group=$(file_gid '${node.socketPath}')`,
+      `test -n "$bird_group" && test "$bird_group" != 0`,
       `mkdir -p '${directory}/versions'`,
       `chgrp "$bird_group" '${directory}/versions'`,
       `chmod 0750 '${directory}/versions'`,

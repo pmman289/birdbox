@@ -166,13 +166,46 @@ fi
 ${rpkiPreflight}
 test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }
 test -S "$SOCKET_PATH" || { echo "BIRD Socket 不存在：$SOCKET_PATH" >&2; exit 1; }
-for REQUIRED_COMMAND in birdc stat mkdir mktemp awk grep chown chmod cp mv ln readlink id cut tr; do
+for REQUIRED_COMMAND in birdc mkdir mktemp awk grep chown chgrp chmod cp mv ln readlink id cut tr ls; do
   command -v "$REQUIRED_COMMAND" >/dev/null 2>&1 || { echo "缺少 $REQUIRED_COMMAND 命令" >&2; exit 1; }
 done
-BIRD_SOCKET_GROUP=$(stat -c '%G' "$SOCKET_PATH")
-BIRD_SOCKET_GROUP_ID=$(stat -c '%g' "$SOCKET_PATH")
+
+file_uid() {
+  if command -v stat >/dev/null 2>&1; then
+    stat -c '%u' "$1"
+  else
+    LC_ALL=C ls -ldn "$1" | awk 'NR == 1 { print $3; exit }'
+  fi
+}
+
+file_gid() {
+  if command -v stat >/dev/null 2>&1; then
+    stat -c '%g' "$1"
+  else
+    LC_ALL=C ls -ldn "$1" | awk 'NR == 1 { print $4; exit }'
+  fi
+}
+
+group_name_for_id() {
+  awk -F: -v group_id="$1" '$3 == group_id { print $1; exit }' /etc/group
+}
+
+file_group_name() {
+  if command -v stat >/dev/null 2>&1; then
+    stat -c '%G' "$1"
+  else
+    group_name_for_id "$(file_gid "$1")"
+  fi
+}
+
+file_owned_by() {
+  [ "$(file_uid "$1")" = "$2" ] && [ "$(file_gid "$1")" = "$3" ]
+}
+
+BIRD_SOCKET_GROUP_ID=$(file_gid "$SOCKET_PATH")
+BIRD_SOCKET_GROUP=$(file_group_name "$SOCKET_PATH")
 case "$BIRD_SOCKET_GROUP" in
-  ''|UNKNOWN) echo "无法识别 BIRD Socket 用户组" >&2; exit 1 ;;
+  ''|UNKNOWN) echo "无法根据 GID $BIRD_SOCKET_GROUP_ID 识别 BIRD Socket 用户组" >&2; exit 1 ;;
 esac
 if { [ "$BIRD_SOCKET_GROUP" = root ] || [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; } && [ "$IS_OPENWRT" -ne 1 ]; then
   echo "BIRD Socket 不能使用 root 用户组，请先为 BIRD 配置专用控制组" >&2
@@ -205,6 +238,7 @@ if ! id "$BIRDBOX_USER" >/dev/null 2>&1; then
 fi
 id "$BIRDBOX_USER" >/dev/null 2>&1 || { echo "创建用户 $BIRDBOX_USER 失败" >&2; exit 1; }
 [ "$(id -u "$BIRDBOX_USER")" -ne 0 ] || { echo "Birdbox SSH 用户不能是 root" >&2; exit 1; }
+BIRDBOX_USER_ID=$(id -u "$BIRDBOX_USER")
 
 if command -v getent >/dev/null 2>&1; then
   PASSWD_ENTRY=$(getent passwd "$BIRDBOX_USER")
@@ -214,6 +248,7 @@ fi
 HOME_DIR=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f6)
 USER_SHELL=$(printf '%s\n' "$PASSWD_ENTRY" | cut -d: -f7)
 PRIMARY_GROUP=$(id -gn "$BIRDBOX_USER")
+PRIMARY_GROUP_ID=$(id -g "$BIRDBOX_USER")
 if [ "$IS_OPENWRT" -eq 1 ]; then
   case "$HOME_DIR" in
     /var/*|/tmp/*)
@@ -285,6 +320,7 @@ fi
 
 if [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; then
   BIRD_GROUP="$PRIMARY_GROUP"
+  BIRD_GROUP_ID="$PRIMARY_GROUP_ID"
   BIRD_INIT=/etc/init.d/bird
   test -f "$BIRD_INIT" || { echo "无法适配 OpenWrt BIRD 控制组：缺少 $BIRD_INIT" >&2; exit 1; }
   if grep -Eq '^[[:space:]]*procd_set_param[[:space:]]+command.*[[:space:]]-g[[:space:]]' "$BIRD_INIT"; then
@@ -322,7 +358,7 @@ if [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; then
   ATTEMPT=0
   while [ "$ATTEMPT" -lt 10 ]; do
     if [ -S "$SOCKET_PATH" ] \
-      && [ "$(stat -c '%G' "$SOCKET_PATH")" = "$BIRD_GROUP" ] \
+      && [ "$(file_gid "$SOCKET_PATH")" = "$BIRD_GROUP_ID" ] \
       && birdc -s "$SOCKET_PATH" 'show status' >/dev/null 2>&1; then
       SOCKET_READY=1
       break
@@ -340,9 +376,10 @@ if [ "$BIRD_SOCKET_GROUP_ID" = 0 ]; then
   rm -f "$INIT_BACKUP"
 else
   BIRD_GROUP="$BIRD_SOCKET_GROUP"
+  BIRD_GROUP_ID="$BIRD_SOCKET_GROUP_ID"
 fi
 
-if ! id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null 2>&1; then
+if ! id -G "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP_ID" >/dev/null 2>&1; then
   if command -v usermod >/dev/null 2>&1; then
     usermod -a -G "$BIRD_GROUP" "$BIRDBOX_USER"
   elif command -v addgroup >/dev/null 2>&1; then
@@ -354,7 +391,7 @@ if ! id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null
     exit 1
   fi
 fi
-id -nG "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP" >/dev/null 2>&1 || {
+id -G "$BIRDBOX_USER" | tr ' ' '\n' | grep -Fx -- "$BIRD_GROUP_ID" >/dev/null 2>&1 || {
   echo "$BIRDBOX_USER 未成功加入 $BIRD_GROUP 用户组" >&2
   exit 1
 }
@@ -365,7 +402,7 @@ if [ -L "$CONFIG_DIR" ]; then
 fi
 if [ -e "$CONFIG_DIR" ]; then
   test -d "$CONFIG_DIR" || { echo "$CONFIG_DIR 不是目录" >&2; exit 1; }
-  [ "$(stat -c '%U:%G' "$CONFIG_DIR")" = "$BIRDBOX_USER:$BIRD_GROUP" ] || {
+  file_owned_by "$CONFIG_DIR" "$BIRDBOX_USER_ID" "$BIRD_GROUP_ID" || {
     echo "$CONFIG_DIR 已存在但不属于 $BIRDBOX_USER:$BIRD_GROUP，拒绝接管" >&2
     exit 1
   }
@@ -379,7 +416,7 @@ if [ -L "$CONFIG_DIR/versions" ]; then
 fi
 if [ -e "$CONFIG_DIR/versions" ]; then
   test -d "$CONFIG_DIR/versions" || { echo "$CONFIG_DIR/versions 不是目录" >&2; exit 1; }
-  [ "$(stat -c '%U:%G' "$CONFIG_DIR/versions")" = "$BIRDBOX_USER:$BIRD_GROUP" ] || {
+  file_owned_by "$CONFIG_DIR/versions" "$BIRDBOX_USER_ID" "$BIRD_GROUP_ID" || {
     echo "$CONFIG_DIR/versions 已存在但不属于 $BIRDBOX_USER:$BIRD_GROUP，拒绝接管" >&2
     exit 1
   }
@@ -409,7 +446,7 @@ fi
 test ! -L "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 目录不能是符号链接" >&2; exit 1; }
 if [ -e "$HOME_DIR" ]; then
   test -d "$HOME_DIR" || { echo "$BIRDBOX_USER 的 Home 路径不是目录" >&2; exit 1; }
-  [ "$(stat -c '%U' "$HOME_DIR")" = "$BIRDBOX_USER" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
+  [ "$(file_uid "$HOME_DIR")" = "$BIRDBOX_USER_ID" ] || { echo "$BIRDBOX_USER 的 Home 目录属主不正确" >&2; exit 1; }
 else
   mkdir -p "$HOME_DIR"
   chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR"
@@ -420,7 +457,7 @@ if [ -L "$HOME_DIR/.ssh" ]; then
   exit 1
 elif [ -e "$HOME_DIR/.ssh" ]; then
   test -d "$HOME_DIR/.ssh" || { echo "$HOME_DIR/.ssh 不是目录" >&2; exit 1; }
-  [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh 属主不正确" >&2; exit 1; }
+  file_owned_by "$HOME_DIR/.ssh" "$BIRDBOX_USER_ID" "$PRIMARY_GROUP_ID" || { echo "$HOME_DIR/.ssh 属主不正确" >&2; exit 1; }
 else
   mkdir -p "$HOME_DIR/.ssh"
   chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR/.ssh"
@@ -431,7 +468,7 @@ if [ -L "$HOME_DIR/.ssh/authorized_keys" ]; then
   exit 1
 elif [ -e "$HOME_DIR/.ssh/authorized_keys" ]; then
   test -f "$HOME_DIR/.ssh/authorized_keys" || { echo "$HOME_DIR/.ssh/authorized_keys 不是普通文件" >&2; exit 1; }
-  [ "$(stat -c '%U:%G' "$HOME_DIR/.ssh/authorized_keys")" = "$BIRDBOX_USER:$PRIMARY_GROUP" ] || { echo "$HOME_DIR/.ssh/authorized_keys 属主不正确" >&2; exit 1; }
+  file_owned_by "$HOME_DIR/.ssh/authorized_keys" "$BIRDBOX_USER_ID" "$PRIMARY_GROUP_ID" || { echo "$HOME_DIR/.ssh/authorized_keys 属主不正确" >&2; exit 1; }
 else
   : > "$HOME_DIR/.ssh/authorized_keys"
   chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$HOME_DIR/.ssh/authorized_keys"
