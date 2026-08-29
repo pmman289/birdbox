@@ -857,8 +857,8 @@ onBeforeUnmount(() => {
                   draft.members.find((member) => member.nodeId === node.id)?.address
                 }}</small></span>
                 <span class="quick-node-meta">
-                  <span v-if="connectionTo(node.id)" :class="['ibgp-status', sessionStatusClass(sessionDrafts[connectionTo(node.id)!.leftSessionId])]">
-                    <i />{{ sessionStatus(sessionDrafts[connectionTo(node.id)!.leftSessionId]) }}
+                  <span v-if="connectionTo(node.id)" :class="['ibgp-status', sessionStatusClass(sessionDrafts[connectionTo(node.id)!.leftSessionId] ?? null)]">
+                    <i />{{ sessionStatus(sessionDrafts[connectionTo(node.id)!.leftSessionId] ?? null) }}
                   </span>
                   <span>{{ connectionTo(node.id) ? "编辑双端配置" : "建立连接" }}</span>
                 </span></button
