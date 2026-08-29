@@ -124,18 +124,27 @@ export function expandIbgpDomain(
       { side: "left" as const, local: left, remote: right, sessionId: adjacency.leftSessionId, peerId: `${adjacency.id}_peer_left` },
       { side: "right" as const, local: right, remote: left, sessionId: adjacency.rightSessionId, peerId: `${adjacency.id}_peer_right` },
     ];
+    const oldLeft = existing.get(adjacency.leftSessionId);
+    const oldRight = existing.get(adjacency.rightSessionId);
     for (const item of sides) {
       const localNode = nodeMap.get(item.local.nodeId);
       const remoteNode = nodeMap.get(item.remote.nodeId);
       assertValidation(localNode, "iBGP 成员节点不存在");
       assertValidation(remoteNode, "iBGP 对端节点不存在");
+      const remoteSession = item.side === "left" ? oldRight : oldLeft;
       const peer = {
         id: item.peerId,
         nodeId: item.local.nodeId,
         name: peerName(domain, item.remote.nodeId),
         address: item.remote.address,
         asn: domain.asn,
-        port: normalizePort(item.remote.nodeId === item.local.nodeId ? null : nodeMap.get(item.remote.nodeId)?.listenPort, "远端 BGP 端口", 179),
+        port: normalizePort(
+          item.remote.nodeId === item.local.nodeId
+            ? null
+            : remoteSession?.localPort ?? nodeMap.get(item.remote.nodeId)?.listenPort,
+          "远端 BGP 端口",
+          179,
+        ),
         managedBy: { kind: "ibgp-domain" as const, domainId: domain.id, adjacencyId: adjacency.id },
       } satisfies Peer;
       const old = existing.get(item.sessionId);

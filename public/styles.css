@@ -1057,3 +1057,12 @@ dialog form { padding: 22px; }
   .ibgp-canvas { min-height: 420px; overflow: auto; }
   .quick-node-list { grid-template-columns: 1fr; }
 }
+.quick-node-meta { display: inline-flex; align-items: center; gap: 8px; }
+.ibgp-pair-status { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-left: auto; }
+.ibgp-status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
+.ibgp-status i { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; display: inline-block; }
+.ibgp-status.status-established { color: #15803d; }
+.ibgp-status.status-established i { background: #22c55e; }
+.ibgp-status.status-warning { color: #b45309; }
+.ibgp-status.status-warning i { background: #f59e0b; }
+.ibgp-status.status-unknown { color: #64748b; }

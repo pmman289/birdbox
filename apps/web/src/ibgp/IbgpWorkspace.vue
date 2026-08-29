@@ -17,6 +17,7 @@ import type {
   Peer,
   PolicyFunction,
 } from "@birdbox/contracts/inventory";
+import type { NodeRuntime } from "@birdbox/contracts/api";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
@@ -45,6 +46,8 @@ const previewValid = ref<boolean | null>(null);
 const previewError = ref("");
 const previewSides = ref<IbgpPreviewSide[]>([]);
 const inventorySnapshot = ref<Inventory | null>(null);
+const runtimeByNodeId = ref<Record<string, NodeRuntime>>({});
+let runtimeTimer: number | null = null;
 const policyActionDialog = ref<InstanceType<typeof PolicyActionDialog> | null>(
   null,
 );
@@ -114,6 +117,8 @@ function peerForSide(side: "left" | "right"): Peer | null {
   if (!domain || !adjacency || !session) return null;
   const remoteNodeId =
     side === "left" ? adjacency.rightNodeId : adjacency.leftNodeId;
+  const remoteSessionId =
+    side === "left" ? adjacency.rightSessionId : adjacency.leftSessionId;
   const remote = domain.members.find(
     (member) => member.nodeId === remoteNodeId,
   );
@@ -125,7 +130,7 @@ function peerForSide(side: "left" | "right"): Peer | null {
     name: remoteNode?.name ?? remoteNodeId,
     address: remote.address,
     asn: domain.asn,
-    port: remoteNode?.listenPort ?? 179,
+    port: sessionDrafts.value[remoteSessionId]?.localPort ?? remoteNode?.listenPort ?? 179,
     managedBy: session.managedBy,
   };
 }
@@ -143,6 +148,45 @@ const selectedPreviewSides = computed(() =>
     (item) => item.session.managedBy?.adjacencyId === selectedAdjacencyId.value,
   ),
 );
+
+function protocolRuntime(session: BgpSession | null): NodeRuntime["protocols"][number] | null {
+  if (!session) return null;
+  return runtimeByNodeId.value[session.nodeId]?.protocols.find(
+    (protocol) => protocol.name === session.protocolName,
+  ) ?? null;
+}
+
+function sessionStatus(session: BgpSession | null): string {
+  const protocol = protocolRuntime(session);
+  if (!protocol) return "未获取";
+  if (protocol.established) return "已建立";
+  if (protocol.state) return protocol.state;
+  return protocol.configured ? "未连接" : "未配置";
+}
+
+function sessionStatusClass(session: BgpSession | null): string {
+  const protocol = protocolRuntime(session);
+  if (protocol?.established) return "status-established";
+  if (protocol?.state?.toLowerCase() === "idle" || protocol?.state?.toLowerCase() === "active") return "status-warning";
+  return "status-unknown";
+}
+
+async function refreshIbgpRuntimes(): Promise<void> {
+  const domain = draft.value;
+  if (!domain || !domain.members.length) return;
+  const nodeIds = domain.members.map((member) => member.nodeId);
+  const results = await Promise.allSettled(
+    nodeIds.map((nodeId) => api<{ runtime: NodeRuntime }>(`/api/nodes/${encodeURIComponent(nodeId)}/runtime`)),
+  );
+  const next: Record<string, NodeRuntime> = {};
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled" && result.value.runtime) {
+      const nodeId = nodeIds[index];
+      if (nodeId) next[nodeId] = result.value.runtime;
+    }
+  });
+  runtimeByNodeId.value = next;
+}
 
 function previewForSession(sessionId: string): IbgpPreviewSide | null {
   return selectedPreviewSides.value.find((item) => item.session.id === sessionId) ?? null;
@@ -291,6 +335,7 @@ async function loadDomains(): Promise<void> {
     )
       selectDomain(selectedDomainId.value);
     else if (response.domains[0]) selectDomain(response.domains[0].id);
+    await refreshIbgpRuntimes();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "无法加载 iBGP 域";
   } finally {
@@ -316,6 +361,7 @@ function selectDomain(domainId: string): void {
   for (const adjacency of draft.value.adjacencies)
     ensureAdjacencySessions(adjacency);
   connectionSearch.value = "";
+  void refreshIbgpRuntimes();
 }
 
 function newDomain(): void {
@@ -327,6 +373,7 @@ function newDomain(): void {
   connectionSearch.value = "";
   previewSides.value = [];
   previewValid.value = null;
+  runtimeByNodeId.value = {};
 }
 
 async function saveDomain(): Promise<void> {
@@ -612,10 +659,14 @@ function handleAppReady(): void {
   void loadDomains();
 }
 
-onMounted(() => window.addEventListener("birdbox:app-ready", handleAppReady));
+onMounted(() => {
+  window.addEventListener("birdbox:app-ready", handleAppReady);
+  runtimeTimer = window.setInterval(() => void refreshIbgpRuntimes(), 10000);
+});
 onBeforeUnmount(() => {
   window.removeEventListener("birdbox:app-ready", handleAppReady);
   if (previewTimer !== null) window.clearTimeout(previewTimer);
+  if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
 });
 </script>
 
@@ -805,9 +856,12 @@ onBeforeUnmount(() => {
                 <span><strong>{{ node.name }}</strong><small>{{
                   draft.members.find((member) => member.nodeId === node.id)?.address
                 }}</small></span>
-                <span>{{
-                  connectionTo(node.id) ? "编辑双端配置" : "建立连接"
-                }}</span></button
+                <span class="quick-node-meta">
+                  <span v-if="connectionTo(node.id)" :class="['ibgp-status', sessionStatusClass(sessionDrafts[connectionTo(node.id)!.leftSessionId])]">
+                    <i />{{ sessionStatus(sessionDrafts[connectionTo(node.id)!.leftSessionId]) }}
+                  </span>
+                  <span>{{ connectionTo(node.id) ? "编辑双端配置" : "建立连接" }}</span>
+                </span></button
               ><button
                 v-if="connectionTo(node.id)"
                 class="compact-icon text-danger-button"
@@ -830,6 +884,10 @@ onBeforeUnmount(() => {
           <div>
             <h3>双端会话配置</h3>
             <span>{{ leftNode?.name }} ↔ {{ rightNode?.name }}</span>
+          </div>
+          <div v-if="selectedAdjacency" class="ibgp-pair-status">
+            <span :class="['ibgp-status', sessionStatusClass(leftSession)]"><i />{{ leftNode?.name }}：{{ sessionStatus(leftSession) }}</span>
+            <span :class="['ibgp-status', sessionStatusClass(rightSession)]"><i />{{ rightNode?.name }}：{{ sessionStatus(rightSession) }}</span>
           </div>
           <span
             :class="{

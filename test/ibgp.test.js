@@ -51,3 +51,17 @@ test("expands a manual iBGP adjacency into independently configurable equal-ASN 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.equal(inventory.ibgpDomains[0]?.id, "core");
 });
+
+test("maps each iBGP neighbor port to the opposite session local port", () => {
+  const domain = normalizeIbgpDomain({
+    id: "ports", name: "Port test", asn: 65000,
+    members: [{ nodeId: "rr", address: "192.0.2.1" }, { nodeId: "client", address: "192.0.2.2" }],
+    adjacencies: [{ id: "ports_adj", leftNodeId: "rr", rightNodeId: "client", leftSessionId: "ports_left", rightSessionId: "ports_right" }],
+  });
+  const initial = expandIbgpDomain(domain, nodes);
+  initial.sessions[0].localPort = 1179;
+  initial.sessions[1].localPort = 2179;
+  const expanded = expandIbgpDomain(domain, nodes, initial.sessions);
+  assert.equal(expanded.peers.find((peer) => peer.nodeId === "rr")?.port, 2179);
+  assert.equal(expanded.peers.find((peer) => peer.nodeId === "client")?.port, 1179);
+});
