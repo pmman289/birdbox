@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -56,6 +57,8 @@ function normalizeIrrSchedulerInterval(value: unknown): number {
 
 const rootDirectory = resolveApplicationRoot(import.meta.url);
 const publicDirectory = path.join(rootDirectory, "public");
+const packageDocument = JSON.parse(await fs.readFile(path.join(rootDirectory, "package.json"), "utf8")) as { version?: unknown };
+const appVersion = typeof packageDocument.version === "string" ? packageDocument.version : "dev";
 const dataDirectory = process.env.BIRDBOX_DATA_DIR ?? path.join(rootDirectory, "data");
 const nodesPath = process.env.BIRDBOX_NODES_FILE ?? path.join(rootDirectory, "config", "nodes.json");
 const host = normalizeListenHost(process.env.BIRDBOX_HOST ?? "0.0.0.0");
@@ -180,6 +183,7 @@ await deploymentService.recover();
 
 const app = await createHttpApplication({
   publicDirectory,
+  appVersion,
   authStore,
   store,
   secureCookieSetting,

@@ -15,6 +15,7 @@ import { sessionRuntimeRoutes } from "./session-runtime-routes.js";
 
 interface HttpApplicationOptions {
   publicDirectory: string;
+  appVersion: string;
   authStore: AuthStore;
   store: InventoryStore;
   secureCookieSetting: boolean | null;
@@ -80,12 +81,16 @@ async function serveStatic(
   reply: FastifyReply,
   publicDirectory: string,
   pathname: string,
+  appVersion: string,
 ): Promise<FastifyReply> {
   const requested = pathname === "/" ? "index.html" : pathname.slice(1);
   const normalized = path.normalize(requested);
   if (normalized.startsWith("..") || path.isAbsolute(normalized)) return reply.code(403).send();
   try {
-    const content = await fs.readFile(path.join(publicDirectory, normalized));
+    let content = await fs.readFile(path.join(publicDirectory, normalized));
+    if (normalized === "index.html") {
+      content = Buffer.from(content.toString("utf8").replaceAll("__BIRDBOX_VERSION__", encodeURIComponent(appVersion)));
+    }
     return reply.type(MIME_TYPES[path.extname(normalized)] ?? "application/octet-stream").send(content);
   } catch (error) {
     return reply.code((error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500).send();
@@ -125,7 +130,7 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     url: "/*",
     handler: async (request, reply) => {
       const url = new URL(request.raw.url ?? "/", "http://localhost");
-      return serveStatic(reply, options.publicDirectory, url.pathname);
+      return serveStatic(reply, options.publicDirectory, url.pathname, options.appVersion);
     },
   });
   app.setErrorHandler((error, request, reply) => {
