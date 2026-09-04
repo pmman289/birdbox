@@ -65,8 +65,8 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
         inventory: {
           version: 25,
           nodes: [
-            { id: "local", kind: "managed-node", name: "E2E Router", transport: "local", sshHost: null, sshPort: null, sshUser: null, sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/local.conf", socketPath: "/tmp/local.ctl", routerId: "192.0.2.1", listenPort: 179 },
-            { id: "edge", kind: "managed-node", name: "E2E Edge", transport: "ssh", sshHost: "192.0.2.22", sshPort: 22, sshUser: "birdbox", sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/edge.conf", socketPath: "/tmp/edge.ctl", routerId: "192.0.2.22", listenPort: 179 },
+            { id: "local", kind: "managed-node", name: "E2E Router", transport: "local", sshHost: null, sshPort: null, sshUser: null, sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/local.conf", socketPath: "/tmp/local.ctl", routerId: "198.51.100.1", igpAddress: "10.0.0.1", listenPort: 179 },
+            { id: "edge", kind: "managed-node", name: "E2E Edge", transport: "ssh", sshHost: "192.0.2.22", sshPort: 22, sshUser: "birdbox", sshIdentity: "default", deploymentMode: "legacy", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/tmp/edge.conf", socketPath: "/tmp/edge.ctl", routerId: "198.51.100.2", igpAddress: "10.0.0.2", listenPort: 179 },
           ],
           peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [],
           sessions: existingSessions,
@@ -107,6 +107,7 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
   await expect(page.locator(".workspace-tabs .workspace-tab")).toHaveText([
     "eBGP 管理",
     "iBGP 管理",
+    "OSPF 管理",
     "资源管理",
   ]);
   await page.locator("#ibgpWorkspaceTab").click();
@@ -125,7 +126,7 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
     .locator(".ibgp-canvas .ibgp-node")
     .filter({ hasText: "E2E Router" })
     .click();
-  await expect(page.locator(".ibgp-transport-field input")).toHaveValue("192.0.2.1");
+  await expect(page.locator(".ibgp-transport-field input")).toHaveValue("10.0.0.1");
   await page.locator("#ibgpConnectionSearch").fill("Edge");
   await expect(page.locator(".quick-node")).toHaveCount(1);
   await page.locator(".quick-node").click();

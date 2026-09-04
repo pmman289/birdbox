@@ -1066,3 +1066,64 @@ dialog form { padding: 22px; }
 .ibgp-status.status-warning { color: #b45309; }
 .ibgp-status.status-warning i { background: #f59e0b; }
 .ibgp-status.status-unknown { color: #64748b; }
+
+.ospf-topology-panel { display: grid; gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.ospf-topology-actions { display: flex; align-items: center; gap: 10px; }.ospf-add-link { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-add-link-head, .ospf-add-link-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.ospf-add-link-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }.ospf-form-error { margin: 10px 0 0; color: var(--danger, #b42318); font-size: 12px; }.ospf-add-link-actions { justify-content: flex-end; margin-top: 12px; }
+.ospf-topology-canvas { position: relative; width: 100%; aspect-ratio: 540 / 330; min-height: 300px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(180deg, rgba(247,251,252,.92), rgba(238,245,247,.92)), var(--surface-soft); }
+.ospf-topology-canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ospf-link { stroke: #8ea3ad; stroke-width: 2.5; vector-effect: non-scaling-stroke; fill: none; cursor: pointer; pointer-events: none; }
+.ospf-link-hit { stroke-width: 18; stroke: transparent; fill: none; cursor: pointer; pointer-events: stroke; }
+.ospf-link-hit:hover, .ospf-link-hit.selected { stroke: var(--green); stroke-opacity: .24; }
+.ospf-link-label { cursor: pointer; pointer-events: all; }.ospf-link-label rect { fill: var(--surface); stroke: var(--line-strong); transform: scale(.62); transform-box: fill-box; transform-origin: center; pointer-events: all; }.ospf-link-label text { fill: var(--ink); font-size: 6px !important; transform: scale(.72); transform-box: fill-box; transform-origin: center; pointer-events: all; }
+.ospf-link-hit-button { position: absolute; z-index: 1; width: 52px; height: 28px; transform: translate(-50%, -50%); border: 0; padding: 0; background: transparent; cursor: pointer; }
+.ospf-topology-node { position: absolute; transform: translate(-50%, -50%); display: grid; grid-template-columns: 9px 1fr; gap: 2px 7px; width: 178px; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid #aebbc3; border-radius: 8px; background: var(--surface-elevated, var(--surface)); box-shadow: 0 10px 26px var(--shadow-strong); color: var(--ink); text-align: left; cursor: pointer; }
+.ospf-topology-node.selected { border-left-color: var(--green); box-shadow: 0 0 0 2px rgba(25,113,73,.18), 0 10px 26px var(--shadow-strong); }.ospf-topology-node strong, .ospf-topology-node small, .ospf-topology-node em { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.ospf-topology-node small, .ospf-topology-node em { color: var(--muted); font-size: 11px; font-style: normal; }.ospf-node-status { grid-row: 1 / span 3; width: 9px; height: 9px; margin-top: 3px; border-radius: 999px; background: var(--green); box-shadow: 0 0 0 3px rgba(43,138,87,.14); }
+.ospf-link-editor { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-link-endpoints { display: flex; align-items: end; gap: 8px; flex: 1 1 360px; min-width: 280px; }.ospf-link-endpoints > div { display: grid; gap: 4px; flex: 1 1 0; min-width: 0; }.ospf-link-endpoints small { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.ospf-link-endpoints input { width: 100%; min-width: 0; }.ospf-link-endpoints > span { color: var(--muted); padding-bottom: 8px; }.ospf-link-editor .field { display: grid; gap: 3px; min-width: 74px; }.ospf-link-editor .field label { font-size: 10px; color: var(--muted); }.ospf-link-editor input { width: 74px; }.ospf-link-editor select { min-width: 90px; }.ospf-checkbox { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; }.ospf-checkbox input, .ospf-options input, .switch-label input { width: 16px !important; height: 16px !important; min-height: 16px !important; padding: 0 !important; accent-color: var(--green); box-shadow: none !important; }.ospf-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }.ospf-policy-grid .policy-block { min-width: 0; margin: 0; }
+.ospf-version-checks { display: flex; flex-wrap: wrap; gap: 8px; }.ospf-version-checks label { display: inline-flex; align-items: center; gap: 6px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }.ospf-version-checks input { width: 16px; height: 16px; accent-color: var(--accent); }.ospf-version-policy { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }.ospf-version-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }.ospf-version-heading small { color: var(--muted); font-size: 11px; }
+[data-theme="dark"] .ospf-topology-canvas { background: linear-gradient(180deg, rgba(17,26,31,.96), rgba(12,19,23,.96)), var(--bg); }.ospf-topology-node { color: var(--ink); }
+
+.ospf-layout { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(440px, 1.8fr) minmax(260px, .95fr); gap: 16px; align-items: start; }
+.ospf-node-panel, .ospf-editor, .ospf-runtime { min-width: 0; border: 1px solid var(--line); background: var(--panel); padding: 16px; }
+.ospf-runtime { position: sticky; top: 16px; max-height: calc(100svh - 110px); overflow: auto; }
+.ospf-actions { display: flex; gap: 8px; }
+.ospf-search { width: 100%; margin: 12px 0; }
+.ospf-node-list { display: grid; gap: 6px; }
+.ospf-node-row { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 10px; border: 1px solid transparent; background: transparent; text-align: left; color: inherit; cursor: pointer; }
+.ospf-node-row:hover, .ospf-node-row.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.ospf-node-main, .ospf-node-stats { display: grid; gap: 3px; min-width: 0; }
+.ospf-node-main small, .ospf-node-stats small { color: var(--muted); font-size: 11px; }
+.ospf-node-stats { text-align: right; font-size: 10px; }
+.ospf-node-stats em { color: var(--muted); font-style: normal; }
+.ospf-node-stats em.up { color: var(--green); }.ospf-node-stats em.warn { color: var(--orange, #b45309); }
+.ospf-editor-head, .ospf-section-head, .ospf-runtime .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.ospf-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; }
+.ospf-area-tabs { display: flex; gap: 6px; margin: 12px 0; border-bottom: 1px solid var(--line); }
+.ospf-area-tabs button { border: 0; background: transparent; color: var(--muted); padding: 8px 10px; cursor: pointer; }.ospf-area-tabs button.active { color: var(--accent); border-bottom: 2px solid var(--accent); }.ospf-area-tabs .add-area { margin-left: auto; }
+.ospf-interface-table { overflow-x: auto; }.ospf-table-row { display: grid; grid-template-columns: 1.4fr 1fr .65fr 1.25fr 1fr 32px; gap: 8px; align-items: center; min-width: 620px; padding: 7px 0; border-bottom: 1px solid var(--line); }.ospf-table-header { color: var(--muted); font-size: 11px; }.inline-number { display: flex; align-items: center; gap: 4px; }.inline-number input { width: 50px; }
+.ospf-options { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; color: var(--muted); font-size: 12px; }.runtime-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0 22px; }.runtime-summary div { display: grid; gap: 3px; text-align: center; }.runtime-summary strong { font-size: 22px; }.runtime-summary span, .runtime-refresh { color: var(--muted); font-size: 11px; }.neighbor-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12px; }.neighbor-row em { color: var(--green); font-style: normal; }.up-dot, .warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin-right: 6px; }.warn-dot { background: #f59e0b; }.ospf-preview { max-height: 300px; overflow: auto; padding: 10px; background: var(--code-bg, #101820); color: var(--code-fg, #d6e4ef); font-size: 11px; white-space: pre; }
+.ospf-advanced, .ospf-link-advanced { flex: 1 1 100%; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+.ospf-advanced summary, .ospf-link-advanced summary { cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 600; }
+.ospf-advanced-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 10px; margin-top: 10px; }
+.ospf-advanced-grid .field { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+.ospf-advanced-grid input, .ospf-advanced-grid select { width: 100%; min-width: 0; }
+.ospf-advanced-grid .checkbox-inline { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.ospf-advanced-grid .checkbox-inline input { width: 15px; height: 15px; }
+.field-hint { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.ospf-area-advanced, .ospf-virtual-links { margin-top: 14px; }
+.ospf-area-advanced h4, .ospf-virtual-links h4 { margin: 0 0 8px; font-size: 12px; }
+.ospf-area-card { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; padding: 9px; border: 1px solid var(--line); border-radius: 6px; margin-top: 7px; }
+.ospf-area-card .field { display: grid; gap: 3px; color: var(--muted); font-size: 10px; }
+.ospf-area-card input, .ospf-area-card select { width: 96px; }
+.ospf-area-card .area-wide { flex: 1 1 220px; }
+.ospf-area-card .area-wide input { width: 100%; }
+.ospf-area-entry-groups { display: grid; gap: 9px; margin-top: 10px; }
+.ospf-area-entry-group { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+.ospf-area-entry-group .ospf-subheading strong { font-size: 11px; }
+.ospf-area-entry-row { display: grid; grid-template-columns: minmax(150px, 1fr) auto auto minmax(82px, .35fr) 30px; gap: 7px; align-items: center; }
+.ospf-area-entry-row input { width: 100%; min-width: 0; }
+.ospf-area-entry-row .checkbox-inline { white-space: nowrap; }
+.ospf-subheading { display: flex; align-items: center; justify-content: space-between; }
+.ospf-virtual-link-row { display: grid; grid-template-columns: 1.2fr 1fr repeat(5, minmax(70px, .7fr)) 1fr 30px; gap: 7px; margin-top: 7px; }
+.ospf-virtual-link-row input, .ospf-virtual-link-row select { min-width: 0; width: 100%; }
+@media (max-width: 1180px) { .ospf-layout { grid-template-columns: 220px minmax(0, 1fr); }.ospf-runtime { grid-column: 1 / -1; position: static; max-height: none; }.ospf-add-link-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .ospf-layout, .ospf-form-grid, .ospf-policy-grid { grid-template-columns: 1fr; }.ospf-actions { flex-wrap: wrap; }.ospf-node-panel { order: 0; }.ospf-editor { order: 1; }.ospf-runtime { order: 2; }.ospf-link-endpoints { flex-basis: 100%; }.ospf-version-heading { align-items: flex-start; flex-direction: column; }.ospf-topology-actions { align-items: flex-end; flex-direction: column; gap: 6px; }.ospf-add-link-grid { grid-template-columns: 1fr; } }

@@ -18,6 +18,8 @@ export interface ManagedNode {
   generatedConfigPath: string;
   socketPath: string;
   routerId: string;
+  /** Transport address used when Birdbox creates new BGP adjacencies. */
+  igpAddress: string | null;
   listenPort: number;
 }
 
@@ -348,8 +350,131 @@ export interface IbgpDomain {
   layout: Record<string, TopologyPosition>;
 }
 
+export type OspfVersion = "ospfv2" | "ospfv3";
+
+/** BIRD OSPF protocol-level knobs. Optional for backwards-compatible inventory files. */
+export interface OspfProtocolOptions {
+  rfc1583compat?: boolean;
+  rfc5838?: boolean;
+  instanceId?: number | null;
+  stubRouter?: boolean;
+  tick?: number | null;
+  ecmp?: boolean | null;
+  ecmpLimit?: number | null;
+  mergeExternal?: boolean;
+  gracefulRestartMode?: "off" | "aware" | "on";
+  gracefulRestartTime?: number | null;
+}
+
+export interface OspfAreaOptions {
+  stub?: boolean;
+  nssa?: boolean;
+  summary?: boolean | null;
+  defaultNssa?: boolean;
+  defaultCost?: number | null;
+  defaultCost2?: number | null;
+  translator?: boolean;
+  translatorStability?: number | null;
+  networks?: Array<{ prefix: string; hidden?: boolean }>;
+  external?: Array<{ prefix: string; hidden?: boolean; tag?: number | null }>;
+  stubnets?: Array<{ prefix: string; hidden?: boolean; summary?: boolean; cost?: number | null }>;
+}
+
+export interface OspfVirtualLink {
+  id: string;
+  area: string;
+  instanceId?: number | null;
+  hello?: number | null;
+  retransmit?: number | null;
+  wait?: number | null;
+  dead?: number | null;
+  authentication?: "none" | "simple" | "cryptographic";
+  password?: string | null;
+  passwordOptions?: OspfPasswordOptions;
+}
+
+export interface OspfPasswordOptions {
+  id?: number | null;
+  generateFrom?: string | null;
+  generateTo?: string | null;
+  acceptFrom?: string | null;
+  acceptTo?: string | null;
+  from?: string | null;
+  to?: string | null;
+  algorithm?: "keyed-md5" | "keyed-sha1" | "hmac-sha1" | "hmac-sha256" | "hmac-sha384" | "hmac-sha512";
+}
+
+export interface OspfInterfaceOptions {
+  instanceId?: number | null;
+  stub?: boolean;
+  poll?: number | null;
+  retransmit?: number | null;
+  transmitDelay?: number | null;
+  priority?: number | null;
+  wait?: number | null;
+  deadMode?: "count" | "seconds";
+  rxBuffer?: "normal" | "large" | number | null;
+  txLength?: number | null;
+  type?: "broadcast" | "ptp" | "nbma" | "ptmp";
+  linkLsaSuppression?: boolean;
+  strictNonbroadcast?: boolean;
+  realBroadcast?: boolean;
+  ptpNetmask?: boolean;
+  ptpAddress?: boolean;
+  secondary?: boolean;
+  checkLink?: boolean;
+  bfd?: boolean;
+  ecmpWeight?: number | null;
+  ttlSecurity?: "off" | "on" | "tx-only";
+  txClass?: number | null;
+  txDscp?: number | null;
+  txPriority?: number | null;
+  password?: string | null;
+  passwordOptions?: OspfPasswordOptions;
+  neighbors?: Array<{ address: string; eligible?: boolean }>;
+}
+
+export interface OspfLink {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  area: string;
+  localInterface: string;
+  remoteInterface: string;
+  cost: number;
+  hello: number;
+  dead: number;
+  passive: boolean;
+  authentication: "none" | "simple" | "md5" | "ipsec";
+  options?: OspfInterfaceOptions;
+}
+
+export interface OspfNodeConfig {
+  nodeId: string;
+  enabled: boolean;
+  versions: OspfVersion[];
+  routerId: string | null;
+  importPolicies: Record<OspfVersion, ChannelPolicy>;
+  exportPolicies: Record<OspfVersion, ChannelPolicy>;
+  exportDefineIds: Record<OspfVersion, string | null>;
+  bfd: boolean;
+  gracefulRestart: boolean;
+  redistributeStatic: boolean;
+  protocolOptions?: OspfProtocolOptions;
+  areaOptions?: Record<string, OspfAreaOptions>;
+  virtualLinks?: OspfVirtualLink[];
+}
+
+export interface OspfDomain {
+  id: string;
+  name: string;
+  nodeConfigs: OspfNodeConfig[];
+  links: OspfLink[];
+  layout: Record<string, TopologyPosition>;
+}
+
 export interface Inventory {
-  version: 27;
+  version: 28;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];
@@ -360,6 +485,7 @@ export interface Inventory {
   sourcePolicies: SourcePolicyEgress[];
   sessions: BgpSession[];
   ibgpDomains: IbgpDomain[];
+  ospfDomains: OspfDomain[];
 }
 
 export type PolicyCollection = "defines" | "functions" | "filters";

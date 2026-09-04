@@ -109,4 +109,11 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.put<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.updateIbgpDomain(validId(request.params.domainId), jsonBody(request))));
   app.delete<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteIbgpDomain(validId(request.params.domainId))));
   app.patch<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId/layout", async (request, reply) => jsonReply(reply, await options.service.updateIbgpDomainLayout(validId(request.params.domainId), jsonBody(request))));
+
+  app.get("/api/ospf", async (_request, reply) => jsonReply(reply, await options.service.listOspfDomains()));
+  app.post("/api/ospf/preview", async (request, reply) => jsonReply(reply, await options.service.previewOspfDomain(jsonBody(request))));
+  app.post("/api/ospf", async (request, reply) => jsonReply(reply, await options.service.createOspfDomain(jsonBody(request))));
+  app.put<{ Params: { domainId: string } }>("/api/ospf/:domainId", async (request, reply) => jsonReply(reply, await options.service.updateOspfDomain(validId(request.params.domainId), jsonBody(request))));
+  app.delete<{ Params: { domainId: string } }>("/api/ospf/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteOspfDomain(validId(request.params.domainId))));
+  app.patch<{ Params: { domainId: string } }>("/api/ospf/:domainId/layout", async (request, reply) => jsonReply(reply, await options.service.updateOspfDomainLayout(validId(request.params.domainId), jsonBody(request))));
 };

@@ -31,6 +31,13 @@ test("creates a new session draft with stable defaults and a unique BIRD name", 
   assert.deepEqual(draft.channels.ipv4.importPolicy.steps, [{ type: "form" }]);
 });
 
+test("defaults a new eBGP session to the node IGP address", () => {
+  const value = inventory();
+  value.nodes[0].igpAddress = "10.0.0.1";
+  const draft = createSessionDraft({ inventory: value, node: value.nodes[0], selectedPeer: value.peers[0] });
+  assert.equal(draft.localAddress, "10.0.0.1");
+});
+
 test("clones an existing session without mutating the dashboard snapshot", () => {
   const value = inventory();
   const session = {

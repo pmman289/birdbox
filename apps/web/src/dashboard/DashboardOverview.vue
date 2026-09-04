@@ -291,7 +291,7 @@ onBeforeUnmount(() => canvasMedia.removeEventListener("change", handleCanvasMedi
               </span>
             </div>
             <strong>{{ node.name }}</strong>
-            <small>{{ node.routerId }} · AS 本端 · Port {{ node.listenPort }}</small>
+            <small>{{ node.routerId }} · IGP {{ node.igpAddress ?? "自动选择" }} · Port {{ node.listenPort }}</small>
           </article>
 
           <button

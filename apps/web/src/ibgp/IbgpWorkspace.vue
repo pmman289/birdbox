@@ -61,7 +61,9 @@ let previewQueued = false;
 let adjacencySequence = 0;
 
 const currentInventory = computed<Inventory | null>(
-  () => dashboard.value?.inventory ?? inventorySnapshot.value,
+  // The domain endpoint returns the inventory used for its preview. Prefer it
+  // over a possibly stale dashboard selection after a workspace refresh.
+  () => inventorySnapshot.value ?? dashboard.value?.inventory ?? null,
 );
 const nodes = computed<ManagedNode[]>(
   () => currentInventory.value?.nodes ?? [],
@@ -231,7 +233,9 @@ function makeDraft(): IbgpDomain {
   const members = nodes.value.map(
     (node): IbgpMember => ({
       nodeId: node.id,
-      address: node.routerId,
+      // Router ID is an identifier, not a transport endpoint. New domains
+      // require an explicit IGP address (or the user can set it on the node).
+      address: node.igpAddress ?? "",
     }),
   );
   return {
@@ -272,7 +276,7 @@ function makeSession(
     peerId,
     protocolName: uniqueBirdName(
       currentInventory.value ?? {
-        version: 27,
+        version: 28,
         nodes: [],
         peers: [],
         defines: [],
@@ -283,6 +287,7 @@ function makeSession(
         sourcePolicies: [],
         sessions: [],
         ibgpDomains: [],
+        ospfDomains: [],
       },
       "ibgp",
       `${domain.name} ${remoteNode?.name ?? remoteNodeId}`,

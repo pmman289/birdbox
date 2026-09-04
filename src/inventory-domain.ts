@@ -140,6 +140,7 @@ export function configForNode(state: Inventory, node: ManagedNode): string {
     nodeRPKIResources(state, node.id),
     nodeStaticProtocols(state, node.id),
     nodeSourcePolicies(state, node.id),
+    state.ospfDomains,
   );
 }
 
@@ -154,6 +155,7 @@ export function configBundleForNode(state: Inventory, node: ManagedNode) {
     nodeRPKIResources(state, node.id),
     nodeStaticProtocols(state, node.id),
     nodeSourcePolicies(state, node.id),
+    state.ospfDomains,
   );
 }
 

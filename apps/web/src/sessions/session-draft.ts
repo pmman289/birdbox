@@ -169,7 +169,9 @@ export function createSessionDraft(dashboard: DashboardResponse): SessionDraft |
     protocolName: defaultProtocolName(dashboard.inventory, peer),
     sessionType: "ebgp",
     enabled: true,
-    localAddress: null,
+    // New eBGP sessions bind to the configured IGP transport address. Do not
+    // derive it from Router ID: Router ID may deliberately be public.
+    localAddress: node.igpAddress ?? null,
     localAsn: null,
     localPort: node.listenPort || 179,
     bgp: defaultBgpOptions(),

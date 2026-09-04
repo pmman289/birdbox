@@ -6,6 +6,7 @@ import type {
   RpkiSource,
   SourcePolicyEgress,
   StaticProtocol,
+  OspfDomain,
 } from "../packages/contracts/src/inventory.js";
 import {
   resourceScopeContains,
@@ -14,8 +15,8 @@ import {
 import { birdIdentifierList } from "./bird-identifiers.js";
 import { assertValidation } from "./bird-normalize-common.js";
 
-type DependencyKind = "Define" | "Function" | "Filter" | "RPKI" | "Static" | "SourcePolicy";
-type DependencyInventory = Pick<Inventory, "defines" | "functions" | "filters" | "rpki" | "staticProtocols" | "sourcePolicies">;
+type DependencyKind = "Define" | "Function" | "Filter" | "RPKI" | "Static" | "SourcePolicy" | "OSPF";
+type DependencyInventory = Pick<Inventory, "defines" | "functions" | "filters" | "rpki" | "staticProtocols" | "sourcePolicies" | "ospfDomains">;
 
 interface DependencyNode {
   key: string;
@@ -115,8 +116,26 @@ function sourcePolicyNode(resource: SourcePolicyEgress, index: number, defineNam
   };
 }
 
+function ospfNodes(domains: OspfDomain[], functions: ReadonlyMap<string, string>, filters: ReadonlyMap<string, string>, defines: ReadonlyMap<string, string>): DependencyNode[] {
+  return domains.map((domain, index) => {
+    const references = new Set<string>();
+    for (const config of domain.nodeConfigs) {
+      for (const version of ["ospfv2", "ospfv3"] as const) {
+        const define = config.exportDefineIds[version]; if (define) { const name = defines.get(define); if (name) references.add(name); }
+        for (const policy of [config.importPolicies[version], config.exportPolicies[version]]) {
+          if (policy.filterId) { const name = filters.get(policy.filterId); if (name) references.add(name); }
+          for (const step of policy.steps) if (step.type === "function") { const name = functions.get(step.functionId); if (name) references.add(name); }
+        }
+      }
+    }
+    return { key: `OSPF:${domain.id}`, kind: "OSPF", name: domain.name, enabled: true, scope: { nodeId: null }, phase: 4, index, references, providedSymbols: new Set() };
+  });
+}
+
 function dependencyNodes(inventory: DependencyInventory): DependencyNode[] {
   const defineNames = new Map(inventory.defines.map((resource) => [resource.id, resource.name]));
+  const functionNames = new Map(inventory.functions.map((resource) => [resource.id, resource.name]));
+  const filterNames = new Map(inventory.filters.map((resource) => [resource.id, resource.name]));
   return [
     ...inventory.defines.map((resource, index) => policyNode(resource, "Define", 0, index)),
     ...inventory.rpki.map(rpkiNode),
@@ -124,6 +143,7 @@ function dependencyNodes(inventory: DependencyInventory): DependencyNode[] {
     ...inventory.filters.map((resource, index) => policyNode(resource, "Filter", 3, index)),
     ...inventory.staticProtocols.map(staticNode),
     ...inventory.sourcePolicies.map((resource, index) => sourcePolicyNode(resource, index, defineNames)),
+    ...ospfNodes(inventory.ospfDomains, functionNames, filterNames, defineNames),
   ];
 }
 

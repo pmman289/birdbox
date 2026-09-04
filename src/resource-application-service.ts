@@ -6,6 +6,7 @@ import type {
   ManagedNode,
   PolicyCollection,
   SourcePolicyEgress,
+  OspfDomain,
 } from "../packages/contracts/src/inventory.js";
 import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import { resourceSingleNodeId } from "../packages/contracts/src/resource-scope.js";
@@ -38,6 +39,7 @@ import { resolveIrrAsSet, type IrrResolveRequest } from "./irr-as-set.js";
 import type { NodeOnboardingService } from "./node-onboarding-service.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
 import { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
+import { normalizeOspfDomain, ospfDomainNodeIds } from "./ospf.js";
 import type { SessionApplicationService } from "./session-application-service.js";
 import type { InventoryStore } from "./store.js";
 
@@ -177,6 +179,10 @@ export function createResourceApplicationService(
   ) {
     const initial = expandIbgpDomain(domain, nodes, existing);
     return expandIbgpDomain(domain, nodes, sessionUpdates(body, initial.sessions));
+  }
+
+  function materializeOspf(input: Record<string, unknown>, previous: OspfDomain | null = null): OspfDomain {
+    return normalizeOspfDomain({ ...(previous ?? {}), ...input, id: previous?.id ?? input.id ?? makeId("ospf") });
   }
 
   function bgpProtocolBlock(config: string, protocolName: string): string {
@@ -655,6 +661,12 @@ export function createResourceApplicationService(
             : channels.some((channel) => channel.exportDefineId === target.id);
       });
       if (referencedBySession) fail(409, `请先从会话中移除该 ${kind}`);
+      const referencedByOspf = draft.ospfDomains.some((domain) => domain.nodeConfigs.some((config) =>
+        Object.values(config.importPolicies).concat(Object.values(config.exportPolicies)).some((policy) =>
+          collection === "filters" ? policy.filterId === target.id : collection === "functions" ? policy.steps.some((step) => step.type === "function" && step.functionId === target.id) : Object.values(config.exportDefineIds).includes(target.id),
+        ),
+      ));
+      if (referencedByOspf) fail(409, `请先从 OSPF 域中移除该 ${kind}`);
       if (collection === "defines" && draft.staticProtocols.some((item) => item.defineId === target.id)) {
         fail(409, "请先从 Static 资源中移除该 Define");
       }
@@ -847,6 +859,84 @@ export function createResourceApplicationService(
       if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout)) fail(400, "拓扑布局必须是对象");
       target.layout = normalizeIbgpDomain({ ...target, layout: body.layout }).layout;
       return target;
+    }));
+    return { status: 200, payload: { domain, inventory: state } };
+  },
+
+  async listOspfDomains() {
+    const state = await store.read();
+    return { status: 200, payload: { domains: state.ospfDomains, inventory: state } };
+  },
+
+  async previewOspfDomain(body) {
+    return withDeploymentLock(async () => {
+      const current = await store.read();
+      const id = body.id === undefined || body.id === "" ? makeId("ospf") : String(body.id);
+      const previous = current.ospfDomains.find((item) => item.id === id) ?? null;
+      const domain = materializeOspf({ ...body, id }, previous);
+      const candidate = structuredClone(current);
+      const index = candidate.ospfDomains.findIndex((item) => item.id === id);
+      if (index >= 0) candidate.ospfDomains[index] = domain;
+      else candidate.ospfDomains.push(domain);
+      const inventory = validateInventory(candidate);
+      const configs = [] as Array<{ nodeId: string; config: string; validation: Awaited<ReturnType<typeof stageAndValidate>> }>;
+      for (const nodeId of ospfDomainNodeIds(domain)) {
+        const node = findNode(inventory, nodeId);
+        const config = configForNode(inventory, node);
+        configs.push({ nodeId, config, validation: await stageAndValidate(node, config) });
+      }
+      return { status: 200, payload: { valid: configs.every((item) => item.validation.ok), domain, configs } };
+    });
+  },
+
+  async createOspfDomain(body) {
+    const domain = materializeOspf({ ...body, id: body.id ?? makeId("ospf") });
+    const { state, deployment } = await mutateAndApply((draft) => {
+      if (draft.ospfDomains.some((item) => item.id === domain.id)) fail(409, "OSPF 域 ID 已存在");
+      if (draft.ospfDomains.some((item) => item.name === domain.name)) fail(409, "OSPF 域名称已存在");
+      draft.ospfDomains.push(domain);
+      return domain;
+    }, () => ospfDomainNodeIds(domain));
+    event("success", `已创建 OSPF 域 ${domain.name}`);
+    return { status: 201, payload: { domain: state.ospfDomains.find((item) => item.id === domain.id), inventory: state, deployment, events } };
+  },
+
+  async updateOspfDomain(domainId, body) {
+    let affected: string[] = [];
+    const { state, result: domain, deployment } = await mutateAndApply((draft) => {
+      const index = draft.ospfDomains.findIndex((item) => item.id === domainId);
+      if (index < 0) fail(404, "OSPF 域不存在");
+      const previous = draft.ospfDomains[index];
+      if (!previous) fail(404, "OSPF 域不存在");
+      const updated = materializeOspf({ ...body, id: domainId }, previous);
+      if (draft.ospfDomains.some((item) => item.id !== domainId && item.name === updated.name)) fail(409, "OSPF 域名称已存在");
+      draft.ospfDomains[index] = updated;
+      affected = uniqueNodeIds(ospfDomainNodeIds(previous), ospfDomainNodeIds(updated));
+      return updated;
+    }, () => affected);
+    event("success", `已更新 OSPF 域 ${domain.name}`);
+    return { status: 200, payload: { domain, inventory: state, deployment, events } };
+  },
+
+  async deleteOspfDomain(domainId) {
+    let affected: string[] = [];
+    const { state, result: domain, deployment } = await mutateAndApply((draft) => {
+      const index = draft.ospfDomains.findIndex((item) => item.id === domainId);
+      if (index < 0) fail(404, "OSPF 域不存在");
+      const target = draft.ospfDomains[index];
+      if (!target) fail(404, "OSPF 域不存在");
+      affected = ospfDomainNodeIds(target); draft.ospfDomains.splice(index, 1); return target;
+    }, () => affected);
+    event("success", `已删除 OSPF 域 ${domain.name}`);
+    return { status: 200, payload: { inventory: state, deployment, events } };
+  },
+
+  async updateOspfDomainLayout(domainId, body) {
+    const { state, result: domain } = await withDeploymentLock(() => store.mutate((draft) => {
+      const target = draft.ospfDomains.find((item) => item.id === domainId);
+      if (!target) fail(404, "OSPF 域不存在");
+      if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout)) fail(400, "拓扑布局必须是对象");
+      target.layout = normalizeOspfDomain({ ...target, layout: body.layout }).layout; return target;
     }));
     return { status: 200, payload: { domain, inventory: state } };
   },

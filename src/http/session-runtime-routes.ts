@@ -3,7 +3,8 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { ChangeEvent, DashboardRuntimeResponse, RouteDetailsResponse } from "../../packages/contracts/src/api.js";
 import type { Inventory, ManagedNode } from "../../packages/contracts/src/inventory.js";
 import type { AuthStore } from "../auth.js";
-import { inspectNode, inspectProtocolRoutes, setProtocolState } from "../bird.js";
+import { inspectNode, inspectOspfRuntime, inspectProtocolRoutes, runOnNode, setProtocolState } from "../bird.js";
+import { ospfDomainNodeIds, ospfProtocolName } from "../ospf.js";
 import { configForNode } from "../inventory-domain.js";
 import type { InventoryStore } from "../store.js";
 import { requestSessionToken, sessionCookie } from "./auth-routes.js";
@@ -74,6 +75,35 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
       events: options.getEvents(),
     };
     return jsonReply(reply, 200, payload);
+  });
+
+  app.get<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/interfaces", async (request, reply) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.params.nodeId)) throw routeError(404, "接口不存在");
+    const state = await options.store.read();
+    const node = findNode(state, request.params.nodeId);
+    const result = await runOnNode(
+      node,
+      "ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p'",
+      { timeout: 10_000 },
+    );
+    if (!result.ok) throw routeError(502, result.stderr || "无法读取节点接口");
+    const interfaces = result.stdout.split(/\r?\n/).map((item) => item.trim())
+      .filter((item) => /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(item));
+    return jsonReply(reply, 200, { nodeId: node.id, interfaces: [...new Set(interfaces)] });
+  });
+
+  app.get<{ Params: { domainId: string } }>("/api/ospf/:domainId/runtime", async (request, reply) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.params.domainId)) throw routeError(404, "接口不存在");
+    const state = await options.store.read();
+    const domain = state.ospfDomains.find((item) => item.id === request.params.domainId);
+    if (!domain) throw routeError(404, "OSPF 域不存在");
+    const protocolNames = { v2: ospfProtocolName(domain, "ospfv2"), v3: ospfProtocolName(domain, "ospfv3") };
+    const nodeIds = ospfDomainNodeIds(domain);
+    const results = await Promise.all(nodeIds.map(async (nodeId) => {
+      const node = findNode(state, nodeId);
+      return { nodeId, name: node.name, runtime: await inspectOspfRuntime(node, protocolNames) };
+    }));
+    return jsonReply(reply, 200, { domainId: domain.id, nodes: results });
   });
 
   app.get<{

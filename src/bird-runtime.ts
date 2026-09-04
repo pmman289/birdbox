@@ -48,6 +48,14 @@ interface RouteInspectionResult {
   error: string | null;
 }
 
+export interface OspfRuntimeResult {
+  reachable: boolean;
+  error: string | null;
+  v2: { state: string | null; neighbors: number; routes: number | null };
+  v3: { state: string | null; neighbors: number; routes: number | null };
+  interfaces: string[];
+}
+
 interface ExecError extends ExecFileException {
   stdout?: string;
   stderr?: string;
@@ -243,6 +251,58 @@ printf '%s\\n---BIRDBOX---\\n%s\\n' "$version" "$protocols"
     protocols: parseProtocolStatuses(raw),
     error: result.ok ? null : (result.stderr || "节点不可达"),
     raw: raw.trim(),
+  };
+}
+
+export function parseOspfSectionByTable(raw: string, protocolName: string): { state: string | null; neighbors: number } {
+  const lines = raw.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `${protocolName}:`);
+  if (start < 0) return { state: null, neighbors: 0 };
+  const rows: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (/^\S.*:\s*$/.test(line)) break;
+    rows.push(line);
+  }
+  const states = rows
+    .map((line) => line.trim().match(/^\S+\s+\d+\s+(\S+)/)?.[1] ?? "")
+    .filter(Boolean);
+  const full = states.filter((value) => value.toLowerCase().startsWith("full")).length;
+  return { state: states[0] ?? null, neighbors: full || states.length };
+}
+
+function parseOspfSection(raw: string, protocolName: string): { state: string | null; neighbors: number } {
+  const escaped = protocolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const section = raw.match(new RegExp(`(?:^|\\n)${escaped}:\\s*\\n([\\s\\S]*?)(?=\\n[^\\s].*:\\s*$|$)`, "m"))?.[1] ?? "";
+  const states = [...section.matchAll(/^\s*\S+\s+\d+\s+([^\s]+(?:\/[^\s]+)?)/gm)].map((match) => match[1] ?? "");
+  const full = states.filter((value) => value.toLowerCase().startsWith("full")).length;
+  return { state: states[0] ?? null, neighbors: full || states.length };
+}
+
+function parseOspfRouteCount(raw: string): number | null {
+  const match = raw.match(/^(\d+)\s+of\s+\d+\s+routes\s+for\s+\d+\s+networks?/im);
+  return match?.[1] ? Number(match[1]) : null;
+}
+
+export async function inspectOspfRuntime(nodeInput: unknown, protocolNames: { v2: string; v3: string }): Promise<OspfRuntimeResult> {
+  const node = normalizeNode(nodeInput);
+  const v2 = normalizeId(protocolNames.v2, "OSPFv2 协议名称");
+  const v3 = normalizeId(protocolNames.v3, "OSPFv3 协议名称");
+  const command = [
+    `neighbors=$(birdc -s '${node.socketPath}' 'show ospf neighbors' 2>&1 || true)`,
+    `v2routes=$(birdc -s '${node.socketPath}' 'show route protocol ${v2} count' 2>&1 || true)`,
+    `v3routes=$(birdc -s '${node.socketPath}' 'show route protocol ${v3} count' 2>&1 || true)`,
+    "interfaces=$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p' | paste -sd '\\n' -)",
+    "printf '%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n' \"$neighbors\" \"$v2routes\" \"$v3routes\" \"$interfaces\"",
+  ].join("\n");
+  const result = await runOnNode(node, command, { timeout: 15_000 });
+  const [neighbors = "", v2routes = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-ROUTES|V3-ROUTES|INTERFACES)---/);
+  return {
+    reachable: result.ok,
+    error: result.ok ? null : (result.stderr || "节点不可达"),
+    v2: { ...parseOspfSectionByTable(neighbors, v2), routes: parseOspfRouteCount(v2routes) },
+    v3: { ...parseOspfSectionByTable(neighbors, v3), routes: parseOspfRouteCount(v3routes) },
+    interfaces: interfaces.split(/\r?\n/).map((item) => item.trim()).filter((item) => /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(item)),
   };
 }
 

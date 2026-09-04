@@ -54,7 +54,7 @@ function normalizeStoredInventory(value: unknown): Inventory {
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 27;
+const CURRENT_INVENTORY_VERSION = 28;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -230,6 +230,9 @@ function upgradeInventory(input: unknown): LegacyRecord {
     return {
       ...source,
       version: CURRENT_INVENTORY_VERSION,
+      // A missing value intentionally stays null. Existing session/member
+      // addresses remain authoritative and must not be inferred from Router ID.
+      nodes: recordArray(source.nodes, "节点").map((item) => ({ ...item, igpAddress: item.igpAddress ?? null })),
       defines: upgradeResourceOrder(source.defines).map((item) => ({
         ...item,
         label: item.label ?? item.name,
@@ -243,6 +246,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
       sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
       sessions: migrated.sessions,
       ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
+      ospfDomains: recordArray(source.ospfDomains, "OSPF 域").map((item) => ({ ...item })),
     };
   }
   const prefixLists: LegacyRecord[] = recordArray(source.prefixLists, "历史 Prefix List").map((item) => ({
@@ -311,6 +315,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
     sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
     sessions: migrated.sessions,
     ibgpDomains: upgradeIbgpDomains(source.ibgpDomains, source.version),
+    ospfDomains: recordArray(source.ospfDomains, "OSPF 域").map((item) => ({ ...item })),
   };
 }
 
@@ -402,6 +407,7 @@ export class InventoryStore {
       sourcePolicies: [] as LegacyRecord[],
       sessions: [] as BgpSession[],
       ibgpDomains: [] as LegacyRecord[],
+      ospfDomains: [] as LegacyRecord[],
     };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));
@@ -503,7 +509,7 @@ export class InventoryStore {
     await this.initialize();
     const operation = await this.database.mutateState<unknown, Result>(
       this.stateKey,
-      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [] },
+      { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [], ospfDomains: [] },
       async (current) => {
         const draft = structuredClone(normalizeStoredInventory(upgradeInventory(current)));
         const result = await mutator(draft);

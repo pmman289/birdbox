@@ -48,6 +48,7 @@ const draft = reactive<NodeDraft>({
   generatedConfigPath: "/var/lib/birdbox/generated.conf",
   socketPath: "/run/bird/bird.ctl",
   routerId: "",
+  igpAddress: null,
   listenPort: 179,
 });
 
@@ -67,6 +68,7 @@ const fieldMappings = [
   [/SSH 用户/, "nodeEditorSshUser"],
   [/SSH 端口/, "nodeEditorSshPort"],
   [/Router ID/, "nodeEditorRouterId"],
+  [/IGP 地址/, "nodeEditorIgpAddress"],
   [/监听端口|本地监听端口/, "nodeEditorPort"],
   [/主配置/, "nodeEditorMainConfigPath"],
   [/生成配置/, "nodeEditorGeneratedConfigPath"],
@@ -88,6 +90,7 @@ function resetDraft(node: ManagedNode | null): void {
     generatedConfigPath: node?.generatedConfigPath ?? "/var/lib/birdbox/generated.conf",
     socketPath: node?.socketPath ?? "/run/bird/bird.ctl",
     routerId: node?.routerId ?? "",
+    igpAddress: node?.igpAddress ?? null,
     listenPort: node?.listenPort ?? 179,
   });
   verified.value = Boolean(node);
@@ -156,6 +159,7 @@ function onboardingPayload(): NodeMutationRequest {
     generatedConfigPath: String(value.generatedConfigPath),
     socketPath: String(value.socketPath),
     routerId: String(value.routerId),
+    igpAddress: value.igpAddress === null || value.igpAddress === undefined || value.igpAddress === "" ? null : String(value.igpAddress),
     listenPort: Number(value.listenPort),
   };
 }
@@ -321,6 +325,7 @@ onBeforeUnmount(() => {
           <div class="field"><label for="nodeEditorSshPort">SSH 端口</label><input id="nodeEditorSshPort" v-model.number="draft.sshPort" type="number" min="1" max="65535" required :disabled="editing"></div>
         </template>
         <div class="field"><label for="nodeEditorRouterId">Router ID</label><input id="nodeEditorRouterId" v-model.trim="draft.routerId" required></div>
+        <div class="field"><label for="nodeEditorIgpAddress">IGP 地址（BGP 建邻）</label><input id="nodeEditorIgpAddress" v-model.trim="draft.igpAddress" placeholder="例如 10.0.0.1 或 2001:db8::1"><small>新建 iBGP/eBGP 会话会使用此地址；留空时需要在会话中手动选择本地地址。</small></div>
         <div class="field"><label for="nodeEditorPort">默认会话端口</label><input id="nodeEditorPort" v-model.number="draft.listenPort" type="number" min="1" max="65535" required></div>
         <details id="nodeBirdPaths" class="node-path-settings full-width" :open="!editing || draft.deploymentMode === 'include'">
           <summary>系统 BIRD 路径</summary>

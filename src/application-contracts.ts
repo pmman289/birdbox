@@ -48,4 +48,10 @@ export interface MutationService {
   updateIbgpDomain(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
   deleteIbgpDomain(domainId: string): Promise<MutationResult>;
   updateIbgpDomainLayout(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
+  listOspfDomains(): Promise<MutationResult>;
+  previewOspfDomain(body: Record<string, unknown>): Promise<MutationResult>;
+  createOspfDomain(body: Record<string, unknown>): Promise<MutationResult>;
+  updateOspfDomain(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
+  deleteOspfDomain(domainId: string): Promise<MutationResult>;
+  updateOspfDomainLayout(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
 }

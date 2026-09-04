@@ -194,6 +194,9 @@ export function normalizeNode(inputValue: unknown): ManagedNode {
       deploymentMode === "include" ? "/run/bird/bird.ctl" : RUNTIME.socketPath,
     ),
     routerId: normalizeIPv4(input.routerId, "Router ID"),
+    igpAddress: input.igpAddress === null || input.igpAddress === undefined || input.igpAddress === ""
+      ? null
+      : normalizeIPAddress(input.igpAddress, "IGP 地址"),
     listenPort: normalizePort(input.listenPort, "本地监听端口", RUNTIME.defaultBgpPort),
   };
 }

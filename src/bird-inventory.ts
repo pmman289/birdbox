@@ -1,3 +1,4 @@
+import net from "node:net";
 import type {
   AddressFamily,
   Inventory,
@@ -26,6 +27,7 @@ import {
 } from "./bird-source-policy.js";
 import { normalizeIbgpDomain } from "./ibgp-domain.js";
 import { validateResourceDependencyGraph } from "./bird-resource-dependencies.js";
+import { normalizeOspfDomain, ospfDomainNodeIds } from "./ospf.js";
 import {
   resourceAppliesToNode,
   scopedNodeIds,
@@ -66,6 +68,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   const sourcePolicies = list(input, "sourcePolicies").map(normalizeSourcePolicyEgress);
   const sessions = list(input, "sessions").map(normalizeSession);
   const ibgpDomains = list(input, "ibgpDomains").map(normalizeIbgpDomain);
+  const ospfDomains = list(input, "ospfDomains").map(normalizeOspfDomain);
   assertValidation(new Set(nodes.map((item) => item.id)).size === nodes.length, "节点 ID 重复");
   assertValidation(nodes.filter((item) => item.transport === "local").length <= 1, "只能配置一个本机节点");
   const deploymentTargets = nodes
@@ -81,6 +84,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   assertValidation(new Set(sourcePolicies.map((item) => item.id)).size === sourcePolicies.length, "源地址出口映射 ID 重复");
   assertValidation(new Set(sessions.map((item) => item.id)).size === sessions.length, "会话 ID 重复");
   assertValidation(new Set(ibgpDomains.map((item) => item.id)).size === ibgpDomains.length, "iBGP 域 ID 重复");
+  assertValidation(new Set(ospfDomains.map((item) => item.id)).size === ospfDomains.length, "OSPF 域 ID 重复");
   const allIbgpAdjacencies = ibgpDomains.flatMap((domain) => domain.adjacencies);
   assertValidation(new Set(allIbgpAdjacencies.map((item) => item.id)).size === allIbgpAdjacencies.length, "跨 iBGP 域的邻接 ID 重复");
 
@@ -89,6 +93,34 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   const defineMap = new Map(defines.map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
+  for (const domain of ospfDomains) {
+    const nodeConfigIds = new Set(domain.nodeConfigs.map((item) => item.nodeId));
+    for (const nodeId of ospfDomainNodeIds(domain)) assertValidation(nodeMap.has(nodeId), `OSPF 域 ${domain.name} 引用了不存在的节点`);
+    for (const config of domain.nodeConfigs) {
+      assertValidation(config.versions.length > 0, `OSPF 域 ${domain.name} 至少启用一个协议版本`);
+      if (config.routerId !== null) assertValidation(net.isIP(config.routerId) === 4, `OSPF 域 ${domain.name} Router ID 必须是 IPv4 地址`);
+      for (const family of ["ospfv2", "ospfv3"] as const) {
+        const expectedType = family === "ospfv2" ? "cidr4" : "cidr6";
+        const defineId = config.exportDefineIds[family];
+        const define = defineId === null ? null : defineMap.get(defineId);
+        assertValidation(defineId === null || (define?.type === expectedType && define.enabled && resourceAppliesToNode(define, config.nodeId)), `OSPF 域 ${domain.name} 的 ${family} 导出 Define 不可用`);
+        for (const policy of [config.importPolicies[family], config.exportPolicies[family]]) {
+          for (const step of policy.steps.filter((item) => item.type === "function")) {
+            const fn = functionMap.get(step.functionId);
+            assertValidation(fn && fn.enabled && fn.callable && resourceAppliesToNode(fn, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Function`);
+          }
+          if (policy.filterId !== null) {
+            const filter = filterMap.get(policy.filterId);
+            assertValidation(filter && filter.enabled && resourceAppliesToNode(filter, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Filter`);
+          }
+        }
+      }
+    }
+    for (const link of domain.links) {
+      assertValidation(nodeConfigIds.has(link.fromNodeId) && nodeConfigIds.has(link.toNodeId), `OSPF 域 ${domain.name} 链路两端必须配置节点`);
+    }
+    assertValidation(Object.keys(domain.layout).every((id) => nodeConfigIds.has(id)), `OSPF 域 ${domain.name} 拓扑布局包含未知节点`);
+  }
   for (const domain of ibgpDomains) {
     for (const member of domain.members) assertValidation(nodeMap.has(member.nodeId), `iBGP 域 ${domain.name} 引用了不存在的节点`);
     const memberIds = new Set(domain.members.map((member) => member.nodeId));
@@ -304,11 +336,11 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   }
 
   if (!options.allowInvalidResourceDependencies) {
-    validateResourceDependencyGraph({ defines, functions, filters, rpki, staticProtocols, sourcePolicies });
+    validateResourceDependencyGraph({ defines, functions, filters, rpki, staticProtocols, sourcePolicies, ospfDomains });
   }
 
   return {
-    version: 27,
+    version: 28,
     nodes,
     peers,
     defines,
@@ -319,5 +351,6 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
     sourcePolicies,
     sessions,
     ibgpDomains,
+    ospfDomains,
   };
 }

@@ -11,6 +11,7 @@ export {
   checkIncludeNodeAccess,
   configureManagedSsh,
   inspectNode,
+  inspectOspfRuntime,
   inspectProtocolRoutes,
   loadSeedNodes,
   rollbackNode,
@@ -33,3 +34,4 @@ export {
   sourcePolicyRules,
 } from "./bird-source-policy.js";
 export { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
+export { normalizeOspfDomain, ospfDomainNodeIds, ospfProtocolName } from "./ospf.js";

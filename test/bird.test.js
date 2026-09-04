@@ -133,6 +133,8 @@ const policyFilters = [{
 
 test("normalizes managed nodes, peers, typed Defines, and session-local settings", () => {
   assert.equal(normalizeNode(node).kind, "managed-node");
+  assert.equal(normalizeNode({ ...node, igpAddress: "10.0.0.1" }).igpAddress, "10.0.0.1");
+  assert.equal(normalizeNode(node).igpAddress, null);
   assert.equal(normalizePeer(peers[0]).port, 179);
   assert.equal(normalizeDefine(cidrDefines[0]).name, "TRANSIT_EXPORTS");
   assert.deepEqual(normalizeDefine(cidrDefines[0]).entries, cidrDefines[0].entries);
@@ -784,7 +786,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 27);
+  assert.equal(state.version, 28);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.deepEqual(state.filters[0].nodeIds, ["local"]);
   assert.throws(

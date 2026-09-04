@@ -15,6 +15,8 @@ import type {
   SourcePolicyEgress,
   StaticRouteFilter,
   StaticRouteFilterOperation,
+  OspfDomain,
+  OspfPasswordOptions,
 } from "../packages/contracts/src/inventory.js";
 import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import {
@@ -33,6 +35,7 @@ import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
 import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
 import { normalizeSourcePolicyEgress, renderSourcePolicyEgress } from "./bird-source-policy.js";
+import { normalizeOspfDomain, ospfDomainNodeIds, ospfProtocolName } from "./ospf.js";
 import type { NodeConfigBundle } from "./config-bundle.js";
 import path from "node:path";
 
@@ -326,6 +329,163 @@ function renderPolicy(
   return `    export filter {\n${renderedSteps}      reject;\n    };\n`;
 }
 
+function renderOspfForNode(
+  node: ManagedNode,
+  domains: OspfDomain[],
+  functionMap: ReadonlyMap<string, PolicyFunction>,
+  filterMap: ReadonlyMap<string, PolicyFilter>,
+  defineMap: ReadonlyMap<string, CidrDefine>,
+): string {
+  const renderPassword = (indent: string, password: string, options: OspfPasswordOptions | undefined): string => {
+    if (!options || Object.keys(options).length === 0) return `${indent}password ${birdString(password)};\n`;
+    let text = `${indent}password ${birdString(password)} {\n`;
+    if (options.id != null) text += `${indent}  id ${options.id};\n`;
+    for (const [key, directive] of [["generateFrom", "generate from"], ["generateTo", "generate to"], ["acceptFrom", "accept from"], ["acceptTo", "accept to"], ["from", "from"], ["to", "to"]] as const) {
+      if (options[key]) text += `${indent}  ${directive} ${birdString(String(options[key]))};\n`;
+    }
+    if (options.algorithm) text += `${indent}  algorithm ${String(options.algorithm).replace("-", " ")};\n`;
+    return `${text}${indent}};\n`;
+  };
+  let output = "";
+  for (const domain of domains) {
+    const config = domain.nodeConfigs.find((item) => item.nodeId === node.id);
+    if (!config || !config.enabled) continue;
+      for (const version of config.versions) {
+      const family = version === "ospfv2" ? "ipv4" : "ipv6";
+        const areas = new Map<string, OspfDomain["links"]>();
+      for (const link of domain.links) {
+        if (link.fromNodeId !== node.id && link.toNodeId !== node.id) continue;
+        const iface = link.fromNodeId === node.id ? link.localInterface : link.remoteInterface;
+        const existing = areas.get(link.area) ?? [];
+        areas.set(link.area, [...existing, { ...link, localInterface: iface }]);
+      }
+      for (const area of Object.keys(config.areaOptions ?? {})) if (!areas.has(area)) areas.set(area, []);
+      for (const virtualLink of config.virtualLinks ?? []) if (!areas.has(virtualLink.area)) areas.set(virtualLink.area, []);
+        output += `\nprotocol ospf ${version === "ospfv3" ? "v3" : "v2"} ${ospfProtocolName(domain, version)} {\n`;
+      for (const link of domain.links) if (version === "ospfv3" && link.authentication === "simple") assertValidation(false, `OSPFv3 链路 ${link.id} 不支持 Simple 认证，请使用 Cryptographic`);
+      if (config.routerId) output += `  router id ${config.routerId};\n`;
+      const protocolOptions = config.protocolOptions ?? {};
+      if (protocolOptions.rfc1583compat === true) output += "  rfc1583compat yes;\n";
+      if (version === "ospfv3" && protocolOptions.rfc5838 === false) output += "  rfc5838 no;\n";
+      if (protocolOptions.instanceId != null) output += `  instance id ${protocolOptions.instanceId};\n`;
+      if (protocolOptions.stubRouter === true) output += "  stub router yes;\n";
+      if (protocolOptions.tick != null) output += `  tick ${protocolOptions.tick};\n`;
+      if (protocolOptions.ecmp != null) output += `  ecmp ${protocolOptions.ecmp ? "yes" : "no"}${protocolOptions.ecmpLimit != null ? ` limit ${protocolOptions.ecmpLimit}` : ""};\n`;
+      if (protocolOptions.mergeExternal === true) output += "  merge external yes;\n";
+      const restartMode = protocolOptions.gracefulRestartMode ?? (config.gracefulRestart ? "on" : "aware");
+      if (restartMode) output += `  graceful restart ${restartMode};\n`;
+      if (protocolOptions.gracefulRestartTime != null) output += `  graceful restart time ${protocolOptions.gracefulRestartTime};\n`;
+      const importPolicy = config.importPolicies[version];
+      const exportPolicy = config.exportPolicies[version];
+      const defineId = config.exportDefineIds[version];
+      const define = defineId ? defineMap.get(defineId) ?? null : null;
+      output += `  ${family} {\n`;
+      output += renderPolicy(importPolicy, "import", define, functionMap, filterMap);
+      const renderedExport = renderPolicy(exportPolicy, "export", define, functionMap, filterMap);
+      if (!config.redistributeStatic) {
+        output += renderedExport;
+      } else {
+        // Static redistribution is an additive export rule. A named custom
+        // filter cannot be composed safely, so fail validation instead of
+        // silently ignoring the checkbox.
+        assertValidation(exportPolicy.mode !== "custom", "启用静态路由重分发时不能使用自定义 Export Filter");
+        if (renderedExport.startsWith("    export filter {")) {
+          output += renderedExport.replace("    export filter {\n", "    export filter {\n      if source = RTS_STATIC then accept;\n");
+        } else {
+          const decision = exportPolicy.formAction === "all" ? "      accept;\n" : "      reject;\n";
+          output += `    export filter {\n      if source = RTS_STATIC then accept;\n${decision}    };\n`;
+        }
+      }
+      output += "  };\n";
+      for (const [area, links] of areas) {
+        output += `  area ${area} {\n`;
+        const areaOptions = config.areaOptions?.[area] ?? {};
+        if (areaOptions.stub) output += "    stub;\n";
+        if (areaOptions.nssa) output += "    nssa;\n";
+        if (areaOptions.summary != null) output += `    summary ${areaOptions.summary ? "yes" : "no"};\n`;
+        if (areaOptions.defaultNssa) output += "    default nssa yes;\n";
+        if (areaOptions.defaultCost != null) output += `    default cost ${areaOptions.defaultCost};\n`;
+        if (areaOptions.defaultCost2 != null) output += `    default cost2 ${areaOptions.defaultCost2};\n`;
+        if (areaOptions.translator) output += "    translator yes;\n";
+        if (areaOptions.translatorStability != null) output += `    translator stability ${areaOptions.translatorStability};\n`;
+        if (areaOptions.networks?.length) {
+          output += "    networks {\n";
+          for (const network of areaOptions.networks) output += `      ${network.prefix}${network.hidden ? " hidden" : ""};\n`;
+          output += "    };\n";
+        }
+        if (areaOptions.external?.length) {
+          output += "    external {\n";
+          for (const external of areaOptions.external) output += `      ${external.prefix}${external.hidden ? " hidden" : ""}${external.tag != null ? ` tag ${external.tag}` : ""};\n`;
+          output += "    };\n";
+        }
+        for (const stubnet of areaOptions.stubnets ?? []) {
+          const hasOptions = stubnet.hidden || stubnet.summary || stubnet.cost != null;
+          output += `    stubnet ${stubnet.prefix}${hasOptions ? " {" : ";"}\n`;
+          if (hasOptions) {
+            if (stubnet.hidden) output += "      hidden yes;\n";
+            if (stubnet.summary) output += "      summary yes;\n";
+            if (stubnet.cost != null) output += `      cost ${stubnet.cost};\n`;
+            output += "    };\n";
+          }
+        }
+        for (const link of links) {
+          const options = link.options ?? {};
+          output += `    interface ${birdString(link.localInterface)} {\n`;
+          if (options.instanceId != null) output += `      instance ${options.instanceId};\n`;
+          output += `      cost ${link.cost};\n      hello ${link.hello};\n`;
+          if (options.poll != null) output += `      poll ${options.poll};\n`;
+          if (options.retransmit != null) output += `      retransmit ${options.retransmit};\n`;
+          if (options.transmitDelay != null) output += `      transmit delay ${options.transmitDelay};\n`;
+          if (options.priority != null) output += `      priority ${options.priority};\n`;
+          if (options.wait != null) output += `      wait ${options.wait};\n`;
+          if (options.deadMode === "seconds") output += `      dead ${link.dead};\n`;
+          else output += `      dead count ${Math.max(1, Math.floor(link.dead / link.hello))};\n`;
+          if (link.passive || options.stub) output += "      stub yes;\n";
+          if (options.rxBuffer != null) output += `      rx buffer ${options.rxBuffer};\n`;
+          if (options.txLength != null) output += `      tx length ${options.txLength};\n`;
+          if (options.type) output += `      type ${options.type};\n`;
+          if (options.linkLsaSuppression) output += "      link lsa suppression yes;\n";
+          if (options.strictNonbroadcast) output += "      strict nonbroadcast yes;\n";
+          if (options.realBroadcast) output += "      real broadcast yes;\n";
+          if (options.ptpNetmask) output += "      ptp netmask yes;\n";
+          if (options.ptpAddress) output += "      ptp address yes;\n";
+          if (options.secondary) output += "      secondary yes;\n";
+          if (options.checkLink === false) output += "      check link no;\n";
+          if (options.bfd ?? config.bfd) output += "      bfd yes;\n";
+          if (options.ecmpWeight != null) output += `      ecmp weight ${options.ecmpWeight};\n`;
+          if (options.ttlSecurity === "on") output += "      ttl security yes;\n";
+          else if (options.ttlSecurity === "tx-only") output += "      ttl security tx only;\n";
+          if (options.txClass != null) output += `      tx class ${options.txClass};\n`;
+          if (options.txDscp != null) output += `      tx dscp ${options.txDscp};\n`;
+          if (options.txPriority != null) output += `      tx priority ${options.txPriority};\n`;
+          const auth = link.authentication === "simple" ? "simple" : link.authentication === "none" ? "none" : "cryptographic";
+          output += `      authentication ${auth};\n`;
+          if (options.password) output += renderPassword("      ", options.password, options.passwordOptions);
+          if (options.neighbors?.length) {
+            output += "      neighbors {\n";
+            for (const neighbor of options.neighbors) output += `        ${neighbor.address}${neighbor.eligible ? " eligible" : ""};\n`;
+            output += "      };\n";
+          }
+          output += "    };\n";
+        }
+        for (const virtualLink of (config.virtualLinks ?? []).filter((item) => item.area === area)) {
+          output += `    virtual link ${virtualLink.id}${virtualLink.instanceId != null ? ` instance ${virtualLink.instanceId}` : ""} {\n`;
+          if (virtualLink.hello != null) output += `      hello ${virtualLink.hello};\n`;
+          if (virtualLink.retransmit != null) output += `      retransmit ${virtualLink.retransmit};\n`;
+          if (virtualLink.wait != null) output += `      wait ${virtualLink.wait};\n`;
+          if (virtualLink.dead != null) output += `      dead ${virtualLink.dead};\n`;
+          if (virtualLink.authentication) output += `      authentication ${virtualLink.authentication};\n`;
+          if (virtualLink.password) output += renderPassword("      ", virtualLink.password, virtualLink.passwordOptions);
+          output += "    };\n";
+        }
+        output += "  };\n";
+      }
+      output += "}\n";
+    }
+  }
+  return output;
+}
+
 function normalizeActiveSessions(
   node: ManagedNode,
   peers: Peer[],
@@ -392,6 +552,7 @@ export function renderBirdConfig(
   rpkiInputs: readonly unknown[] = [],
   staticInputs: readonly unknown[] = [],
   sourcePolicyInputs: readonly unknown[] = [],
+  ospfInputs: readonly unknown[] = [],
 ): string {
   const node = normalizeNode(nodeInput);
   const peers = peerInputs.map(normalizePeer);
@@ -403,9 +564,12 @@ export function renderBirdConfig(
   const sourcePolicies = sourcePolicyInputs.map(normalizeSourcePolicyEgress)
     .filter((item) => item.enabled && resourceAppliesToNode(item, node.id));
   const sessions = sessionInputs.map(normalizeSession).filter((item) => item.enabled);
+  const ospfDomains = ospfInputs.map(normalizeOspfDomain);
   const defineMap = new Map(defines.map((item) => [item.id, item]));
+  const cidrDefineMap = new Map(defines.filter((item): item is CidrDefine => item.type !== "expression").map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
+  const ospfDomainSet = ospfDomains.filter((domain) => ospfDomainNodeIds(domain).includes(node.id));
   for (const resource of [...defines, ...functions, ...filters]) {
     assertValidation(resourceAppliesToNode(resource, node.id), `策略 ${resource.name} 对节点 ${node.name} 不可用`);
   }
@@ -473,6 +637,7 @@ export function renderBirdConfig(
   for (const source of rpki) config += renderRPKISource(source);
   for (const resource of functions) config += `\n${resource.source}\n`;
   for (const resource of filters) config += `\n${resource.source}\n`;
+  config += renderOspfForNode(node, ospfDomainSet, functionMap, filterMap, cidrDefineMap);
   if (active.some(({ session }) => session.bgp.bfd !== "off")) config += "\nprotocol bfd birdbox_bfd {\n}\n";
 
   for (const staticProtocol of renderedStaticProtocols) {
@@ -523,10 +688,11 @@ export function renderBirdConfigBundle(
   rpkiInputs: readonly unknown[] = [],
   staticInputs: readonly unknown[] = [],
   sourcePolicyInputs: readonly unknown[] = [],
+  ospfInputs: readonly unknown[] = [],
 ): NodeConfigBundle {
   const node = normalizeNode(nodeInput);
   const defines = defineInputs.map(normalizeDefine).filter((item) => item.enabled);
-  const main = renderBirdConfig(node, peerInputs, sessionInputs, functionInputs, filterInputs, defines, rpkiInputs, staticInputs, sourcePolicyInputs);
+  const main = renderBirdConfig(node, peerInputs, sessionInputs, functionInputs, filterInputs, defines, rpkiInputs, staticInputs, sourcePolicyInputs, ospfInputs);
   const resources = defines.flatMap((resource) => resource.type !== "expression" && resource.entrySource.kind === "irr-as-set"
     ? [{
         relativePath: `define_${resource.id}.conf`,
