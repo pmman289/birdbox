@@ -194,12 +194,15 @@ exit 0
   assert.match(await fs.readFile(capturedConfig, "utf8"), /define GLOBAL_TEST = 42;/);
   const nodeId = created.body.node.id;
 
-  const rejectedTargetChange = await authenticatedRequest(`/api/nodes/${nodeId}`, {
+  const updatedNode = await authenticatedRequest(`/api/nodes/${nodeId}`, {
     method: "PUT",
-    body: JSON.stringify({ sshHost: "replacement.example" }),
+    body: JSON.stringify({ sshHost: "replacement.example", sshPort: 2200, igpAddress: "10.0.0.1" }),
   });
-  assert.equal(rejectedTargetChange.status, 409);
-  assert.match(rejectedTargetChange.body.error, /不可直接修改/);
+  assert.equal(updatedNode.status, 200);
+  assert.equal(updatedNode.body.node.sshHost, "replacement.example");
+  assert.equal(updatedNode.body.node.sshPort, 2200);
+  assert.equal(updatedNode.body.node.igpAddress, "10.0.0.1");
+  assert.match(await fs.readFile(fakeLog, "utf8"), /-p 2200 .*birdbox@replacement\.example/);
 
   const peer = await authenticatedRequest(`/api/nodes/${nodeId}/peers`, {
     method: "POST",

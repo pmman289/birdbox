@@ -98,7 +98,7 @@ docker compose up -d --force-recreate birdbox
 
 ### 2. 生成准备脚本
 
-登录 Birdbox 后进入“资源管理”中的“受管节点”，点击“添加节点”，填写节点地址、SSH 用户、Router ID 和配置路径，然后点击“生成准备脚本”。
+登录 Birdbox 后进入“资源管理”中的“受管节点”，点击“添加节点”，填写 SSH 连接地址、SSH 端口、SSH 用户、Router ID 和配置路径，然后点击“生成准备脚本”。已有节点可直接把 SSH 连接地址或端口改为公网 SSH 服务；该修改不会改变既有会话地址或节点 IGP 地址。
 
 常规 Linux 使用默认的 Linux 预设。OpenWrt/iStoreOS 应选择 OpenWrt 预设，默认路径为：
 

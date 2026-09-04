@@ -91,6 +91,12 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(page.locator("#nodeEditorRouterId")).toHaveValue("192.0.2.1");
   await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
 
+  await page.getByRole("button", { name: "编辑节点 E2E Edge" }).click();
+  await expect(page.locator("#nodeEditorSshHost")).toBeEnabled();
+  await expect(page.locator("#nodeEditorSshPort")).toBeEnabled();
+  await expect(page.locator("#sshHostField")).toContainText("可修改为公网地址");
+  await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
+
   await page.locator("#resourcePeersTab").click();
   await page.locator("#managementPeerRows .row-edit-button").click();
   await expect(page.locator("#peerDialog")).toBeVisible();

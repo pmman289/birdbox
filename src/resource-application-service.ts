@@ -306,11 +306,11 @@ export function createResourceApplicationService(
       if (!previous) fail(404, "受管节点不存在");
       const updated = normalizeNode({ ...previous, ...body, id: nodeId });
       const immutableDeploymentFields: Array<keyof ManagedNode> = [
-        "transport", "sshHost", "sshPort", "sshUser", "sshIdentity", "deploymentMode",
+        "transport", "sshUser", "sshIdentity", "deploymentMode",
         "mainConfigPath", "generatedConfigPath", "socketPath",
       ];
       if (immutableDeploymentFields.some((field) => updated[field] !== previous[field])) {
-        fail(409, "节点的 SSH 目标、部署模式和配置路径不可直接修改；请先删除节点并重新添加");
+        fail(409, "节点的管理方式、SSH 用户、部署模式和配置路径不可直接修改；请先删除节点并重新添加");
       }
       draft.nodes[index] = updated;
       return updated;

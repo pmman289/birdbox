@@ -9,6 +9,7 @@ export interface ManagedNode {
   kind: "managed-node";
   name: string;
   transport: "local" | "ssh";
+  /** SSH management endpoint; independent from the BGP/IGP transport address. */
   sshHost: string | null;
   sshPort: number | null;
   sshUser: string | null;

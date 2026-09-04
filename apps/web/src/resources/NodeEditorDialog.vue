@@ -64,7 +64,7 @@ const globalSourcePolicies = computed(() => (
 
 const fieldMappings = [
   [/节点名称/, "nodeEditorName"],
-  [/SSH 目标|节点地址/, "nodeEditorSshHost"],
+  [/SSH 目标|SSH 连接地址|节点地址/, "nodeEditorSshHost"],
   [/SSH 用户/, "nodeEditorSshUser"],
   [/SSH 端口/, "nodeEditorSshPort"],
   [/Router ID/, "nodeEditorRouterId"],
@@ -320,9 +320,9 @@ onBeforeUnmount(() => {
         <div class="field full-width"><label for="nodeEditorName">节点名称</label><input id="nodeEditorName" v-model.trim="draft.name" maxlength="80" required></div>
         <div class="field"><span class="field-label">管理方式</span><div class="field-readonly">{{ isSsh ? "SSH" : "本机" }}</div></div>
         <template v-if="isSsh">
-          <div id="sshHostField" class="field"><label for="nodeEditorSshHost">节点地址</label><input id="nodeEditorSshHost" v-model.trim="draft.sshHost" placeholder="router.example" required :disabled="editing"></div>
+          <div id="sshHostField" class="field"><label for="nodeEditorSshHost">SSH 连接地址</label><input id="nodeEditorSshHost" v-model.trim="draft.sshHost" placeholder="公网地址或可解析主机名" required><small v-if="editing">可修改为公网地址；已有会话和 IGP 地址不会被自动改写。</small></div>
           <div class="field"><label for="nodeEditorSshUser">SSH 用户</label><input id="nodeEditorSshUser" v-model.trim="draft.sshUser" placeholder="birdbox" required :disabled="editing"></div>
-          <div class="field"><label for="nodeEditorSshPort">SSH 端口</label><input id="nodeEditorSshPort" v-model.number="draft.sshPort" type="number" min="1" max="65535" required :disabled="editing"></div>
+          <div class="field"><label for="nodeEditorSshPort">SSH 端口</label><input id="nodeEditorSshPort" v-model.number="draft.sshPort" type="number" min="1" max="65535" required><small v-if="editing">可修改为公网 SSH 服务端口。</small></div>
         </template>
         <div class="field"><label for="nodeEditorRouterId">Router ID</label><input id="nodeEditorRouterId" v-model.trim="draft.routerId" required></div>
         <div class="field"><label for="nodeEditorIgpAddress">IGP 地址（BGP 建邻）</label><input id="nodeEditorIgpAddress" v-model.trim="draft.igpAddress" placeholder="例如 10.0.0.1 或 2001:db8::1"><small>新建 iBGP/eBGP 会话会使用此地址；留空时需要在会话中手动选择本地地址。</small></div>
