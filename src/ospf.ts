@@ -127,7 +127,9 @@ export function normalizeOspfDomain(inputValue: unknown): OspfDomain {
       deadMode: optionsInput.deadMode === "seconds" ? "seconds" : "count",
       rxBuffer: optionsInput.rxBuffer === "large" || optionsInput.rxBuffer === "normal" ? optionsInput.rxBuffer : (optionsInput.rxBuffer == null || optionsInput.rxBuffer === "" ? null : Number(optionsInput.rxBuffer)),
       txLength: optionsInput.txLength == null || optionsInput.txLength === "" ? null : Number(optionsInput.txLength),
-      type: optionsInput.type === "broadcast" || optionsInput.type === "nbma" || optionsInput.type === "ptmp" ? optionsInput.type : (optionsInput.type === "ptp" ? "ptp" : undefined),
+      // Point-to-point is the project default. Keep accepting legacy records
+      // without a type, but normalize them so generated configs are explicit.
+      type: optionsInput.type === "broadcast" || optionsInput.type === "nbma" || optionsInput.type === "ptmp" ? optionsInput.type : "ptp",
       linkLsaSuppression: optionsInput.linkLsaSuppression === true,
       strictNonbroadcast: optionsInput.strictNonbroadcast === true,
       realBroadcast: optionsInput.realBroadcast === true,
@@ -164,20 +166,44 @@ export function normalizeOspfDomain(inputValue: unknown): OspfDomain {
     };
   });
   const layoutInput = input.layout && typeof input.layout === "object" && !Array.isArray(input.layout) ? input.layout as RecordValue : {};
-  const layout = Object.fromEntries(Object.entries(layoutInput).map(([id, value]) => {
+  const nodeConfigIds = new Set(nodeConfigs.map((config) => config.nodeId));
+  // Layout is auxiliary UI state. Drop coordinates for nodes no longer in the
+  // domain so stale entries cannot make an otherwise valid inventory unreadable.
+  const layout = Object.fromEntries(Object.entries(layoutInput).filter(([id]) => nodeConfigIds.has(id)).map(([id, value]) => {
     const position = record(value, "OSPF 拓扑坐标");
     return [id, { x: Math.round(Number(position.x ?? 0)), y: Math.round(Number(position.y ?? 0)), locked: position.locked === true }];
   }));
   assertValidation(new Set(links.map((item) => item.id)).size === links.length, "OSPF 链路 ID 重复");
-  const pairCosts = new Map<string, number>(); const usedInterfaces = new Set<string>();
+  const pairCosts = new Map<string, number>();
+  const usedInterfaces = new Map<string, OspfLink>();
   for (const link of links) {
     assertValidation(link.fromNodeId !== link.toNodeId, "OSPF 链路不能连接同一节点");
     assertValidation(link.localInterface && link.remoteInterface, "OSPF 链路必须配置两端接口");
     assertValidation(net.isIP(link.area) === 4, `OSPF 链路 ${link.id} Area 必须是 IPv4 Area ID`);
     const pair = [link.fromNodeId, link.toNodeId].sort().join(":");
     const knownCost = pairCosts.get(pair); assertValidation(knownCost === undefined || knownCost === link.cost, `OSPF 节点对 ${pair} 的 Cost 必须一致`); pairCosts.set(pair, link.cost);
-    const leftKey = `${link.fromNodeId}:${link.localInterface}`; const rightKey = `${link.toNodeId}:${link.remoteInterface}`;
-    assertValidation(!usedInterfaces.has(leftKey) && !usedInterfaces.has(rightKey), `OSPF 接口不能被多个链路复用`); usedInterfaces.add(leftKey); usedInterfaces.add(rightKey);
+    const endpointEntries: Array<[string, OspfLink]> = [
+      [`${link.fromNodeId}:${link.localInterface}`, link],
+      [`${link.toNodeId}:${link.remoteInterface}`, { ...link, localInterface: link.remoteInterface }],
+    ];
+    for (const [key, current] of endpointEntries) {
+      const previous = usedInterfaces.get(key);
+      if (!previous) {
+        usedInterfaces.set(key, current);
+        continue;
+      }
+      // A shared interface is valid for NBMA/PtMP where each neighbor is
+      // represented inside one BIRD interface block. Other network types
+      // would produce ambiguous per-interface parameters.
+      assertValidation(
+        (previous.options?.type === "nbma" || previous.options?.type === "ptmp") &&
+        (current.options?.type === "nbma" || current.options?.type === "ptmp") &&
+        previous.area === current.area && previous.cost === current.cost &&
+        previous.hello === current.hello && previous.dead === current.dead &&
+        previous.passive === current.passive && previous.authentication === current.authentication,
+        `OSPF 接口 ${key} 只能在 NBMA/PtMP 同参数链路间复用`,
+      );
+    }
   }
   return { id: normalizeId(input.id, "OSPF 域 ID"), name: normalizeLabel(input.name, "OSPF 域名称"), nodeConfigs, links, layout };
 }

@@ -2,6 +2,7 @@ import type {
   ChangeEvent,
   DashboardResponse,
   InventoryHealth,
+  NodeHealthSummary,
   NodeRuntime,
   ProtocolRuntime,
 } from "../packages/contracts/src/api.js";
@@ -40,6 +41,7 @@ export function protocolFor(
 
 export function summarizeInventoryHealth(state: Inventory, runtimes: NodeRuntime[]): InventoryHealth {
   const runtimeByNodeId = new Map(runtimes.map((runtime) => [runtime.nodeId, runtime]));
+  const nodeStatuses: NodeHealthSummary[] = [];
   let onlineNodes = 0;
   let activeSessions = 0;
   let normalSessions = 0;
@@ -48,6 +50,22 @@ export function summarizeInventoryHealth(state: Inventory, runtimes: NodeRuntime
     const runtime = runtimeByNodeId.get(node.id);
     const online = runtime?.reachable === true && runtime.bird2 === true;
     if (online) onlineNodes += 1;
+    const activeNodeSessions = nodeSessions(state, node.id).filter((session) => session.enabled !== false);
+    const normalNodeSessions = activeNodeSessions.filter((session) => {
+      const protocol = protocolFor(runtime ?? { protocols: [] }, session.protocolName);
+      return online && protocol.established && protocol.disabled !== true;
+    });
+    nodeStatuses.push({
+      nodeId: node.id,
+      name: node.name,
+      status: !online ? "error" : normalNodeSessions.length < activeNodeSessions.length ? "warning" : "ready",
+      reachable: runtime?.reachable === true,
+      bird2: runtime?.bird2 === true,
+      version: runtime?.version ?? null,
+      error: runtime?.error ?? (!online ? "节点不可达或 BIRD 未运行" : null),
+      activeSessions: activeNodeSessions.length,
+      normalSessions: normalNodeSessions.length,
+    });
     for (const session of nodeSessions(state, node.id)) {
       if (session.enabled === false) continue;
       activeSessions += 1;
@@ -65,6 +83,7 @@ export function summarizeInventoryHealth(state: Inventory, runtimes: NodeRuntime
     activeSessions,
     normalSessions,
     abnormalSessions,
+    nodeStatuses,
   };
 }
 

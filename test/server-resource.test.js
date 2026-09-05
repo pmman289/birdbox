@@ -50,6 +50,18 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   const fakeCommand = `#!/bin/sh
 printf '%s %s\n' "$0" "$*" >> "$BIRDBOX_FAKE_LOG"
 case "$*" in
+  *"show route table master4 for 203.0.113.5 all"*)
+    printf '%s\n' 'BIRD 2.19.1 ready.' 'Table master4:' \
+      '203.0.113.0/24    unicast [test_bgp 10:00:00.000] * (100) [AS65002i]' \
+      '  via 192.0.2.2 on eth0'
+    exit 0
+    ;;
+  *"show route table master6 for 2001:db8::5 all"*)
+    printf '%s\n' 'BIRD 2.19.1 ready.' 'Table master6:' \
+      '2001:db8:100::/48    unicast [test_ospf6 10:00:00.000] * (150)' \
+      '  via 2001:db8::2 on eth1'
+    exit 0
+    ;;
   *"show route table master4 protocol test_bgp all"*)
     printf '%s\n' 'BIRD 2.19.1 ready.' 'Table master4:' \
       '203.0.113.0/24    unicast [test_bgp 10:00:00.000] * (100) [AS65002i]' \
@@ -304,6 +316,17 @@ exit 0
   assert.deepEqual(exportedRoutes.body.routes.map((route) => route.prefix), ["198.51.100.0/24"]);
   const invalidRouteFamily = await authenticatedRequest("/api/sessions/session_test/routes?family=all&direction=import");
   assert.equal(invalidRouteFamily.status, 400);
+  const pathLookup = await authenticatedRequest("/api/nodes/local/route-path?target=203.0.113.5");
+  assert.equal(pathLookup.status, 200);
+  assert.equal(pathLookup.body.family, "ipv4");
+  assert.deepEqual(pathLookup.body.routes[0].nextHops, [{ address: "192.0.2.2", interface: "eth0" }]);
+  const ipv6PathLookup = await authenticatedRequest("/api/nodes/local/route-path?target=2001:db8::5");
+  assert.equal(ipv6PathLookup.status, 200);
+  assert.equal(ipv6PathLookup.body.family, "ipv6");
+  assert.equal(ipv6PathLookup.body.table, "master6");
+  assert.deepEqual(ipv6PathLookup.body.routes[0].nextHops, [{ address: "2001:db8::2", interface: "eth1" }]);
+  const invalidPathTarget = await authenticatedRequest("/api/nodes/local/route-path?target=not-an-ip");
+  assert.equal(invalidPathTarget.status, 400);
 
   const disabledSession = await authenticatedRequest("/api/sessions/apply", {
     method: "POST",

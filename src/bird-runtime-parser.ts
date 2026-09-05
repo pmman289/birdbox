@@ -19,6 +19,15 @@ interface ParsedRouteDetails {
   limit: number;
 }
 
+export interface RoutePathHop {
+  address: string | null;
+  interface: string | null;
+}
+
+export interface RoutePathEntry extends RouteDetail {
+  nextHops: RoutePathHop[];
+}
+
 interface PendingRoute extends Omit<RouteDetail, "details"> {
   details: string[];
 }
@@ -132,4 +141,29 @@ export function parseRouteDetails(raw: unknown, family: AddressFamily, limit = 2
   }
   pushCurrent();
   return { family, table, routes, truncated, limit };
+}
+
+/** Parse the selected route returned by `show route ... for <address> all`. */
+export function parseRoutePath(raw: unknown, family: AddressFamily, limit = 16): {
+  family: AddressFamily;
+  table: string | null;
+  routes: RoutePathEntry[];
+  truncated: boolean;
+  limit: number;
+} {
+  const parsed = parseRouteDetails(raw, family, limit);
+  const routes = parsed.routes.map((route) => {
+    const nextHops: RoutePathHop[] = [];
+    for (const line of route.details.split(/\r?\n/)) {
+      const via = line.match(/^\s*via\s+(\S+)(?:\s+on\s+(\S+))?/i);
+      if (via) {
+        nextHops.push({ address: via[1] ?? null, interface: via[2] ?? null });
+        continue;
+      }
+      const device = line.match(/^\s*dev\s+(\S+)/i);
+      if (device) nextHops.push({ address: null, interface: device[1] ?? null });
+    }
+    return { ...route, nextHops };
+  });
+  return { ...parsed, routes };
 }

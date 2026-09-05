@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { normalizeOspfDomain, renderBirdConfig, validateInventory } from "../src/bird.js";
-import { parseOspfSectionByTable } from "../src/bird-runtime.js";
+import { parseOspfNeighborDetails, parseOspfSectionByTable } from "../src/bird-runtime.js";
+import { parseRoutePath } from "../src/bird-runtime-parser.js";
 
 const execFileAsync = promisify(execFile);
 const node = (id, routerId) => ({ id, name: id, transport: "local", routerId, listenPort: 179 });
@@ -25,24 +26,94 @@ test("parses BIRD OSPF neighbor sections with blank lines", () => {
   assert.deepEqual(parseOspfSectionByTable(raw, "birdbox_ospf_demo_ospfv2"), { state: "Full/PtP", neighbors: 1 });
 });
 
+test("parses OSPF neighbor details for the selected protocol", () => {
+  const raw = [
+    "internal_ospf:",
+    "Router ID    Pri State      DTime Interface Router IP",
+    "192.0.2.9  1 Full/PtP 30.123 eth9 192.0.2.9",
+    "",
+    "birdbox_ospf_demo_ospfv2:",
+    "Router ID    Pri State      DTime Interface Router IP",
+    "192.0.2.2  1 Full/PtP 31.5 bbtest 192.0.2.2",
+    "192.0.2.3  0 Init - bbtest 192.0.2.3",
+  ].join("\n");
+  assert.deepEqual(parseOspfNeighborDetails(raw, "birdbox_ospf_demo_ospfv2", "ospfv2"), [
+    { version: "ospfv2", routerId: "192.0.2.2", priority: 1, state: "Full/PtP", deadTime: 31.5, interface: "bbtest", address: "192.0.2.2" },
+    { version: "ospfv2", routerId: "192.0.2.3", priority: 0, state: "Init", deadTime: null, interface: "bbtest", address: "192.0.2.3" },
+  ]);
+});
+
+test("parses route lookup output and extracts next hops", () => {
+  const raw = [
+    "BIRD 2.18 ready.",
+    "Table master4:",
+    "203.0.113.0/24 unicast [ebgp_demo 12:00:00] * E 100",
+    "\tvia 192.0.2.1 on eth0",
+    "\tvia 192.0.2.2 on eth1",
+  ].join("\n");
+  const result = parseRoutePath(raw, "ipv4");
+  assert.equal(result.table, "master4");
+  assert.equal(result.routes.length, 1);
+  assert.deepEqual(result.routes[0].nextHops, [
+    { address: "192.0.2.1", interface: "eth0" },
+    { address: "192.0.2.2", interface: "eth1" },
+  ]);
+});
+
 function domain() {
   return { id: "ospf_main", name: "Main OSPF", nodeConfigs: ["n1", "n2"].map((nodeId) => ({ nodeId, enabled: true, versions: ["ospfv2", "ospfv3"], routerId: nodeId === "n1" ? "192.0.2.1" : "192.0.2.2", importPolicies: { ospfv2: policy("all"), ospfv3: policy("all") }, exportPolicies: { ospfv2: policy("none"), ospfv3: policy("none") }, exportDefineIds: { ospfv2: null, ospfv3: null }, bfd: false, gracefulRestart: true, redistributeStatic: false })), links: [{ id: "l1", fromNodeId: "n1", toNodeId: "n2", area: "0.0.0.0", localInterface: "eth0", remoteInterface: "eth1", cost: 20, hello: 10, dead: 40, passive: false, authentication: "none" }], layout: {} };
 }
 
 test("normalizes OSPF domain and renders both protocol versions", async () => {
   const d = normalizeOspfDomain(domain());
+  assert.equal(d.links[0].options?.type, "ptp");
   const config = renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [d]);
   assert.match(config, /protocol ospf v2/);
   assert.match(config, /protocol ospf v3/);
   assert.match(config, /interface "eth0"/);
+  assert.match(config, /type ptp;/);
+  assert.doesNotMatch(config, /interface "eth0" \{[\s\S]*authentication /);
   const file = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ospf-")), "bird.conf");
   await fs.writeFile(file, config);
   await execFileAsync("bird", ["-p", "-c", file]);
 });
 
+test("defaults OSPF link authentication to none without rendering an auth directive", () => {
+  const input = domain();
+  delete input.links[0].authentication;
+  const normalized = normalizeOspfDomain(input);
+  assert.equal(normalized.links[0].authentication, "none");
+  const config = renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [normalized]);
+  assert.doesNotMatch(config, /interface "eth0" \{[\s\S]*?authentication /);
+});
+
+test("drops stale OSPF layout coordinates for removed nodes", () => {
+  const d = normalizeOspfDomain({
+    ...domain(),
+    layout: {
+      n1: { x: 42, y: 24 },
+      removed_node: { x: 300, y: 200 },
+    },
+  });
+  assert.deepEqual(d.layout, { n1: { x: 42, y: 24, locked: false } });
+});
+
 test("rejects inconsistent parallel-link cost and reused interfaces", () => {
   assert.throws(() => normalizeOspfDomain({ ...domain(), links: [domain().links[0], { ...domain().links[0], id: "l2", localInterface: "eth2", remoteInterface: "eth3", cost: 30 }] }), /Cost/);
   assert.throws(() => normalizeOspfDomain({ ...domain(), links: [domain().links[0], { ...domain().links[0], id: "l2" }] }), /接口/);
+});
+
+test("allows shared NBMA interfaces with consistent link parameters", () => {
+  const base = domain();
+  const shared = { type: "nbma", checkLink: true, deadMode: "count" };
+  const d = normalizeOspfDomain({
+    ...base,
+    links: [
+      { ...base.links[0], options: shared },
+      { ...base.links[0], id: "l2", localInterface: "eth0", remoteInterface: "eth2", options: shared },
+    ],
+  });
+  assert.equal(d.links.length, 2);
 });
 
 test("validates OSPF node references", () => {

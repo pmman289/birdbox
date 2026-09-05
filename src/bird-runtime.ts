@@ -1,6 +1,7 @@
 import { execFile, type ExecFileException, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 import type { AddressFamily, ManagedNode } from "../packages/contracts/src/inventory.js";
@@ -9,10 +10,11 @@ import {
   RUNTIME,
   assertValidation,
   normalizeId,
+  normalizeIPAddress,
   normalizeNode,
   normalizeOptionalName,
 } from "./bird-normalize-common.js";
-import { parseProtocolStatuses, parseRouteDetails } from "./bird-runtime-parser.js";
+import { parseProtocolStatuses, parseRouteDetails, parseRoutePath, type RoutePathEntry } from "./bird-runtime-parser.js";
 import { configBundle, type NodeConfigBundle } from "./config-bundle.js";
 
 interface ManagedSshConfiguration {
@@ -53,7 +55,35 @@ export interface OspfRuntimeResult {
   error: string | null;
   v2: { state: string | null; neighbors: number; routes: number | null };
   v3: { state: string | null; neighbors: number; routes: number | null };
+  neighbors: OspfNeighborRuntime[];
+  routes: OspfRouteRuntime[];
+  routesTruncated: boolean;
   interfaces: string[];
+}
+
+export interface OspfNeighborRuntime {
+  version: "ospfv2" | "ospfv3";
+  routerId: string;
+  priority: number | null;
+  state: string;
+  deadTime: number | null;
+  interface: string;
+  address: string;
+}
+
+export interface OspfRouteRuntime extends RouteDetail {
+  version: "ospfv2" | "ospfv3";
+}
+
+export interface RoutePathResult {
+  reachable: boolean;
+  error: string | null;
+  target: string;
+  family: AddressFamily;
+  table: string;
+  routes: RoutePathEntry[];
+  truncated: boolean;
+  limit: number;
 }
 
 interface ExecError extends ExecFileException {
@@ -166,6 +196,18 @@ function sshArgs(node: ManagedNode, remoteCommand: string): string[] {
     "-o", "HashKnownHosts=yes",
     "-o", "UpdateHostKeys=yes",
   ];
+  // Reuse one OpenSSH master per managed node. Commands still get independent
+  // channels, while handshakes and key exchange happen only once per idle
+  // persistence window. The controller SSH directory is private and already
+  // created during identity initialization, so the control socket is safe to
+  // keep beside the managed key.
+  if (managedSshConfiguration.identityFile) {
+    args.push(
+      "-o", "ControlMaster=auto",
+      "-o", "ControlPersist=300",
+      "-o", `ControlPath=${path.join(path.dirname(managedSshConfiguration.identityFile), "cm-%C")}`,
+    );
+  }
   if (node.sshPort !== 22) args.push("-p", String(node.sshPort));
   if (node.sshIdentity === "managed") {
     assertValidation(managedSshConfiguration.identityFile && managedSshConfiguration.knownHostsFile, "Birdbox 托管 SSH 密钥尚未初始化");
@@ -271,6 +313,31 @@ export function parseOspfSectionByTable(raw: string, protocolName: string): { st
   return { state: states[0] ?? null, neighbors: full || states.length };
 }
 
+export function parseOspfNeighborDetails(raw: string, protocolName: string, version: "ospfv2" | "ospfv3"): OspfNeighborRuntime[] {
+  const lines = raw.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `${protocolName}:`);
+  if (start < 0) return [];
+  const neighbors: OspfNeighborRuntime[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (/^\S.*:\s*$/.test(line)) break;
+    const fields = line.trim().split(/\s+/);
+    if (fields.length < 6 || fields[0] === "Router" || fields[0] === "---") continue;
+    const [routerId, priority, state, deadTime, interfaceName, address] = fields;
+    if (!routerId || !state || !interfaceName || !address) continue;
+    neighbors.push({
+      version,
+      routerId,
+      priority: /^\d+$/.test(priority ?? "") ? Number(priority) : null,
+      state,
+      deadTime: deadTime && /^\d+(?:\.\d+)?$/.test(deadTime) ? Number(deadTime) : null,
+      interface: interfaceName,
+      address,
+    });
+  }
+  return neighbors;
+}
+
 function parseOspfSection(raw: string, protocolName: string): { state: string | null; neighbors: number } {
   const escaped = protocolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const section = raw.match(new RegExp(`(?:^|\\n)${escaped}:\\s*\\n([\\s\\S]*?)(?=\\n[^\\s].*:\\s*$|$)`, "m"))?.[1] ?? "";
@@ -290,18 +357,32 @@ export async function inspectOspfRuntime(nodeInput: unknown, protocolNames: { v2
   const v3 = normalizeId(protocolNames.v3, "OSPFv3 协议名称");
   const command = [
     `neighbors=$(birdc -s '${node.socketPath}' 'show ospf neighbors' 2>&1 || true)`,
-    `v2routes=$(birdc -s '${node.socketPath}' 'show route protocol ${v2} count' 2>&1 || true)`,
-    `v3routes=$(birdc -s '${node.socketPath}' 'show route protocol ${v3} count' 2>&1 || true)`,
+    `v2count=$(birdc -s '${node.socketPath}' 'show route protocol ${v2} count' 2>&1 || true)`,
+    `v3count=$(birdc -s '${node.socketPath}' 'show route protocol ${v3} count' 2>&1 || true)`,
+    // Runtime polling only needs a bounded preview. Keep the count query
+    // separate from the detail payload so large OSPF tables cannot exhaust
+    // the SSH channel or controller memory.
+    `v2routes=$(birdc -s '${node.socketPath}' 'show route table master4 protocol ${v2} all' 2>&1 | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count > 200) { print "---BIRDBOX-ROUTE-TRUNCATED---"; exit } } { print }' || true)`,
+    `v3routes=$(birdc -s '${node.socketPath}' 'show route table master6 protocol ${v3} all' 2>&1 | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count > 200) { print "---BIRDBOX-ROUTE-TRUNCATED---"; exit } } { print }' || true)`,
     "interfaces=$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p' | paste -sd '\\n' -)",
-    "printf '%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n' \"$neighbors\" \"$v2routes\" \"$v3routes\" \"$interfaces\"",
+    "printf '%s\\n---BIRDBOX-OSPF-V2-COUNT---\\n%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-COUNT---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n' \"$neighbors\" \"$v2count\" \"$v2routes\" \"$v3count\" \"$v3routes\" \"$interfaces\"",
   ].join("\n");
   const result = await runOnNode(node, command, { timeout: 15_000 });
-  const [neighbors = "", v2routes = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-ROUTES|V3-ROUTES|INTERFACES)---/);
+  const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
   return {
     reachable: result.ok,
     error: result.ok ? null : (result.stderr || "节点不可达"),
-    v2: { ...parseOspfSectionByTable(neighbors, v2), routes: parseOspfRouteCount(v2routes) },
-    v3: { ...parseOspfSectionByTable(neighbors, v3), routes: parseOspfRouteCount(v3routes) },
+    v2: { ...parseOspfSectionByTable(neighbors, v2), routes: parseOspfRouteCount(v2count) ?? parseRouteDetails(v2routes, "ipv4").routes.length },
+    v3: { ...parseOspfSectionByTable(neighbors, v3), routes: parseOspfRouteCount(v3count) ?? parseRouteDetails(v3routes, "ipv6").routes.length },
+    neighbors: [
+      ...parseOspfNeighborDetails(neighbors, v2, "ospfv2"),
+      ...parseOspfNeighborDetails(neighbors, v3, "ospfv3"),
+    ],
+    routes: [
+      ...parseRouteDetails(v2routes, "ipv4").routes.map((route) => ({ ...route, version: "ospfv2" as const })),
+      ...parseRouteDetails(v3routes, "ipv6").routes.map((route) => ({ ...route, version: "ospfv3" as const })),
+    ],
+    routesTruncated: parseRouteDetails(v2routes, "ipv4").truncated || parseRouteDetails(v3routes, "ipv6").truncated,
     interfaces: interfaces.split(/\r?\n/).map((item) => item.trim()).filter((item) => /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(item)),
   };
 }
@@ -380,6 +461,31 @@ fi
     ok: result.ok,
     ...parseRouteDetails(result.stdout, family, limit),
     error: result.ok ? null : (result.stderr || result.stdout || "无法读取 BIRD 路由明细"),
+  };
+}
+
+export async function inspectRoutePath(nodeInput: unknown, targetInput: unknown): Promise<RoutePathResult> {
+  const node = normalizeNode(nodeInput);
+  const target = normalizeIPAddress(targetInput, "目标 IP 地址");
+  const baseTarget = target.includes("%") ? target.slice(0, target.lastIndexOf("%")) : target;
+  assertValidation(net.isIP(baseTarget) !== 0, "目标 IP 地址不合法");
+  const family: AddressFamily = net.isIP(baseTarget) === 4 ? "ipv4" : "ipv6";
+  const table = family === "ipv4" ? "master4" : "master6";
+  const result = await runOnNode(
+    node,
+    `birdc -s '${node.socketPath}' 'show route table ${table} for ${target} all' 2>&1`,
+    { timeout: 15_000, maxBuffer: 512 * 1024 },
+  );
+  const parsed = parseRoutePath(result.stdout, family, 16);
+  return {
+    reachable: result.ok && parsed.routes.length > 0,
+    error: result.ok ? (parsed.routes.length ? null : "路由表中没有到达该目标 IP 的路径") : (result.stderr || result.stdout || "无法读取 BIRD 路由"),
+    target,
+    family,
+    table,
+    routes: parsed.routes,
+    truncated: parsed.truncated,
+    limit: parsed.limit,
   };
 }
 

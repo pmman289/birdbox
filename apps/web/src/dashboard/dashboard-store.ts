@@ -151,6 +151,20 @@ export async function refreshDashboardRuntime(): Promise<DashboardResponse | nul
         status: onlineNodes < current.health.totalNodes
           ? "error"
           : abnormalSessions > 0 ? "warning" : "ready",
+        nodeStatuses: current.health.nodeStatuses?.map((item) => item.nodeId === nodeId
+          ? {
+              ...item,
+              status: !response.runtime.reachable || !response.runtime.bird2
+                ? "error"
+                : nextEstablished < nextSessionNames.length ? "warning" : "ready",
+              reachable: response.runtime.reachable,
+              bird2: response.runtime.bird2,
+              version: response.runtime.version,
+              error: response.runtime.error,
+              activeSessions: nextSessionNames.length,
+              normalSessions: nextEstablished,
+            }
+          : item),
       },
     };
     setDashboardSnapshot(next);

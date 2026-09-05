@@ -42,6 +42,10 @@ function openRoutes(peerId: string): void {
   window.dispatchEvent(new CustomEvent("birdbox:routes-open", { detail: { peerId } }));
 }
 
+function openRoutePath(): void {
+  window.dispatchEvent(new CustomEvent("birdbox:route-path-open"));
+}
+
 function selectTab(tab: RuntimeTab): void {
   activeTab.value = tab;
 }
@@ -63,6 +67,7 @@ function eventTime(event: ChangeEvent): string {
 </script>
 
 <template>
+  <div class="runtime-tool-row"><div><p class="eyebrow">PATH LOOKUP</p><span>从当前节点的 BIRD 路由表查询到目标 IP 的下一跳路径</span></div><button class="secondary-button" type="button" :disabled="!dashboard?.node" @click="openRoutePath">查询路径</button></div>
   <div class="protocol-table-wrap">
     <table>
       <thead><tr><th>Peer</th><th>地址</th><th>协议</th><th>状态</th><th>路由明细</th></tr></thead>

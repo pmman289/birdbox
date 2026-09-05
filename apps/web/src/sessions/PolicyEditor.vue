@@ -22,6 +22,7 @@ const props = defineProps<{
   filters: PolicyFilter[];
   defines: PolicyDefine[];
   disabled: boolean;
+  showPolicyAction?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -139,7 +140,7 @@ function openResource(target: ResourceWorkspaceTarget): void {
       <div class="field-label-row">
         <span>策略步骤</span>
         <span class="policy-step-actions">
-          <button class="compact-command compact-action-button" type="button" title="添加路由属性动作" :disabled="disabled" @click="emit('open-policy-action')">+ 属性动作</button>
+          <button v-if="showPolicyAction !== false" class="compact-command compact-action-button" type="button" title="添加路由属性动作" :disabled="disabled" @click="emit('open-policy-action')">+ 属性动作</button>
           <button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Function" aria-label="前往资源管理 Tab 管理 Function" @click="openResource('functions')">?</button>
         </span>
       </div>

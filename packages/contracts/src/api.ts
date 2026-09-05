@@ -67,6 +67,19 @@ export interface InventoryHealth {
   activeSessions: number;
   normalSessions: number;
   abnormalSessions: number;
+  nodeStatuses?: NodeHealthSummary[];
+}
+
+export interface NodeHealthSummary {
+  nodeId: string;
+  name: string;
+  status: "ready" | "warning" | "error";
+  reachable: boolean;
+  bird2: boolean;
+  version: string | null;
+  error: string | null;
+  activeSessions: number;
+  normalSessions: number;
 }
 
 export interface ChangeEvent {
@@ -262,6 +275,27 @@ export interface RouteDetailsResponse {
   direction: "import" | "export";
   table: string | null;
   routes: RouteDetail[];
+  truncated: boolean;
+  limit: number;
+}
+
+export interface RoutePathHop {
+  address: string | null;
+  interface: string | null;
+}
+
+export interface RoutePathEntry extends RouteDetail {
+  nextHops: RoutePathHop[];
+}
+
+export interface RoutePathResponse {
+  node: { id: string; name: string };
+  target: string;
+  family: AddressFamily;
+  table: string;
+  reachable: boolean;
+  error: string | null;
+  routes: RoutePathEntry[];
   truncated: boolean;
   limit: number;
 }

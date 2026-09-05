@@ -1203,6 +1203,45 @@ exit 1
   assert.equal(result.code, 1);
 });
 
+test("reuses a persistent OpenSSH master connection for managed nodes", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ssh-control-"));
+  const binDir = path.join(root, "bin");
+  const argsFile = path.join(root, "args");
+  const originalPath = process.env.PATH;
+  context.after(async () => {
+    process.env.PATH = originalPath;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.writeFile(path.join(binDir, "ssh"), `#!/bin/sh
+printf '%s\\n' "$@" > "${argsFile}"
+printf 'ok\\n'
+`, { mode: 0o755 });
+  process.env.PATH = `${binDir}:${originalPath}`;
+  configureManagedSsh({
+    identityFile: path.join(root, "id_ed25519"),
+    knownHostsFile: path.join(root, "known_hosts"),
+  });
+  const remoteNode = normalizeNode({
+    id: "ssh_control",
+    name: "SSH control",
+    transport: "ssh",
+    sshHost: "router.example",
+    sshUser: "birdbox",
+    sshIdentity: "managed",
+    deploymentMode: "include",
+    mainConfigPath: "/etc/bird.conf",
+    generatedConfigPath: "/etc/birdbox/generated.conf",
+    socketPath: "/run/bird.ctl",
+    routerId: "192.0.2.1",
+  });
+  assert.equal((await runOnNode(remoteNode, "true")).ok, true);
+  const args = await fs.readFile(argsFile, "utf8");
+  assert.match(args, /ControlMaster=auto/);
+  assert.match(args, /ControlPersist=300/);
+  assert.match(args, /ControlPath=.*cm-%C/);
+});
+
 test("requires an active BIRD include instead of accepting commented directives", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-include-check-"));
   const binDir = path.join(root, "bin");

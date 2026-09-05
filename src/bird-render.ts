@@ -352,7 +352,7 @@ function renderOspfForNode(
     if (!config || !config.enabled) continue;
       for (const version of config.versions) {
       const family = version === "ospfv2" ? "ipv4" : "ipv6";
-        const areas = new Map<string, OspfDomain["links"]>();
+      const areas = new Map<string, OspfDomain["links"]>();
       for (const link of domain.links) {
         if (link.fromNodeId !== node.id && link.toNodeId !== node.id) continue;
         const iface = link.fromNodeId === node.id ? link.localInterface : link.remoteInterface;
@@ -428,7 +428,26 @@ function renderOspfForNode(
             output += "    };\n";
           }
         }
+        // Multiple NBMA/PtMP adjacencies may share one physical interface.
+        // Emit one interface block and list each peer as a BIRD neighbor.
+        const interfaceGroups = new Map<string, { link: OspfDomain["links"][number]; neighbors: Set<string>; shared: boolean }>();
         for (const link of links) {
+          const key = link.localInterface;
+          const existing = interfaceGroups.get(key);
+          if (!existing) {
+            interfaceGroups.set(key, { link, neighbors: new Set(), shared: false });
+          } else {
+            existing.shared = true;
+            const peerId = link.fromNodeId === node.id ? link.toNodeId : link.fromNodeId;
+            const peerRouterId = domain.nodeConfigs.find((item) => item.nodeId === peerId)?.routerId;
+            if (peerRouterId) existing.neighbors.add(peerRouterId);
+          }
+        }
+        for (const group of interfaceGroups.values()) {
+          const link = group.link;
+          const peerId = link.fromNodeId === node.id ? link.toNodeId : link.fromNodeId;
+          const peerRouterId = domain.nodeConfigs.find((item) => item.nodeId === peerId)?.routerId;
+          if (group.shared && (link.options?.type === "nbma" || link.options?.type === "ptmp") && peerRouterId) group.neighbors.add(peerRouterId);
           const options = link.options ?? {};
           output += `    interface ${birdString(link.localInterface)} {\n`;
           if (options.instanceId != null) output += `      instance ${options.instanceId};\n`;
@@ -443,7 +462,9 @@ function renderOspfForNode(
           if (link.passive || options.stub) output += "      stub yes;\n";
           if (options.rxBuffer != null) output += `      rx buffer ${options.rxBuffer};\n`;
           if (options.txLength != null) output += `      tx length ${options.txLength};\n`;
-          if (options.type) output += `      type ${options.type};\n`;
+          // OSPF links default to point-to-point; emit it explicitly so the
+          // generated config does not depend on BIRD's interface heuristics.
+          output += `      type ${options.type ?? "ptp"};\n`;
           if (options.linkLsaSuppression) output += "      link lsa suppression yes;\n";
           if (options.strictNonbroadcast) output += "      strict nonbroadcast yes;\n";
           if (options.realBroadcast) output += "      real broadcast yes;\n";
@@ -458,12 +479,18 @@ function renderOspfForNode(
           if (options.txClass != null) output += `      tx class ${options.txClass};\n`;
           if (options.txDscp != null) output += `      tx dscp ${options.txDscp};\n`;
           if (options.txPriority != null) output += `      tx priority ${options.txPriority};\n`;
-          const auth = link.authentication === "simple" ? "simple" : link.authentication === "none" ? "none" : "cryptographic";
-          output += `      authentication ${auth};\n`;
+          if (link.authentication !== "none") {
+            const auth = link.authentication === "simple" ? "simple" : "cryptographic";
+            output += `      authentication ${auth};\n`;
+          }
           if (options.password) output += renderPassword("      ", options.password, options.passwordOptions);
-          if (options.neighbors?.length) {
+          const neighbors = [
+            ...(options.neighbors ?? []),
+            ...[...group.neighbors].map((address) => ({ address, eligible: false })),
+          ].filter((neighbor, index, all) => all.findIndex((item) => item.address === neighbor.address) === index);
+          if (neighbors.length) {
             output += "      neighbors {\n";
-            for (const neighbor of options.neighbors) output += `        ${neighbor.address}${neighbor.eligible ? " eligible" : ""};\n`;
+            for (const neighbor of neighbors) output += `        ${neighbor.address}${neighbor.eligible ? " eligible" : ""};\n`;
             output += "      };\n";
           }
           output += "    };\n";
@@ -474,7 +501,7 @@ function renderOspfForNode(
           if (virtualLink.retransmit != null) output += `      retransmit ${virtualLink.retransmit};\n`;
           if (virtualLink.wait != null) output += `      wait ${virtualLink.wait};\n`;
           if (virtualLink.dead != null) output += `      dead ${virtualLink.dead};\n`;
-          if (virtualLink.authentication) output += `      authentication ${virtualLink.authentication};\n`;
+          if (virtualLink.authentication && virtualLink.authentication !== "none") output += `      authentication ${virtualLink.authentication};\n`;
           if (virtualLink.password) output += renderPassword("      ", virtualLink.password, virtualLink.passwordOptions);
           output += "    };\n";
         }

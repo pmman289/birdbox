@@ -13,6 +13,7 @@ export {
   inspectNode,
   inspectOspfRuntime,
   inspectProtocolRoutes,
+  inspectRoutePath,
   loadSeedNodes,
   rollbackNode,
   runOnNode,
@@ -22,7 +23,7 @@ export {
   startProtocol,
   stopProtocol,
 } from "./bird-runtime.js";
-export { parseProtocolStatus, parseProtocolStatuses, parseRouteDetails } from "./bird-runtime-parser.js";
+export { parseProtocolStatus, parseProtocolStatuses, parseRouteDetails, parseRoutePath } from "./bird-runtime-parser.js";
 export { normalizeSession } from "./bird-session.js";
 export { normalizeStaticProtocol } from "./bird-static.js";
 export {

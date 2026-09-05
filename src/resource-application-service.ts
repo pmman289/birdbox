@@ -185,6 +185,14 @@ export function createResourceApplicationService(
     return normalizeOspfDomain({ ...(previous ?? {}), ...input, id: previous?.id ?? input.id ?? makeId("ospf") });
   }
 
+  function stripUnknownOspfLayout(domain: OspfDomain): OspfDomain {
+    const nodeIds = new Set(domain.nodeConfigs.map((config) => config.nodeId));
+    domain.layout = Object.fromEntries(
+      Object.entries(domain.layout).filter(([nodeId]) => nodeIds.has(nodeId)),
+    );
+    return domain;
+  }
+
   function bgpProtocolBlock(config: string, protocolName: string): string {
     const marker = `protocol bgp ${protocolName} {`;
     const start = config.indexOf(marker);
@@ -873,7 +881,7 @@ export function createResourceApplicationService(
       const current = await store.read();
       const id = body.id === undefined || body.id === "" ? makeId("ospf") : String(body.id);
       const previous = current.ospfDomains.find((item) => item.id === id) ?? null;
-      const domain = materializeOspf({ ...body, id }, previous);
+      const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id }, previous));
       const candidate = structuredClone(current);
       const index = candidate.ospfDomains.findIndex((item) => item.id === id);
       if (index >= 0) candidate.ospfDomains[index] = domain;
@@ -890,7 +898,7 @@ export function createResourceApplicationService(
   },
 
   async createOspfDomain(body) {
-    const domain = materializeOspf({ ...body, id: body.id ?? makeId("ospf") });
+    const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id: body.id ?? makeId("ospf") }));
     const { state, deployment } = await mutateAndApply((draft) => {
       if (draft.ospfDomains.some((item) => item.id === domain.id)) fail(409, "OSPF 域 ID 已存在");
       if (draft.ospfDomains.some((item) => item.name === domain.name)) fail(409, "OSPF 域名称已存在");
@@ -908,7 +916,7 @@ export function createResourceApplicationService(
       if (index < 0) fail(404, "OSPF 域不存在");
       const previous = draft.ospfDomains[index];
       if (!previous) fail(404, "OSPF 域不存在");
-      const updated = materializeOspf({ ...body, id: domainId }, previous);
+      const updated = stripUnknownOspfLayout(materializeOspf({ ...body, id: domainId }, previous));
       if (draft.ospfDomains.some((item) => item.id !== domainId && item.name === updated.name)) fail(409, "OSPF 域名称已存在");
       draft.ospfDomains[index] = updated;
       affected = uniqueNodeIds(ospfDomainNodeIds(previous), ospfDomainNodeIds(updated));
@@ -936,7 +944,10 @@ export function createResourceApplicationService(
       const target = draft.ospfDomains.find((item) => item.id === domainId);
       if (!target) fail(404, "OSPF 域不存在");
       if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout)) fail(400, "拓扑布局必须是对象");
-      target.layout = normalizeOspfDomain({ ...target, layout: body.layout }).layout; return target;
+      const layout = Object.fromEntries(
+        Object.entries(body.layout).filter(([nodeId]) => target.nodeConfigs.some((config) => config.nodeId === nodeId)),
+      );
+      target.layout = normalizeOspfDomain({ ...target, layout }).layout; return target;
     }));
     return { status: 200, payload: { domain, inventory: state } };
   },

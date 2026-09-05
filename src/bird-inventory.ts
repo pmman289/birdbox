@@ -119,7 +119,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
     for (const link of domain.links) {
       assertValidation(nodeConfigIds.has(link.fromNodeId) && nodeConfigIds.has(link.toNodeId), `OSPF 域 ${domain.name} 链路两端必须配置节点`);
     }
-    assertValidation(Object.keys(domain.layout).every((id) => nodeConfigIds.has(id)), `OSPF 域 ${domain.name} 拓扑布局包含未知节点`);
+    // normalizeOspfDomain removes stale layout entries before validation.
   }
   for (const domain of ibgpDomains) {
     for (const member of domain.members) assertValidation(nodeMap.has(member.nodeId), `iBGP 域 ${domain.name} 引用了不存在的节点`);
