@@ -288,6 +288,7 @@ function makeSession(
         sessions: [],
         ibgpDomains: [],
         ospfDomains: [],
+        ospfLayout: {},
       },
       "ibgp",
       `${domain.name} ${remoteNode?.name ?? remoteNodeId}`,

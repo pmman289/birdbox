@@ -873,7 +873,17 @@ export function createResourceApplicationService(
 
   async listOspfDomains() {
     const state = await store.read();
-    return { status: 200, payload: { domains: state.ospfDomains, inventory: state } };
+    return { status: 200, payload: { domains: state.ospfDomains, layout: state.ospfLayout, inventory: state } };
+  },
+
+  async updateOspfLayout(body) {
+    const { state } = await withDeploymentLock(() => store.mutate((draft) => {
+      if (!body.layout || typeof body.layout !== "object" || Array.isArray(body.layout)) fail(400, "拓扑布局必须是对象");
+      const nodeIds = new Set(draft.nodes.map((node) => node.id));
+      const updates = Object.fromEntries(Object.entries(body.layout).filter(([nodeId]) => nodeIds.has(nodeId)));
+      draft.ospfLayout = { ...draft.ospfLayout, ...updates };
+    }));
+    return { status: 200, payload: { layout: state.ospfLayout, inventory: state } };
   },
 
   async previewOspfDomain(body) {

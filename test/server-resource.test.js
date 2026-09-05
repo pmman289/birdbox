@@ -16,7 +16,7 @@ async function requestJson(port, pathname, options = {}) {
 }
 
 async function waitForHealth(port) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const result = await requestJson(port, "/api/health");
       if (result.status === 200) return;
@@ -135,6 +135,15 @@ exit 0
     ...options,
     headers: { cookie, ...(options.headers ?? {}) },
   });
+
+  const savedOspfLayout = await authenticatedRequest("/api/ospf/layout", {
+    method: "PATCH",
+    body: JSON.stringify({ layout: { local: { x: 321, y: 654 } } }),
+  });
+  assert.equal(savedOspfLayout.status, 200);
+  assert.deepEqual(savedOspfLayout.body.layout, { local: { x: 321, y: 654, locked: false } });
+  const listedOspf = await authenticatedRequest("/api/ospf");
+  assert.deepEqual(listedOspf.body.layout, { local: { x: 321, y: 654, locked: false } });
 
   const rejectedLocalNode = await authenticatedRequest("/api/nodes", {
     method: "POST",

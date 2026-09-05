@@ -408,6 +408,7 @@ export class InventoryStore {
       sessions: [] as BgpSession[],
       ibgpDomains: [] as LegacyRecord[],
       ospfDomains: [] as LegacyRecord[],
+      ospfLayout: {},
     };
     try {
       const legacy = JSON.parse(await fs.readFile(this.legacySessionPath, "utf8"));

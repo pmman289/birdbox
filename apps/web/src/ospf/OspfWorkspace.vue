@@ -532,9 +532,7 @@ function resetTopologyLayout(): void {
   });
   nodePosition.value = next;
   centerTopologyView(next);
-  if (ospfDomainId.value) {
-    layoutSaveQueue = layoutSaveQueue.then(() => saveLayout(next));
-  }
+  layoutSaveQueue = layoutSaveQueue.then(() => saveLayout(next));
 }
 watch(() => nodes.value.map((node) => node.id).join(","), () => {
   const nextNodes = nodes.value;
@@ -743,15 +741,17 @@ async function saveOspf(): Promise<void> {
   if (ospfActionPending.value || !nodes.value.length) return;
   ospfActionPending.value = "save";
   try {
+    const payload = domainPayload();
     const response = await api<{ domain: { id: string } }>(
       ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
       {
         method: ospfDomainId.value ? "PUT" : "POST",
-        body: JSON.stringify(domainPayload()),
+        body: JSON.stringify(payload),
         headers: { "content-type": "application/json" },
       },
     );
     ospfDomainId.value = response.domain.id;
+    await saveLayout(nodePosition.value);
     await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
     await refreshOspfRuntime();
     dispatchToast("OSPF 配置已保存并应用", "success");
@@ -1155,7 +1155,7 @@ function stopNodeDrag(event?: PointerEvent): void {
       if (node) selectNode(node);
     }
   }
-  if (dragged.moved && ospfDomainId.value) {
+  if (dragged.moved) {
     // Capture the coordinates at pointer-up. A later drag or a reactive
     // inventory refresh must not change the payload already waiting to save.
     const snapshot = { ...nodePosition.value };
@@ -1163,13 +1163,12 @@ function stopNodeDrag(event?: PointerEvent): void {
   }
 }
 async function saveLayout(snapshot: Record<string, OspfNodePosition> = nodePosition.value): Promise<void> {
-  if (!ospfDomainId.value) return;
   layoutSaving.value = true;
   layoutSaveError.value = "";
   try {
     // Keep the snapshot independent from Vue's reactive proxies and use the
     // current inventory as the client-side allow-list. The server performs a
-    // second allow-list check against the domain's nodeConfigs.
+    // second allow-list check against the managed-node inventory.
     const domainNodeIds = new Set(nodes.value.map((node) => node.id));
     const layout = Object.fromEntries(
       Object.entries(snapshot)
@@ -1184,7 +1183,7 @@ async function saveLayout(snapshot: Record<string, OspfNodePosition> = nodePosit
         ]),
     );
     if (!Object.keys(layout).length) return;
-    await api(`/api/ospf/${encodeURIComponent(ospfDomainId.value)}/layout`, {
+    await api("/api/ospf/layout", {
       method: "PATCH",
       // Layout persistence is a lightweight UI-state write. Do not open the
       // global mutation modal or alter page focus while the user is dragging.
@@ -1259,9 +1258,15 @@ async function loadOspfDomains(): Promise<void> {
         links: OspfLink[];
         layout: Record<string, { x: number; y: number }>;
       }>;
+      layout: Record<string, { x: number; y: number }>;
     }>("/api/ospf");
     const domain = response.domains[0];
     if (!domain) {
+      ospfDomainId.value = null;
+      links.value = [];
+      nodeConfigs.value = {};
+      nodePosition.value = response.layout ?? {};
+      ensureNodePositions();
       await loadNodeInterfaces();
       return;
     }
@@ -1288,7 +1293,7 @@ async function loadOspfDomains(): Promise<void> {
     nodeConfigs.value = Object.fromEntries(
       domain.nodeConfigs.map((config) => [config.nodeId, config]),
     );
-    nodePosition.value = domain.layout;
+    nodePosition.value = { ...(domain.layout ?? {}), ...(response.layout ?? {}) };
     ensureNodePositions();
     // Dashboard data and the domain request resolve independently. Select a
     // valid node before loading its saved config, otherwise the editor falls
@@ -1372,7 +1377,7 @@ onBeforeUnmount(() => {
             ><i />{{ topologyLinks.length }} 条链路</span
           ><span v-if="layoutSaving" class="ospf-layout-status">位置保存中…</span
           ><span v-else-if="layoutSaveError" class="ospf-layout-status error" role="status" :title="layoutSaveError">布局保存失败</span
-          ><span v-else-if="ospfDomainId" class="ospf-layout-status">位置已保存</span
+          ><span v-else-if="nodes.length" class="ospf-layout-status">位置已保存</span
           ><button
             class="secondary-button compact-button"
             type="button"

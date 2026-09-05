@@ -1,6 +1,6 @@
 {
   "name": "birdbox-demo",
-  "version": "0.22a",
+  "version": "0.23a",
   "private": true,
   "description": "A BIRD 2 node, peer, and BGP session management controller",
   "type": "module",

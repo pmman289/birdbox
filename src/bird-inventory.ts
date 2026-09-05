@@ -2,6 +2,7 @@ import net from "node:net";
 import type {
   AddressFamily,
   Inventory,
+  TopologyPosition,
   PolicyDefine,
 } from "../packages/contracts/src/inventory.js";
 import {
@@ -56,6 +57,31 @@ function enabledCidrEntries(define: PolicyDefine | undefined): string[] {
   return define && define.type !== "expression" ? define.entries.filter(isExactPrefix) : [];
 }
 
+function normalizeOspfLayout(
+  value: unknown,
+  nodeIds: Set<string>,
+  domains: ReturnType<typeof normalizeOspfDomain>[],
+): Record<string, TopologyPosition> {
+  const layout: Record<string, TopologyPosition> = {};
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : {};
+  for (const [nodeId, raw] of Object.entries(input)) {
+    if (!nodeIds.has(nodeId) || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const position = raw as UnknownRecord;
+    const x = Number(position.x);
+    const y = Number(position.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    layout[nodeId] = { x: Math.round(x), y: Math.round(y), locked: position.locked === true };
+  }
+  // Preserve coordinates from pre-global-layout inventories. Explicit global
+  // coordinates win when both forms are present.
+  for (const domain of domains) {
+    for (const [nodeId, position] of Object.entries(domain.layout)) {
+      if (nodeIds.has(nodeId) && !layout[nodeId]) layout[nodeId] = position;
+    }
+  }
+  return layout;
+}
+
 export function validateInventory(inputValue: unknown, options: InventoryValidationOptions = {}): Inventory {
   const input = record(inputValue, "资产数据不能为空");
   const nodes = list(input, "nodes").map(normalizeNode);
@@ -93,6 +119,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   const defineMap = new Map(defines.map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
   const filterMap = new Map(filters.map((item) => [item.id, item]));
+  const ospfLayout = normalizeOspfLayout(input.ospfLayout, new Set(nodes.map((node) => node.id)), ospfDomains);
   for (const domain of ospfDomains) {
     const nodeConfigIds = new Set(domain.nodeConfigs.map((item) => item.nodeId));
     for (const nodeId of ospfDomainNodeIds(domain)) assertValidation(nodeMap.has(nodeId), `OSPF 域 ${domain.name} 引用了不存在的节点`);
@@ -352,5 +379,6 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
     sessions,
     ibgpDomains,
     ospfDomains,
+    ospfLayout,
   };
 }

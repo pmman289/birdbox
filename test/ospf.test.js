@@ -98,6 +98,20 @@ test("drops stale OSPF layout coordinates for removed nodes", () => {
   assert.deepEqual(d.layout, { n1: { x: 42, y: 24, locked: false } });
 });
 
+test("migrates OSPF domain coordinates into the node-scoped global layout", () => {
+  const input = {
+    version: 28,
+    nodes: [node("n1", "192.0.2.1"), { ...node("n2", "192.0.2.2"), transport: "ssh", sshHost: "192.0.2.2", sshUser: "birdbox" }],
+    peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [],
+    sourcePolicies: [], sessions: [], ibgpDomains: [],
+    ospfDomains: [{ ...domain(), layout: { n1: { x: 40, y: 50 } } }],
+  };
+  const migrated = validateInventory(input);
+  assert.deepEqual(migrated.ospfLayout, { n1: { x: 40, y: 50, locked: false } });
+  const overridden = validateInventory({ ...migrated, ospfLayout: { n1: { x: 80, y: 90 } } });
+  assert.deepEqual(overridden.ospfLayout, { n1: { x: 80, y: 90, locked: false } });
+});
+
 test("rejects inconsistent parallel-link cost and reused interfaces", () => {
   assert.throws(() => normalizeOspfDomain({ ...domain(), links: [domain().links[0], { ...domain().links[0], id: "l2", localInterface: "eth2", remoteInterface: "eth3", cost: 30 }] }), /Cost/);
   assert.throws(() => normalizeOspfDomain({ ...domain(), links: [domain().links[0], { ...domain().links[0], id: "l2" }] }), /接口/);

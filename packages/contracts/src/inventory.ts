@@ -487,6 +487,8 @@ export interface Inventory {
   sessions: BgpSession[];
   ibgpDomains: IbgpDomain[];
   ospfDomains: OspfDomain[];
+  /** OSPF canvas coordinates are UI state and are independent of domain membership. */
+  ospfLayout: Record<string, TopologyPosition>;
 }
 
 export type PolicyCollection = "defines" | "functions" | "filters";
