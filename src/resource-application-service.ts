@@ -947,7 +947,14 @@ export function createResourceApplicationService(
       const layout = Object.fromEntries(
         Object.entries(body.layout).filter(([nodeId]) => target.nodeConfigs.some((config) => config.nodeId === nodeId)),
       );
-      target.layout = normalizeOspfDomain({ ...target, layout }).layout; return target;
+      // Layout updates are intentionally incremental. This keeps a partial
+      // request (for example, one queued while the domain is hydrating) from
+      // erasing coordinates that were already persisted for other nodes.
+      target.layout = normalizeOspfDomain({
+        ...target,
+        layout: { ...target.layout, ...layout },
+      }).layout;
+      return target;
     }));
     return { status: 200, payload: { domain, inventory: state } };
   },

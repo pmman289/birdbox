@@ -533,7 +533,7 @@ function resetTopologyLayout(): void {
   nodePosition.value = next;
   centerTopologyView(next);
   if (ospfDomainId.value) {
-    layoutSaveQueue = layoutSaveQueue.then(() => saveLayout());
+    layoutSaveQueue = layoutSaveQueue.then(() => saveLayout(next));
   }
 }
 watch(() => nodes.value.map((node) => node.id).join(","), () => {
@@ -1156,31 +1156,34 @@ function stopNodeDrag(event?: PointerEvent): void {
     }
   }
   if (dragged.moved && ospfDomainId.value) {
-    layoutSaveQueue = layoutSaveQueue.then(() => saveLayout());
+    // Capture the coordinates at pointer-up. A later drag or a reactive
+    // inventory refresh must not change the payload already waiting to save.
+    const snapshot = { ...nodePosition.value };
+    layoutSaveQueue = layoutSaveQueue.then(() => saveLayout(snapshot));
   }
 }
-async function saveLayout(): Promise<void> {
+async function saveLayout(snapshot: Record<string, OspfNodePosition> = nodePosition.value): Promise<void> {
   if (!ospfDomainId.value) return;
   layoutSaving.value = true;
   layoutSaveError.value = "";
   try {
-    const domainNodeIds = new Set(Object.keys(nodeConfigs.value));
-    // The domain API rejects coordinates for nodes outside its nodeConfigs.
-    // Skip a transient save while the domain is still being hydrated instead
-    // of replacing a valid layout with an empty object.
-    if (!domainNodeIds.size) return;
+    // Keep the snapshot independent from Vue's reactive proxies and use the
+    // current inventory as the client-side allow-list. The server performs a
+    // second allow-list check against the domain's nodeConfigs.
+    const domainNodeIds = new Set(nodes.value.map((node) => node.id));
     const layout = Object.fromEntries(
-      Object.entries(nodePosition.value)
+      Object.entries(snapshot)
         .filter(([id]) => domainNodeIds.has(id))
         .map(([id, position]) => [
           id,
           {
-            x: position.x,
-            y: position.y,
+            x: Number.isFinite(position.x) ? Math.round(position.x) : 0,
+            y: Number.isFinite(position.y) ? Math.round(position.y) : 0,
             ...(position.locked === undefined ? {} : { locked: position.locked }),
           },
         ]),
     );
+    if (!Object.keys(layout).length) return;
     await api(`/api/ospf/${encodeURIComponent(ospfDomainId.value)}/layout`, {
       method: "PATCH",
       // Layout persistence is a lightweight UI-state write. Do not open the
@@ -1191,6 +1194,7 @@ async function saveLayout(): Promise<void> {
     });
   } catch (error) {
     layoutSaveError.value = error instanceof Error ? error.message : "布局保存失败";
+    dispatchToast(`OSPF 拓扑位置保存失败：${layoutSaveError.value}`, "error");
   } finally {
     layoutSaving.value = false;
   }
