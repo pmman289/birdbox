@@ -229,6 +229,8 @@ interface OspfNodePosition {
   y: number;
   locked?: boolean;
 }
+const TOPOLOGY_WIDTH = 1600;
+const TOPOLOGY_HEIGHT = 1000;
 interface OspfNodeConfig {
   nodeId: string;
   enabled: boolean;
@@ -257,6 +259,8 @@ const suppressNodeClickId = ref<string | null>(null);
 let suppressNodeClickTimer: number | null = null;
 const topologyCanvas = ref<HTMLElement | null>(null);
 const topologyScale = ref(1);
+const topologyPan = ref({ x: TOPOLOGY_WIDTH / 2 - 270, y: TOPOLOGY_HEIGHT / 2 - 165 });
+const topologyPanDragging = ref<{ pointerId: number; x: number; y: number } | null>(null);
 const layoutSaving = ref(false);
 const layoutSaveError = ref("");
 let layoutSaveQueue: Promise<void> = Promise.resolve();
@@ -500,20 +504,22 @@ function ensureNodePositions(nextNodes: OspfNode[] = nodes.value): void {
   if (!nextNodes.length) return;
   nextNodes.forEach((node, index) => {
     if (next[node.id]) return;
-    const column = index % 3;
-    const row = Math.floor(index / 3);
-    next[node.id] = { x: 120 + column * 150, y: 90 + row * 130 };
+    const column = index % 5;
+    const row = Math.floor(index / 5);
+    next[node.id] = { x: 180 + column * 280, y: 140 + row * 190 };
   });
   nodePosition.value = next;
+  centerTopologyView(next);
 }
 function resetTopologyLayout(): void {
   const next: Record<string, OspfNodePosition> = {};
   nodes.value.forEach((node, index) => {
-    const column = index % 3;
-    const row = Math.floor(index / 3);
-    next[node.id] = { x: 120 + column * 150, y: 90 + row * 130 };
+    const column = index % 5;
+    const row = Math.floor(index / 5);
+    next[node.id] = { x: 180 + column * 280, y: 140 + row * 190 };
   });
   nodePosition.value = next;
+  centerTopologyView(next);
   if (ospfDomainId.value) {
     layoutSaveQueue = layoutSaveQueue.then(() => saveLayout());
   }
@@ -906,20 +912,57 @@ function zoomTopology(delta: number): void {
 }
 function resetTopologyZoom(): void {
   topologyScale.value = 1;
+  centerTopologyView(nodePosition.value);
 }
 function handleTopologyWheel(event: WheelEvent): void {
   zoomTopology(event.deltaY < 0 ? 0.1 : -0.1);
+}
+function centerTopologyView(positions: Record<string, OspfNodePosition>): void {
+  const points = Object.values(positions);
+  if (!points.length) return;
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxY = Math.max(...points.map((point) => point.y));
+  topologyPan.value = {
+    x: TOPOLOGY_WIDTH / 2 - (minX + maxX) / 2,
+    y: TOPOLOGY_HEIGHT / 2 - (minY + maxY) / 2,
+  };
+}
+function startTopologyPan(event: PointerEvent): void {
+  if (event.button !== 0 || dragging.value) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("button, input, select, .ospf-link-hit, .ospf-link-label")) return;
+  const canvas = topologyCanvas.value;
+  if (!canvas) return;
+  topologyPanDragging.value = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+  canvas.setPointerCapture(event.pointerId);
+}
+function moveTopologyPan(event: PointerEvent): void {
+  const panDragging = topologyPanDragging.value;
+  if (!panDragging || panDragging.pointerId !== event.pointerId) return;
+  topologyPan.value = {
+    x: topologyPan.value.x + event.clientX - panDragging.x,
+    y: topologyPan.value.y + event.clientY - panDragging.y,
+  };
+  panDragging.x = event.clientX;
+  panDragging.y = event.clientY;
+}
+function stopTopologyPan(event?: PointerEvent): void {
+  const panDragging = topologyPanDragging.value;
+  if (!panDragging || (event && event.pointerId !== panDragging.pointerId)) return;
+  const canvas = topologyCanvas.value;
+  if (canvas?.hasPointerCapture(panDragging.pointerId)) canvas.releasePointerCapture(panDragging.pointerId);
+  topologyPanDragging.value = null;
 }
 function topologyCanvasPoint(clientX: number, clientY: number): { x: number; y: number } | null {
   const canvas = topologyCanvas.value;
   if (!canvas) return null;
   const rect = canvas.getBoundingClientRect();
   const scale = topologyScale.value;
-  const originX = rect.left + (rect.width * (1 - scale)) / 2;
-  const originY = rect.top + (rect.height * (1 - scale)) / 2;
   return {
-    x: ((clientX - originX) / scale / rect.width) * 540,
-    y: ((clientY - originY) / scale / rect.height) * 330,
+    x: ((clientX - rect.left - rect.width / 2 - topologyPan.value.x) / scale) + TOPOLOGY_WIDTH / 2,
+    y: ((clientY - rect.top - rect.height / 2 - topologyPan.value.y) / scale) + TOPOLOGY_HEIGHT / 2,
   };
 }
 function selectLink(link: OspfLink): void {
@@ -1032,14 +1075,14 @@ function dragNode(event: PointerEvent): void {
   const x = Math.max(
     70,
     Math.min(
-      470,
+      TOPOLOGY_WIDTH - 70,
       nextX,
     ),
   );
   const y = Math.max(
     45,
     Math.min(
-      285,
+      TOPOLOGY_HEIGHT - 45,
       nextY,
     ),
   );
@@ -1260,7 +1303,7 @@ onBeforeUnmount(() => {
         <p class="eyebrow">INTERIOR GATEWAY PROTOCOL</p>
         <h2 id="ospfTitle">OSPF 管理</h2>
         <p class="section-note">
-          在拓扑中建立链路并配置双方接口，按节点管理 OSPFv2/OSPFv3 实例。
+          在拓扑中建立链路并配置双方接口，拖动节点布局，拖动空白区域平移画布；按节点管理 OSPFv2/OSPFv3 实例。
         </p>
       </div>
       <div class="ospf-actions">
@@ -1276,7 +1319,7 @@ onBeforeUnmount(() => {
         <div>
           <h3>OSPF 拓扑</h3>
           <small
-            >拖动节点调整位置，点击线路编辑两端接口和链路参数；同一对节点的 Cost
+            >拖动节点调整位置，拖动空白区域平移大型画布，点击线路编辑两端接口和链路参数；同一对节点的 Cost
             保持一致</small
           >
         </div>
@@ -1316,12 +1359,16 @@ onBeforeUnmount(() => {
         ref="topologyCanvas"
         class="ospf-topology-canvas"
         @wheel.prevent="handleTopologyWheel"
+        @pointerdown="startTopologyPan"
+        @pointermove="moveTopologyPan"
+        @pointerup="stopTopologyPan"
+        @pointercancel="stopTopologyPan"
       >
         <div
           class="ospf-topology-world"
-          :style="{ transform: `scale(${topologyScale})` }"
+          :style="{ transform: `translate(${topologyPan.x}px, ${topologyPan.y}px) scale(${topologyScale})` }"
         >
-          <svg viewBox="0 0 540 330" role="img" aria-label="OSPF 节点拓扑">
+          <svg :viewBox="`0 0 ${TOPOLOGY_WIDTH} ${TOPOLOGY_HEIGHT}`" role="img" aria-label="OSPF 节点拓扑">
           <g v-for="link in topologyLinks" :key="link.id">
             <line
               v-bind="{
@@ -1368,8 +1415,8 @@ onBeforeUnmount(() => {
           class="ospf-link-hit-button"
           :aria-label="`编辑 ${link.from} 到 ${link.to} 的 OSPF 链路`"
           :style="{
-            left: `${((linkGeometry(link).x1 + linkGeometry(link).x2) / 2 / 540) * 100}%`,
-            top: `${((linkGeometry(link).y1 + linkGeometry(link).y2) / 2 / 330) * 100}%`,
+            left: `${((linkGeometry(link).x1 + linkGeometry(link).x2) / 2 / TOPOLOGY_WIDTH) * 100}%`,
+            top: `${((linkGeometry(link).y1 + linkGeometry(link).y2) / 2 / TOPOLOGY_HEIGHT) * 100}%`,
           }"
           @click="selectLink(link)"
         />
@@ -1381,8 +1428,8 @@ onBeforeUnmount(() => {
           :draggable="false"
           :class="{ selected: selectedNodeId === node.id, dragging: dragging?.id === node.id }"
           :style="{
-            left: `${(linkPosition(node.id).x / 540) * 100}%`,
-            top: `${(linkPosition(node.id).y / 330) * 100}%`,
+            left: `${(linkPosition(node.id).x / TOPOLOGY_WIDTH) * 100}%`,
+            top: `${(linkPosition(node.id).y / TOPOLOGY_HEIGHT) * 100}%`,
           }"
           @pointerdown.stop="startNodeDrag($event, node)"
           @pointerup.stop.prevent="stopNodeDrag"
