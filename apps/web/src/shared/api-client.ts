@@ -46,6 +46,8 @@ function isDeploymentMutation(path: string, method: string): boolean {
   if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
   if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
   if (/^\/api\/ibgp-domains(?:\/|$)/.test(path)) return method !== "PATCH" || /\/layout$/.test(path);
+  if (path === "/api/ospf/preview") return true;
+  if (/^\/api\/ospf(?:\/[^/]+)?$/.test(path)) return method !== "PATCH";
   if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT") return true;
   if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "DELETE" && !path.includes("force=true")) return true;
   return /^\/api\/peers\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT";
@@ -67,6 +69,8 @@ function mutationWaitPresentation(path: string, method: string): MutationWaitPre
   else if (/^\/api\/source-policies(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除源地址出口映射" : "正在应用源地址出口映射";
   else if (/^\/api\/(defines|functions|filters)(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除策略资源" : "正在应用策略资源变更";
   else if (/^\/api\/ibgp-domains(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 iBGP 域" : "正在应用 iBGP 域变更";
+  else if (pathname === "/api/ospf/preview") title = "正在预检 OSPF 配置";
+  else if (/^\/api\/ospf(?:\/[^/]+)?$/.test(pathname)) title = method === "DELETE" ? "正在删除 OSPF 域" : "正在应用 OSPF 配置";
   else if (pathname === "/api/auth/login") title = "正在验证登录";
   else if (pathname === "/api/auth/setup") title = "正在设置管理密码";
   else if (pathname === "/api/auth/password") title = "正在更新管理密码";

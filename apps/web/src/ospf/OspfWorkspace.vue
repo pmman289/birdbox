@@ -12,8 +12,9 @@ import type {
   OspfVirtualLink,
   OspfPasswordOptions,
 } from "@birdbox/contracts/inventory";
-import { useDashboardStore } from "../dashboard/dashboard-store";
+import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
+import { dispatchToast } from "../shared/events";
 import type { RoutePathResponse } from "@birdbox/contracts/api";
 
 type OspfVersion = "ospfv2" | "ospfv3";
@@ -86,6 +87,7 @@ const routePathTarget = ref("");
 const routePathStartNodeId = ref("");
 const routePathPending = ref(false);
 const routePathError = ref("");
+const ospfActionPending = ref<"preview" | "save" | null>(null);
 interface OspfPathStep {
   nodeId: string;
   route: RoutePathResponse["routes"][number];
@@ -229,8 +231,8 @@ interface OspfNodePosition {
   y: number;
   locked?: boolean;
 }
-const TOPOLOGY_WIDTH = 1600;
-const TOPOLOGY_HEIGHT = 1000;
+const TOPOLOGY_WIDTH = 2400;
+const TOPOLOGY_HEIGHT = 1600;
 interface OspfNodeConfig {
   nodeId: string;
   enabled: boolean;
@@ -494,6 +496,20 @@ const topologyLinks = computed(() => {
     (link) => nodeIds.has(link.from) && nodeIds.has(link.to),
   );
 });
+function defaultTopologyPosition(index: number, total: number): OspfNodePosition {
+  const columns = Math.min(6, Math.max(1, total));
+  const rows = Math.max(1, Math.ceil(total / columns));
+  const spacingX = 300;
+  const spacingY = 220;
+  const gridWidth = (columns - 1) * spacingX;
+  const gridHeight = (rows - 1) * spacingY;
+  const startX = Math.max(100, TOPOLOGY_WIDTH / 2 - gridWidth / 2);
+  const startY = Math.max(80, TOPOLOGY_HEIGHT / 2 - gridHeight / 2);
+  return {
+    x: startX + (index % columns) * spacingX,
+    y: startY + Math.floor(index / columns) * spacingY,
+  };
+}
 function ensureNodePositions(nextNodes: OspfNode[] = nodes.value): void {
   const validIds = new Set(nextNodes.map((node) => node.id));
   const next = Object.fromEntries(
@@ -504,9 +520,7 @@ function ensureNodePositions(nextNodes: OspfNode[] = nodes.value): void {
   if (!nextNodes.length) return;
   nextNodes.forEach((node, index) => {
     if (next[node.id]) return;
-    const column = index % 5;
-    const row = Math.floor(index / 5);
-    next[node.id] = { x: 180 + column * 280, y: 140 + row * 190 };
+    next[node.id] = defaultTopologyPosition(index, nextNodes.length);
   });
   nodePosition.value = next;
   centerTopologyView(next);
@@ -514,9 +528,7 @@ function ensureNodePositions(nextNodes: OspfNode[] = nodes.value): void {
 function resetTopologyLayout(): void {
   const next: Record<string, OspfNodePosition> = {};
   nodes.value.forEach((node, index) => {
-    const column = index % 5;
-    const row = Math.floor(index / 5);
-    next[node.id] = { x: 180 + column * 280, y: 140 + row * 190 };
+    next[node.id] = defaultTopologyPosition(index, nodes.value.length);
   });
   nodePosition.value = next;
   centerTopologyView(next);
@@ -728,24 +740,52 @@ function domainPayload(): Record<string, unknown> {
   };
 }
 async function saveOspf(): Promise<void> {
-  const payload = domainPayload();
-  const response = await api<{ domain: { id: string } }>(
-    ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
-    {
-      method: ospfDomainId.value ? "PUT" : "POST",
-      body: JSON.stringify(payload),
-      headers: { "content-type": "application/json" },
-    },
-  );
-  ospfDomainId.value = response.domain.id;
-  await refreshOspfRuntime();
+  if (ospfActionPending.value || !nodes.value.length) return;
+  ospfActionPending.value = "save";
+  try {
+    const response = await api<{ domain: { id: string } }>(
+      ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
+      {
+        method: ospfDomainId.value ? "PUT" : "POST",
+        body: JSON.stringify(domainPayload()),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    ospfDomainId.value = response.domain.id;
+    await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
+    await refreshOspfRuntime();
+    dispatchToast("OSPF 配置已保存并应用", "success");
+  } catch (error) {
+    dispatchToast(error instanceof Error ? error.message : "保存并应用 OSPF 配置失败", "error");
+  } finally {
+    ospfActionPending.value = null;
+  }
 }
 async function previewOspf(): Promise<void> {
-  await api("/api/ospf/preview", {
-    method: "POST",
-    body: JSON.stringify(domainPayload()),
-    headers: { "content-type": "application/json" },
-  });
+  if (ospfActionPending.value || !nodes.value.length) return;
+  ospfActionPending.value = "preview";
+  try {
+    const result = await api<{
+      valid: boolean;
+      configs?: Array<{ nodeId: string; validation?: { ok?: boolean; stderr?: string } }>;
+    }>("/api/ospf/preview", {
+      method: "POST",
+      body: JSON.stringify(domainPayload()),
+      headers: { "content-type": "application/json" },
+    });
+    if (!result.valid) {
+      const failed = result.configs?.find((item) => item.validation?.ok === false);
+      const detail = failed?.validation?.stderr?.trim();
+      dispatchToast(detail ? `OSPF 配置预检失败：${detail}` : "OSPF 配置预检失败，请检查节点返回的错误", "error");
+      return;
+    }
+    previewDialog.value?.showModal();
+    dispatchToast("OSPF 配置预检通过", "success");
+  } catch (error) {
+    dispatchToast(error instanceof Error ? error.message : "OSPF 配置预检失败", "error");
+  } finally {
+    ospfActionPending.value = null;
+  }
 }
 function loadNodeConfig(nodeId: string): void {
   const config = nodeConfigs.value[nodeId];
@@ -1306,11 +1346,11 @@ onBeforeUnmount(() => {
           在拓扑中建立链路并配置双方接口，拖动节点布局，拖动空白区域平移画布；按节点管理 OSPFv2/OSPFv3 实例。
         </p>
       </div>
-      <div class="ospf-actions">
-        <button class="secondary-button" type="button" @click="previewOspf">
-          预检配置</button
-        ><button class="primary-button" type="button" @click="saveOspf">
-          保存并应用
+      <div class="ospf-actions" :aria-busy="ospfActionPending !== null">
+        <button class="secondary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="previewOspf">
+          {{ ospfActionPending === "preview" ? "正在预检" : "预检配置" }}</button
+        ><button class="primary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="saveOspf">
+          {{ ospfActionPending === "save" ? "正在保存并应用" : "保存并应用" }}
         </button>
       </div>
     </div>
@@ -1397,14 +1437,14 @@ onBeforeUnmount(() => {
             :transform="`translate(${(linkGeometry(link).x1 + linkGeometry(link).x2) / 2},${(linkGeometry(link).y1 + linkGeometry(link).y2) / 2})`"
           >
             <rect
-              x="-24"
-              y="-8"
-              width="48"
-              height="16"
-              rx="3"
+              x="-34"
+              y="-11"
+              width="68"
+              height="22"
+              rx="4"
               @click.stop="selectLink(link)"
             />
-            <text text-anchor="middle" y="3" @click.stop="selectLink(link)">
+            <text text-anchor="middle" y="4" @click.stop="selectLink(link)">
               Cost {{ linkCostInput(link) }}
             </text>
           </g></svg
@@ -1947,8 +1987,16 @@ onBeforeUnmount(() => {
         <div v-else class="ospf-path-topology" aria-label="OSPF 路径拓扑">
           <div class="ospf-path-viewport-tools" role="toolbar" aria-label="路径拓扑视口控制"><button class="icon-button" type="button" title="放大" aria-label="放大路径拓扑" @click="zoomRoutePath(.1)">＋</button><button class="icon-button" type="button" title="缩小" aria-label="缩小路径拓扑" @click="zoomRoutePath(-.1)">－</button><button class="icon-button" type="button" title="重置视口" aria-label="重置路径拓扑视口" @click="resetRoutePathViewport">⟳</button><span>{{ Math.round(routePathScale * 100) }}%</span></div>
           <div ref="routePathCanvas" class="ospf-path-viewport" :class="{ dragging: routePathDragging }" @wheel.prevent="handleRoutePathWheel" @pointerdown="startRoutePathPan" @pointermove="moveRoutePathPan" @pointerup="stopRoutePathPan" @pointercancel="stopRoutePathPan">
-            <div class="ospf-path-world" :style="{ transform: `translate(${routePathPan.x}px, ${routePathPan.y}px) scale(${routePathScale})` }">
-              <svg viewBox="0 0 540 330" role="img" aria-label="OSPF 路径拓扑">
+            <div
+              class="ospf-path-world"
+              :style="{
+                width: `${TOPOLOGY_WIDTH}px`,
+                height: `${TOPOLOGY_HEIGHT}px`,
+                margin: `-${TOPOLOGY_HEIGHT / 2}px 0 0 -${TOPOLOGY_WIDTH / 2}px`,
+                transform: `translate(${routePathPan.x}px, ${routePathPan.y}px) scale(${routePathScale})`,
+              }"
+            >
+              <svg :viewBox="`0 0 ${TOPOLOGY_WIDTH} ${TOPOLOGY_HEIGHT}`" role="img" aria-label="OSPF 路径拓扑">
                 <line v-for="link in topologyLinks" :key="`path-${link.id}`" v-bind="{ x1: linkGeometry(link).x1, y1: linkGeometry(link).y1, x2: linkGeometry(link).x2, y2: linkGeometry(link).y2 }" :class="['ospf-path-link', { active: routePathLinkDirections.has(link.id), dim: !routePathLinkDirections.has(link.id) }]" />
                 <polygon v-for="link in topologyLinks.filter((item) => routePathLinkDirections.has(item.id))" :key="`path-arrow-${link.id}`" :points="pathArrowPoints(link, routePathLinkDirections.get(link.id)!)" class="ospf-path-arrow" />
               </svg>
