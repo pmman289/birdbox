@@ -23,6 +23,30 @@ test("starts with an empty inventory so the first node can be onboarded from the
   assert.deepEqual(state.sessions, []);
 });
 
+test("keeps repeated inventory reads read-only after initialization normalization", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-readonly-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", {
+    version: 20,
+    nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [],
+    staticProtocols: [], sessions: [], ibgpDomains: [],
+  });
+  const store = new InventoryStore({
+    database,
+    dataDir: root,
+    nodesPath: path.join(root, "nodes.json"),
+    legacySessionPath: path.join(root, "session.json"),
+  });
+
+  await store.read();
+  const normalized = await database.readState("inventory");
+  assert.ok(normalized);
+  const revision = normalized.revision;
+  await store.read();
+  assert.equal((await database.readState("inventory")).revision, revision);
+});
+
 test("confirms an inventory CAS that committed before its response was lost", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-confirm-"));
   context.after(() => fs.rm(root, { recursive: true, force: true }));

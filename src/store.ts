@@ -360,7 +360,13 @@ export class InventoryStore {
 
   async read(): Promise<Inventory> {
     await this.initialize();
-    return this.#readNormalized();
+    // Inventory normalization is performed once during initialization. A
+    // regular read must remain read-only; writing a migration-normalized
+    // snapshot from a dashboard/runtime request can advance the revision
+    // while a remote deployment is waiting to commit its CAS.
+    const record = await this.database.readState<unknown>(this.stateKey);
+    if (!record) throw new Error("Birdbox 库存状态不存在");
+    return this.#track(normalizeStoredInventory(record.value), record.revision);
   }
 
   async #readNormalized(): Promise<Inventory> {
