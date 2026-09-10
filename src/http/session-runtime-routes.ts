@@ -3,7 +3,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { ChangeEvent, DashboardRuntimeResponse, ProtocolDetailsResponse, RouteDetailsResponse, RoutePathResponse } from "../../packages/contracts/src/api.js";
 import type { Inventory, ManagedNode } from "../../packages/contracts/src/inventory.js";
 import type { AuthStore } from "../auth.js";
-import { executeNodeCommand, executeNodeRpc, inspectNode, inspectOspfRuntime, inspectProtocolDetails, inspectProtocolRoutes, inspectRoutePath, setProtocolState } from "../bird.js";
+import { executeNodeCommand, executeNodeRpc, inspectNode, inspectOspfRuntime, inspectProtocolDetails, inspectProtocolRoutes, inspectRoutePath, setProtocolState, type OspfRuntimeResult } from "../bird.js";
 import { ospfDomainNodeIds, ospfProtocolName } from "../ospf.js";
 import { configForNode } from "../inventory-domain.js";
 import type { InventoryStore } from "../store.js";
@@ -17,6 +17,9 @@ interface SessionRuntimeRoutesOptions {
   withNodeOperationLock<Result>(nodeId: string, operation: () => Promise<Result> | Result): Promise<Result>;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
   getEvents(): ChangeEvent[];
+  /** Injectable for bounded runtime checks and route-level fault tests. */
+  inspectOspfRuntime?: typeof inspectOspfRuntime;
+  ospfRuntimeTimeoutMs?: number;
 }
 
 interface RouteError extends Error {
@@ -54,6 +57,42 @@ function findNode(state: Inventory, nodeId: string): ManagedNode {
   const node = state.nodes.find((item) => item.id === nodeId);
   if (!node) throw routeError(404, "受管节点不存在");
   return node;
+}
+
+const OSPF_RUNTIME_NODE_TIMEOUT_MS = 12_000;
+
+function emptyOspfRuntime(error: string): OspfRuntimeResult {
+  return {
+    reachable: false,
+    error,
+    v2: { state: null, neighbors: 0, routes: null },
+    v3: { state: null, neighbors: 0, routes: null },
+    neighbors: [],
+    routes: [],
+    routesTruncated: false,
+    interfaces: [],
+  };
+}
+
+async function inspectOspfRuntimeBounded(
+  node: ManagedNode,
+  protocolNames: { v2: string; v3: string },
+  timeoutMs = OSPF_RUNTIME_NODE_TIMEOUT_MS,
+  inspector: typeof inspectOspfRuntime = inspectOspfRuntime,
+): Promise<OspfRuntimeResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => inspector(node, protocolNames, timeoutMs)).catch((error: unknown) => emptyOspfRuntime(
+        error instanceof Error ? error.message : "节点 OSPF 运行态检查失败",
+      )),
+      new Promise<OspfRuntimeResult>((resolve) => {
+        timer = setTimeout(() => resolve(emptyOspfRuntime("节点 OSPF 运行态检查超时")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOptions> = async (app, options) => {
@@ -127,8 +166,17 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
     const protocolNames = { v2: ospfProtocolName(domain, "ospfv2"), v3: ospfProtocolName(domain, "ospfv3") };
     const nodeIds = ospfDomainNodeIds(domain);
     const results = await Promise.all(nodeIds.map(async (nodeId) => {
-      const node = findNode(state, nodeId);
-      return { nodeId, name: node.name, runtime: await inspectOspfRuntime(node, protocolNames) };
+      let node: ManagedNode;
+      try {
+        node = findNode(state, nodeId);
+      } catch (error) {
+        return {
+          nodeId,
+          name: nodeId,
+          runtime: emptyOspfRuntime(error instanceof Error ? error.message : "受管节点不存在"),
+        };
+      }
+      return { nodeId, name: node.name, runtime: await inspectOspfRuntimeBounded(node, protocolNames, options.ospfRuntimeTimeoutMs ?? OSPF_RUNTIME_NODE_TIMEOUT_MS, options.inspectOspfRuntime) };
     }));
     return jsonReply(reply, 200, { domainId: domain.id, nodes: results });
   });

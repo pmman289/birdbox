@@ -149,6 +149,32 @@ exit 0
   const listedOspf = await authenticatedRequest("/api/ospf");
   assert.deepEqual(listedOspf.body.layout, { local: { x: 321, y: 654, locked: false } });
 
+  const ospfNodeConfig = {
+    nodeId: "local", enabled: true, versions: ["ospfv2"], routerId: "192.0.2.1",
+    importPolicies: {
+      ospfv2: { mode: "form", formAction: "all", steps: [], filterId: null },
+      ospfv3: { mode: "form", formAction: "all", steps: [], filterId: null },
+    },
+    exportPolicies: {
+      ospfv2: { mode: "form", formAction: "none", steps: [], filterId: null },
+      ospfv3: { mode: "form", formAction: "none", steps: [], filterId: null },
+    },
+    exportDefineIds: { ospfv2: null, ospfv3: null }, bfd: false, gracefulRestart: false, redistributeStatic: false,
+  };
+  const ospfDomainPayload = (id, name) => ({ id, name, nodeConfigs: [ospfNodeConfig], links: [], layout: { local: { x: 10, y: 20 } } });
+  const createdOspfA = await authenticatedRequest("/api/ospf", { method: "POST", body: JSON.stringify(ospfDomainPayload("ospf_a", "OSPF A")) });
+  assert.equal(createdOspfA.status, 201);
+  const createdOspfB = await authenticatedRequest("/api/ospf", { method: "POST", body: JSON.stringify(ospfDomainPayload("ospf_b", "OSPF B")) });
+  assert.equal(createdOspfB.status, 201);
+  const renamedOspfA = await authenticatedRequest("/api/ospf/ospf_a", { method: "PUT", body: JSON.stringify({ ...ospfDomainPayload("ospf_a", "OSPF A renamed"), layout: {} }) });
+  assert.equal(renamedOspfA.status, 200);
+  const isolatedOspfList = await authenticatedRequest("/api/ospf");
+  assert.deepEqual(isolatedOspfList.body.domains.map((domain) => domain.name), ["OSPF A renamed", "OSPF B"]);
+  const deletedOspfA = await authenticatedRequest("/api/ospf/ospf_a", { method: "DELETE" });
+  assert.equal(deletedOspfA.status, 200);
+  const remainingOspf = await authenticatedRequest("/api/ospf");
+  assert.deepEqual(remainingOspf.body.domains.map((domain) => domain.id), ["ospf_b"]);
+
   const rejectedLocalNode = await authenticatedRequest("/api/nodes", {
     method: "POST",
     body: JSON.stringify({

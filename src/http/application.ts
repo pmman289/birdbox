@@ -15,6 +15,7 @@ import { agentRoutes } from "./agent-routes.js";
 import { dashboardRoutes } from "./dashboard-routes.js";
 import { mutationRoutes } from "./mutation-routes.js";
 import { sessionRuntimeRoutes } from "./session-runtime-routes.js";
+import { inspectOspfRuntime } from "../bird.js";
 
 interface HttpApplicationOptions {
   publicDirectory: string;
@@ -32,6 +33,8 @@ interface HttpApplicationOptions {
   getEvents(): ChangeEvent[];
   agentBroker: AgentBroker;
   agentBinaryPath?: string;
+  inspectOspfRuntime?: typeof inspectOspfRuntime;
+  ospfRuntimeTimeoutMs?: number;
 }
 
 const SECURITY_HEADERS = Object.freeze({
@@ -197,6 +200,8 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     withNodeOperationLock: options.withNodeOperationLock,
     addEvent: options.addEvent,
     getEvents: options.getEvents,
+    inspectOspfRuntime: options.inspectOspfRuntime,
+    ospfRuntimeTimeoutMs: options.ospfRuntimeTimeoutMs,
   });
   await app.register(mutationRoutes, {
     authStore: options.authStore,

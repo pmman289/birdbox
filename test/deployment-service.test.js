@@ -68,3 +68,31 @@ test("retries a deployment after a concurrent inventory revision conflict", asyn
   assert.equal(reads, 2);
   assert.equal(replaces, 2);
 });
+
+test("stops after the CAS retry limit and preserves a readable conflict", async () => {
+  const initial = validateInventory({
+    version: 28,
+    nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [],
+    staticProtocols: [], directProtocols: [], kernelProtocols: [], sourcePolicies: [],
+    sessions: [], ibgpDomains: [], ospfDomains: [], ospfLayout: {},
+  });
+  let reads = 0;
+  let replaces = 0;
+  const store = {
+    async read() { reads += 1; return structuredClone(initial); },
+    async replace() { replaces += 1; throw conflictError(); },
+  };
+  const service = new DeploymentService({
+    database: {}, store, withDeploymentLock: (operation) => operation(),
+    configForNode: () => ({ main: "", resources: [] }), emptyConfigForNode: () => ({ main: "", resources: [] }),
+    findNode: () => { throw new Error("no nodes expected"); },
+    validationError: (_config, diagnostic, fallback) => String(diagnostic || fallback), addEvent: () => undefined,
+    fail: (status, message) => { const error = new Error(message); error.status = status; throw error; },
+  });
+  await assert.rejects(
+    service.mutateAndApply((draft) => { draft.ospfDomains = []; return "updated"; }, []),
+    (error) => error?.code === "STATE_CONFLICT" && error?.status === 409,
+  );
+  assert.equal(reads, 3);
+  assert.equal(replaces, 3);
+});

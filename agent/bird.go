@@ -25,6 +25,7 @@ const maxBirdConfig = 16 * 1024 * 1024
 
 var safeResourceName = regexp.MustCompile(`^define_[A-Za-z_][A-Za-z0-9_]*\.conf$`)
 var safeBirdName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var activeDeviceProtocol = regexp.MustCompile(`(?m)^\s*protocol\s+device(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{`)
 
 func interfaceNames(raw string) string {
 	var names []string
@@ -100,6 +101,73 @@ func absoluteSafePath(value string) bool {
 		}
 	}
 	return len(value) <= 4096
+}
+
+// BIRD comments are removed before checking declarations so commented
+// examples cannot make an Include node appear ready. Strings are preserved
+// because a quoted value may contain comment-like characters.
+func stripBirdComments(source string) string {
+	var out strings.Builder
+	inBlock, quoted, escaped := false, false, false
+	for i := 0; i < len(source); i++ {
+		ch := source[i]
+		if inBlock {
+			if ch == '*' && i+1 < len(source) && source[i+1] == '/' {
+				inBlock = false
+				i++
+				out.WriteString("  ")
+			} else if ch == '\n' {
+				out.WriteByte('\n')
+			} else {
+				out.WriteByte(' ')
+			}
+			continue
+		}
+		if quoted {
+			out.WriteByte(ch)
+			if escaped {
+				escaped = false
+			} else if ch == '\\' {
+				escaped = true
+			} else if ch == '"' {
+				quoted = false
+			}
+			continue
+		}
+		if ch == '"' {
+			quoted = true
+			out.WriteByte(ch)
+			continue
+		}
+		if ch == '/' && i+1 < len(source) && source[i+1] == '*' {
+			inBlock = true
+			i++
+			out.WriteString("  ")
+			continue
+		}
+		if ch == '/' && i+1 < len(source) && source[i+1] == '/' || ch == '#' {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			if i < len(source) {
+				out.WriteByte('\n')
+			}
+			continue
+		}
+		out.WriteByte(ch)
+	}
+	return out.String()
+}
+
+func requireActiveDeviceProtocol(mainConfig string) error {
+	data, err := os.ReadFile(mainConfig)
+	if err != nil {
+		return err
+	}
+	if !activeDeviceProtocol.MatchString(stripBirdComments(string(data))) {
+		return fmt.Errorf("BIRD 主配置缺少活动 protocol device 协议。OSPF/接口发现需要 protocol device，请在主配置中添加 protocol device { }; 后重新预检")
+	}
+	return nil
 }
 
 func parseBirdBundle(params map[string]any) (birdBundle, error) {
@@ -465,10 +533,16 @@ func runBirdCheck(parent context.Context, mode, generated, socket string) comman
 }
 
 func stageBirdTask(parent context.Context, params map[string]any, r result) result {
-	mode, _, generated, socket, base, err := birdPaths(params)
+	mode, main, generated, socket, base, err := birdPaths(params)
 	if err != nil {
 		r.Stderr, r.Code = err.Error(), "INVALID_STAGE"
 		return r
+	}
+	if mode == "include" {
+		if err = requireActiveDeviceProtocol(main); err != nil {
+			r.Stderr, r.Code = err.Error(), "STAGE_FAILED"
+			return r
+		}
 	}
 	bundle, err := parseBirdBundle(params)
 	if err != nil {
@@ -516,10 +590,16 @@ func stageBirdTask(parent context.Context, params map[string]any, r result) resu
 }
 
 func applyBirdTask(parent context.Context, params map[string]any, r result) result {
-	mode, _, generated, socket, base, err := birdPaths(params)
+	mode, main, generated, socket, base, err := birdPaths(params)
 	if err != nil {
 		r.Stderr, r.Code = err.Error(), "INVALID_APPLY"
 		return r
+	}
+	if mode == "include" {
+		if err = requireActiveDeviceProtocol(main); err != nil {
+			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+			return r
+		}
 	}
 	bundle, err := parseBirdBundle(params)
 	if err != nil {
@@ -836,6 +916,10 @@ func birdAccessTask(parent context.Context, params map[string]any, r result) res
 			r.Stderr, r.Code = item.label+": "+err.Error(), "ACCESS_FAILED"
 			return r
 		}
+	}
+	if err := requireActiveDeviceProtocol(mainConfig); err != nil {
+		r.Stderr, r.Code = err.Error(), "ACCESS_FAILED"
+		return r
 	}
 	out := runBirdc(parent, socket, "show status")
 	r.Stdout, r.Stderr, r.OK, r.Code = out.stdout+"\n---BIRDBOX-ACCESS---\n"+os.Getenv("USER"), out.stderr, out.ok, out.code

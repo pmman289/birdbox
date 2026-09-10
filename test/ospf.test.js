@@ -5,7 +5,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { normalizeOspfDomain, renderBirdConfig, validateInventory } from "../src/bird.js";
+import { normalizeOspfDomain, ospfProtocolName, renderBirdConfig, validateInventory } from "../src/bird.js";
 import { parseOspfNeighborDetails, parseOspfSectionByTable } from "../src/bird-runtime.js";
 import { parseRoutePath } from "../src/bird-runtime-parser.js";
 
@@ -85,6 +85,23 @@ test("automatically enables both OSPF endpoints when a link exists", () => {
   assert.deepEqual(normalized.nodeConfigs.map((config) => config.enabled), [true, true]);
 });
 
+test("rejects an invalid OSPF Router ID before rendering", () => {
+  const input = domain();
+  input.nodeConfigs = input.nodeConfigs.map((config, index) => index === 0 ? { ...config, routerId: "not-an-ip" } : config);
+  assert.throws(() => normalizeOspfDomain(input), /Router ID.*IPv4/);
+});
+
+test("keeps long OSPF domain protocol names unique and bounded", () => {
+  const prefix = "ospf_domain_with_a_shared_long_prefix_that_would_collide_";
+  const first = normalizeOspfDomain({ ...domain(), id: `${prefix}a` });
+  const second = normalizeOspfDomain({ ...domain(), id: `${prefix}b` });
+  const firstName = ospfProtocolName(first, "ospfv2");
+  const secondName = ospfProtocolName(second, "ospfv2");
+  assert.notEqual(firstName, secondName);
+  assert.ok(firstName.length <= 60);
+  assert.ok(secondName.length <= 60);
+});
+
 test("defaults OSPF link authentication to none without rendering an auth directive", () => {
   const input = domain();
   delete input.links[0].authentication;
@@ -144,5 +161,32 @@ test("validates OSPF node references", () => {
 test("normalizes and renders BIRD OSPF advanced protocol and interface options", () => {
   const d = normalizeOspfDomain({ ...domain(), nodeConfigs: domain().nodeConfigs.map((config) => ({ ...config, protocolOptions: { rfc1583compat: true, rfc5838: false, instanceId: 7, stubRouter: true, tick: 2, ecmp: true, ecmpLimit: 8, mergeExternal: true, gracefulRestartMode: "on", gracefulRestartTime: 90 }, areaOptions: { "0.0.0.0": { networks: [{ prefix: "192.0.2.0/24", hidden: true }] } }, virtualLinks: [{ id: "192.0.2.9", area: "1.1.1.1", hello: 10, dead: 40 }] })), links: [{ ...domain().links[0], options: { type: "ptp", poll: 20, retransmit: 5, transmitDelay: 1, priority: 10, wait: 40, deadMode: "seconds", rxBuffer: "large", txLength: 1400, linkLsaSuppression: true, strictNonbroadcast: true, realBroadcast: true, ptpNetmask: true, ptpAddress: true, secondary: true, checkLink: false, ecmpWeight: 2, ttlSecurity: "tx-only", txClass: 46, txDscp: 46, txPriority: 3, password: "secret", passwordOptions: { id: 7, algorithm: "hmac-sha256" }, neighbors: [{ address: "192.0.2.2", eligible: true }] } }] });
   const config = renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [d]);
-  for (const expected of ["rfc1583compat yes;", "rfc5838 no;", "instance id 7;", "stub router yes;", "ecmp yes limit 8;", "merge external yes;", "type ptp;", "dead 40;", "rx buffer large;", "ttl security tx only;", "secondary yes;", "algorithm hmac sha256;", "neighbors {", "virtual link 192.0.2.9"]) assert.match(config, new RegExp(expected.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")));
+  for (const expected of ["rfc1583compat yes;", "rfc5838 no;", "instance id 7;", "stub router yes;", "ecmp yes limit 8;", "merge external yes;", "type ptp;", "dead 40;", "rx buffer large;", "ttl security tx only;", "algorithm hmac sha256;", "neighbors {", "virtual link 192.0.2.9"]) assert.match(config, new RegExp(expected.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")));
+  assert.doesNotMatch(config, /secondary yes;/);
+});
+
+test("filters OSPF interface options by address-family support", async () => {
+  const base = domain();
+  const input = normalizeOspfDomain({
+    ...base,
+    links: [{ ...base.links[0], options: {
+      type: "ptp", deadMode: "seconds", linkLsaSuppression: true,
+      realBroadcast: true, ptpNetmask: true, ptpAddress: true, secondary: true,
+    } }],
+  });
+  const config = renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [input]);
+  const v2 = config.match(/protocol ospf v2[\s\S]*?(?=\nprotocol ospf v3|$)/)?.[0] ?? "";
+  const v3 = config.match(/protocol ospf v3[\s\S]*/)?.[0] ?? "";
+  assert.match(v2, /real broadcast yes;/);
+  assert.match(v2, /ptp netmask yes;/);
+  assert.match(v2, /ptp address yes;/);
+  assert.doesNotMatch(v2, /link lsa suppression yes;/);
+  assert.match(v3, /link lsa suppression yes;/);
+  assert.doesNotMatch(v3, /real broadcast yes;/);
+  assert.doesNotMatch(v3, /ptp netmask yes;/);
+  assert.doesNotMatch(v3, /ptp address yes;/);
+  assert.doesNotMatch(config, /secondary yes;/);
+  const file = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ospf-family-")), "bird.conf");
+  await fs.writeFile(file, config);
+  await execFileAsync("bird", ["-p", "-c", file]);
 });

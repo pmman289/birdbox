@@ -8,6 +8,7 @@
 - [Docker Compose 部署流程](docker-deployment.md)：运维人员从 Docker Hub 拉取镜像并启动 Birdbox 与 MySQL。
 - [Agent 主动连接与升级](agent.md)：新增 Agent 节点、旧 SSH 节点升级、RPC 和安全要求。
 - [用户操作手册](user-guide.md)：面向网络管理员的部署、节点接入、eBGP、iBGP、OSPF 和全部资源使用流程，附真实界面截图。
+- [OSPF 测试分析与全量用例](ospf-test-plan.md)：OSPF 管理功能的测试分析、分层用例、并发/回滚故障注入、实机验证和发布放行标准。
 
 生产 Compose 文件是仓库根目录的 `docker-compose.yml`，默认使用
 `pmman/birdbox:latest`。通过 `.env` 中的 `BIRDBOX_IMAGE_TAG` 可以固定其它发布版本或 digest。

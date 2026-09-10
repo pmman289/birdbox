@@ -42,6 +42,18 @@ test("persists inventory, revision conflicts, and multi-session auth in MySQL", 
   const unchanged = await database.mutateState(stateKey, { count: 0 }, async () => ({ result: "unchanged" }));
   assert.equal(unchanged.result, "unchanged");
   assert.equal(unchanged.revision, mutation.revision);
+
+  // OSPF saves from multiple sessions can hit the same JSON row concurrently.
+  // The database layer must retry transient InnoDB deadlocks instead of leaking
+  // ER_LOCK_DEADLOCK as a controller 500 response.
+  for (let round = 0; round < 20; round += 1) {
+    await Promise.all(Array.from({ length: 4 }, () => database.mutateState(stateKey, { count: 0 }, (current) => ({
+      value: { count: current.count + 1 },
+    }))));
+  }
+  const concurrent = await database.readState(stateKey);
+  assert.equal(concurrent.value.count, 81);
+  assert.equal(concurrent.revision, mutation.revision + 80);
   await assert.rejects(
     () => database.replaceState(stateKey, initial.revision, { count: 99 }),
     (error) => error.code === "STATE_CONFLICT" && error.status === 409,

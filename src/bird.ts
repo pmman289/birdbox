@@ -28,6 +28,7 @@ export {
   stopProtocol,
 } from "./bird-runtime.js";
 export { extractProtocolDetails, parseProtocolStatus, parseProtocolStatuses, parseRouteDetails, parseRoutePath } from "./bird-runtime-parser.js";
+export type { OspfRuntimeResult } from "./bird-runtime.js";
 export { normalizeSession } from "./bird-session.js";
 export { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
 export { normalizeStaticProtocol } from "./bird-static.js";

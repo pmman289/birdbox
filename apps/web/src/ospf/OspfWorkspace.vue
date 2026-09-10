@@ -42,6 +42,7 @@ interface OspfLink {
   options?: OspfInterfaceOptions;
 }
 interface OspfRuntimeSummary {
+  error: string | null;
   v2: string;
   v3: string;
   neighbors: number;
@@ -74,6 +75,7 @@ interface OspfRuntimeNode {
       neighbors: OspfNeighborRuntime[];
       routes: OspfRouteRuntime[];
       routesTruncated: boolean;
+      error?: string | null;
     };
 }
 
@@ -265,6 +267,7 @@ const selectedNode = computed(
 const selectedRuntime = computed(
   () =>
     runtimeByNode.value[selectedNodeId.value] ?? {
+      error: null,
       v2: "未检查",
       v3: "未检查",
       neighbors: 0,
@@ -850,7 +853,7 @@ function toggleVersion(version: OspfVersion, checked: boolean): void {
       : [...current, version]
     : current.filter((item) => item !== version);
 }
-function interfacePreviewClause(link: OspfLink, peerName: string): string {
+function interfacePreviewClause(link: OspfLink, peerName: string, version: OspfVersion): string {
   const options = link.options ?? {};
   const directives: string[] = [];
   const birdString = (value: string): string => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -868,12 +871,13 @@ function interfacePreviewClause(link: OspfLink, peerName: string): string {
   if (options.rxBuffer != null) directives.push(`rx buffer ${options.rxBuffer};`);
   if (options.txLength != null) directives.push(`tx length ${options.txLength};`);
   directives.push(`type ${options.type ?? "ptp"};`);
-  if (options.linkLsaSuppression) directives.push("link lsa suppression yes;");
+  if (version === "ospfv3" && options.linkLsaSuppression) directives.push("link lsa suppression yes;");
   if (options.strictNonbroadcast) directives.push("strict nonbroadcast yes;");
-  if (options.realBroadcast) directives.push("real broadcast yes;");
-  if (options.ptpNetmask) directives.push("ptp netmask yes;");
-  if (options.ptpAddress) directives.push("ptp address yes;");
-  if (options.secondary) directives.push("secondary yes;");
+  if (version === "ospfv2") {
+    if (options.realBroadcast) directives.push("real broadcast yes;");
+    if (options.ptpNetmask) directives.push("ptp netmask yes;");
+    if (options.ptpAddress) directives.push("ptp address yes;");
+  }
   if (options.checkLink === false) directives.push("check link no;");
   if (options.bfd ?? bfd.value) directives.push("bfd yes;");
   if (options.ecmpWeight != null) directives.push(`ecmp weight ${options.ecmpWeight};`);
@@ -925,7 +929,7 @@ const configPreview = computed(() =>
         const peerId = link.from === selectedNodeId.value ? link.to : link.from;
         const peerName =
           nodes.value.find((node) => node.id === peerId)?.name ?? peerId;
-        const clause = interfacePreviewClause({ ...link, localInterface: interfaceName }, peerName);
+        const clause = interfacePreviewClause({ ...link, localInterface: interfaceName }, peerName, ospfVersion);
         areas.set(link.area, [...(areas.get(link.area) ?? []), clause]);
       }
       const areaConfig = [...areas.entries()]
@@ -1301,6 +1305,7 @@ async function refreshOspfRuntime(): Promise<void> {
         {
           v2: item.runtime.v2.state ?? "未配置",
           v3: item.runtime.v3.state ?? "未配置",
+          error: item.runtime.error ?? null,
           neighbors: Math.max(
             item.runtime.v2.neighbors,
             item.runtime.v3.neighbors,
@@ -1758,10 +1763,9 @@ onBeforeUnmount(() => {
             <label class="field">TX Priority<input v-model.number="selectedLink.options!.txPriority" type="number" min="0" max="255" /></label>
             <label class="checkbox-inline"><input v-model="selectedLink.options!.linkLsaSuppression" type="checkbox" /> 抑制 Link-LSA（OSPFv3）</label>
             <label class="checkbox-inline"><input v-model="selectedLink.options!.strictNonbroadcast" type="checkbox" /> Strict Nonbroadcast</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.realBroadcast" type="checkbox" /> 使用真实广播</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpNetmask" type="checkbox" /> PTP Netmask</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpAddress" type="checkbox" /> PTP Address</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.secondary" type="checkbox" /> Secondary 地址</label>
+            <label class="checkbox-inline"><input v-model="selectedLink.options!.realBroadcast" type="checkbox" /> 使用真实广播（OSPFv2）</label>
+            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpNetmask" type="checkbox" /> PTP Netmask（OSPFv2）</label>
+            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpAddress" type="checkbox" /> PTP Address（OSPFv2）</label>
             <label class="checkbox-inline"><input v-model="selectedLink.options!.checkLink" type="checkbox" /> 检查物理链路</label>
             <label class="checkbox-inline"><input v-model="selectedLink.options!.bfd" type="checkbox" /> 接口 BFD（覆盖节点设置）</label>
             <label class="field">认证密码<input v-model="selectedLink.options!.password" type="password" autocomplete="new-password" /></label>
@@ -2006,6 +2010,7 @@ onBeforeUnmount(() => {
         <div class="neighbor-row">
           <span><i :class="selectedRuntime.v3.startsWith('Full') ? 'up-dot' : 'warn-dot'" />OSPFv3</span><em>{{ selectedRuntime.v3 }}</em>
         </div>
+        <p v-if="selectedRuntime.error" class="field-error ospf-runtime-error">{{ selectedRuntime.error }}</p>
         <div class="ospf-preview-heading"><h4>配置预览</h4><button class="secondary-button compact-button" type="button" :disabled="!configPreview" @click="openOspfPreview">全屏查看</button></div>
         <pre class="ospf-preview">{{ configPreview }}</pre>
       </aside>

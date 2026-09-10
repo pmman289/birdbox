@@ -155,6 +155,64 @@ function strip_comments(source, output, cursor, character, pair, quoted, escaped
 END { exit found ? 0 : 1 }
 `.trim();
 
+// Include deployments rely on the host's interface discovery protocol. Keep
+// this check comment-aware so a commented example cannot satisfy onboarding.
+export const ACTIVE_BIRD_DEVICE_AWK = `
+BEGIN {
+  quote = sprintf("%c", 34)
+  backslash = sprintf("%c", 92)
+}
+function strip_comments(source, output, cursor, character, pair, quoted, escaped, ending) {
+  output = ""
+  for (cursor = 1; cursor <= length(source);) {
+    character = substr(source, cursor, 1)
+    pair = substr(source, cursor, 2)
+    if (in_block_comment) {
+      ending = index(substr(source, cursor), "*/")
+      if (!ending) return output
+      cursor += ending + 1
+      in_block_comment = 0
+      continue
+    }
+    if (quoted) {
+      output = output character
+      if (escaped) escaped = 0
+      else if (character == backslash) escaped = 1
+      else if (character == quote) quoted = 0
+      cursor += 1
+      continue
+    }
+    if (character == quote) {
+      quoted = 1
+      output = output character
+      cursor += 1
+      continue
+    }
+    if (pair == "/*") {
+      in_block_comment = 1
+      cursor += 2
+      continue
+    }
+    if (pair == "//" || character == "#") break
+    output = output character
+    cursor += 1
+  }
+  return output
+}
+{
+  line = strip_comments($0)
+  sub(/^[[:space:]]*/, "", line)
+  if (line ~ /^protocol[[:space:]]+device([[:space:]]|$)/) found = 1
+}
+END { exit found ? 0 : 1 }
+`.trim();
+
+const ACTIVE_BIRD_DEVICE_ERROR = "BIRD 主配置缺少活动 protocol device 协议。OSPF/接口发现需要 protocol device，请在主配置中添加 protocol device { }; 后重新预检。";
+
+function activeDeviceCheckCommand(mainConfigPath: string): string {
+  return `awk '${ACTIVE_BIRD_DEVICE_AWK}' '${mainConfigPath}' || { echo '${ACTIVE_BIRD_DEVICE_ERROR}' >&2; exit 1; }`;
+}
+
 export const runOnNode = executeNodeCommand;
 
 export async function inspectNode(nodeInput: unknown, timeoutMs = 20_000): Promise<NodeRuntime> {
@@ -266,16 +324,21 @@ function parseOspfRouteCount(raw: string): number | null {
   return match?.[1] ? Number(match[1]) : null;
 }
 
-export async function inspectOspfRuntime(nodeInput: unknown, protocolNames: { v2: string; v3: string }): Promise<OspfRuntimeResult> {
+export async function inspectOspfRuntime(
+  nodeInput: unknown,
+  protocolNames: { v2: string; v3: string },
+  timeoutMs = 30_000,
+): Promise<OspfRuntimeResult> {
   const node = normalizeNode(nodeInput);
   const v2 = normalizeId(protocolNames.v2, "OSPFv2 协议名称");
   const v3 = normalizeId(protocolNames.v3, "OSPFv3 协议名称");
+  const boundedTimeout = Math.max(250, Math.min(timeoutMs, 120_000));
   if (node.transport === "agent") {
     const result = await executeNodeRpc(node, "bird.ospf", {
       socketPath: node.socketPath,
       v2,
       v3,
-    }, 30_000);
+    }, boundedTimeout);
     const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
     return {
       reachable: result.ok,
@@ -306,7 +369,7 @@ export async function inspectOspfRuntime(nodeInput: unknown, protocolNames: { v2
     "interfaces=$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p' | paste -sd '\\n' -)",
     "printf '%s\\n---BIRDBOX-OSPF-V2-COUNT---\\n%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-COUNT---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n' \"$neighbors\" \"$v2count\" \"$v2routes\" \"$v3count\" \"$v3routes\" \"$interfaces\"",
   ].join("\n");
-  const result = await executeNodeCommand(node, command, { timeout: 15_000 });
+  const result = await executeNodeCommand(node, command, { timeout: Math.min(boundedTimeout, 15_000) });
   const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
   return {
     reachable: result.ok,
@@ -345,6 +408,7 @@ export async function checkIncludeNodeAccess(nodeInput: unknown): Promise<NodeCo
     `test -w '${directory}' || { echo 'SSH 用户无法写入 Birdbox 配置目录：${directory}' >&2; exit 1; }`,
     `test -L '${node.generatedConfigPath}' || { echo 'Birdbox 生成配置不是符号链接：${node.generatedConfigPath}' >&2; exit 1; }`,
     `awk -v target='${node.generatedConfigPath}' '${ACTIVE_BIRD_INCLUDE_AWK}' '${node.mainConfigPath}' || { echo 'BIRD 主配置缺少活动 Include：${node.generatedConfigPath}' >&2; exit 1; }`,
+    activeDeviceCheckCommand(node.mainConfigPath),
     `birdc -s '${node.socketPath}' 'show status' || { echo 'SSH 用户无法访问 BIRD 控制 Socket：${node.socketPath}' >&2; exit 1; }`,
     "printf '\n---BIRDBOX-ACCESS---\n'",
     "id -un",
@@ -572,6 +636,12 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
     const candidateTarget = `versions/${versionName}`;
     const candidateLink = `${activePath}.candidate`;
     const switchLink = `${activePath}.switch`;
+    const deviceCheck = await executeNodeCommand(node, [
+      "set -eu",
+      `test -r '${node.mainConfigPath}'`,
+      activeDeviceCheckCommand(node.mainConfigPath),
+    ].join("\n"), { timeout: 12_000 });
+    if (!deviceCheck.ok) return deviceCheck;
     const stagedResources = await stageResourceFiles(node, bundle, directory);
     if (!stagedResources.ok) return stagedResources;
     const command = [
@@ -642,6 +712,12 @@ export async function applyStagedConfig(nodeInput: unknown, bundleInput: string 
     }, 60_000);
   }
   if (node.deploymentMode === "include") {
+    const deviceCheck = await executeNodeCommand(node, [
+      "set -eu",
+      `test -r '${node.mainConfigPath}'`,
+      activeDeviceCheckCommand(node.mainConfigPath),
+    ].join("\n"), { timeout: 12_000 });
+    if (!deviceCheck.ok) return deviceCheck;
     const activePath = node.generatedConfigPath;
     const directory = path.posix.dirname(activePath);
     const basename = path.posix.basename(activePath);

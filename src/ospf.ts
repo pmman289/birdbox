@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import net from "node:net";
 import type { ChannelPolicy, OspfAreaOptions, OspfDomain, OspfInterfaceOptions, OspfLink, OspfNodeConfig, OspfPasswordOptions, OspfProtocolOptions, OspfVersion, OspfVirtualLink } from "../packages/contracts/src/inventory.js";
 import { assertValidation, normalizeId, normalizeLabel } from "./bird-normalize-common.js";
@@ -32,6 +33,8 @@ function nodeConfig(value: unknown, index: number): OspfNodeConfig {
   const exports = record(input.exportPolicies, "OSPF 导出策略");
   const exportIds = record(input.exportDefineIds, "OSPF 导出 Define");
   const protocolInput = input.protocolOptions && typeof input.protocolOptions === "object" && !Array.isArray(input.protocolOptions) ? input.protocolOptions as RecordValue : {};
+  const routerId = input.routerId == null || String(input.routerId).trim() === "" ? null : String(input.routerId).trim();
+  assertValidation(routerId === null || net.isIP(routerId) === 4, `OSPF 节点配置 ${index + 1} Router ID 必须是有效的 IPv4 地址`);
   const protocolOptions: OspfProtocolOptions = {
     rfc1583compat: protocolInput.rfc1583compat === true,
     rfc5838: protocolInput.rfc5838 !== false,
@@ -91,7 +94,7 @@ function nodeConfig(value: unknown, index: number): OspfNodeConfig {
     nodeId: normalizeId(input.nodeId, "OSPF 节点 ID"),
     enabled: input.enabled !== false,
     versions: uniqueVersions,
-    routerId: input.routerId == null || String(input.routerId).trim() === "" ? null : String(input.routerId).trim(),
+    routerId,
     importPolicies: { ospfv2: policy(imports.ospfv2, "all"), ospfv3: policy(imports.ospfv3, "all") },
     exportPolicies: { ospfv2: policy(exports.ospfv2, "none"), ospfv3: policy(exports.ospfv3, "none") },
     exportDefineIds: { ospfv2: exportIds.ospfv2 == null ? null : String(exportIds.ospfv2), ospfv3: exportIds.ospfv3 == null ? null : String(exportIds.ospfv3) },
@@ -223,5 +226,7 @@ export function ospfDomainNodeIds(domain: OspfDomain): string[] {
 
 export function ospfProtocolName(domain: OspfDomain, version: OspfVersion): string {
   const base = `birdbox_ospf_${domain.id}_${version}`.replace(/[^A-Za-z0-9_]/g, "_");
-  return base.slice(0, 60);
+  if (base.length <= 60) return base;
+  const suffix = `${version === "ospfv2" ? "v2" : "v3"}_${createHash("sha256").update(`${domain.id}:${version}`).digest("hex").slice(0, 8)}`;
+  return `${base.slice(0, 60 - suffix.length - 1)}_${suffix}`;
 }

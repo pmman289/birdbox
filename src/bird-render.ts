@@ -514,12 +514,20 @@ function renderOspfForNode(
           // OSPF links default to point-to-point; emit it explicitly so the
           // generated config does not depend on BIRD's interface heuristics.
           output += `      type ${options.type ?? "ptp"};\n`;
-          if (options.linkLsaSuppression) output += "      link lsa suppression yes;\n";
+          // Link-LSA is an OSPFv3-only interface option. BIRD rejects it in
+          // an OSPFv2 protocol, so keep the version gate in the renderer.
+          if (version === "ospfv3" && options.linkLsaSuppression) output += "      link lsa suppression yes;\n";
           if (options.strictNonbroadcast) output += "      strict nonbroadcast yes;\n";
-          if (options.realBroadcast) output += "      real broadcast yes;\n";
-          if (options.ptpNetmask) output += "      ptp netmask yes;\n";
-          if (options.ptpAddress) output += "      ptp address yes;\n";
-          if (options.secondary) output += "      secondary yes;\n";
+          // BIRD accepts these three switches only in an OSPFv2 interface.
+          // Keep legacy values in inventory, but never emit them into v3.
+          if (version === "ospfv2") {
+            if (options.realBroadcast) output += "      real broadcast yes;\n";
+            if (options.ptpNetmask) output += "      ptp netmask yes;\n";
+            if (options.ptpAddress) output += "      ptp address yes;\n";
+          }
+          // `secondary` is not an OSPF interface directive in supported BIRD
+          // 2.x releases. It remains a tolerated legacy field for migration,
+          // but is intentionally omitted from generated configuration.
           if (options.checkLink === false) output += "      check link no;\n";
           if (options.bfd ?? config.bfd) output += "      bfd yes;\n";
           if (options.ecmpWeight != null) output += `      ecmp weight ${options.ecmpWeight};\n`;

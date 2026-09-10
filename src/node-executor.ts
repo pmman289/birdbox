@@ -85,6 +85,13 @@ const OPENSSH_INFORMATION_LINES = new Set([
   "** The server may need to be upgraded. See https://openssh.com/pq.html",
 ]);
 
+// Non-English or minimal remote images often emit this login-shell warning
+// for every SSH command. It is environmental noise and must not hide the
+// actual command error (for example, a route lookup returning no result).
+const REMOTE_SHELL_INFORMATION_LINES = [
+  /^(?:bash|sh): warning: setlocale.*cannot change locale/i,
+];
+
 let managedSshConfiguration: ManagedSshConfiguration = { identityFile: null, knownHostsFile: null };
 let agentBroker: AgentBroker | null = null;
 
@@ -98,6 +105,7 @@ function commandStderr(node: ManagedNode, value: unknown): string {
     .split("\n")
     .filter((line) => !OPENSSH_INFORMATION_LINES.has(line))
     .filter((line) => !/^Warning: Permanently added .+ to the list of known hosts\.$/.test(line))
+    .filter((line) => !REMOTE_SHELL_INFORMATION_LINES.some((pattern) => pattern.test(line)))
     .join("\n")
     .trim();
 }

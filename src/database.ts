@@ -503,38 +503,48 @@ export class MySqlDatabase implements StateDatabase {
     initialValue: Value,
     mutator: (value: Value) => Promise<StateMutationOutcome<Value, Result>> | StateMutationOutcome<Value, Result>,
   ): Promise<StateMutationResult<Value, Result>> {
-    const connection = await this.pool.getConnection();
-    try {
-      await connection.beginTransaction();
-      await connection.execute(
-        "INSERT IGNORE INTO birdbox_state (state_key, revision, document) VALUES (?, 1, ?)",
-        [key, JSON.stringify(initialValue)],
-      );
-      const [rows] = await connection.execute<StateRow[]>(
-        "SELECT revision, document FROM birdbox_state WHERE state_key = ? FOR UPDATE",
-        [key],
-      );
-      const row = rows[0];
-      if (!row) throw new Error(`状态 ${key} 初始化失败`);
-      const revision = Number(row.revision);
-      const current = parseDocument<Value>(row.document) as Value;
-      const outcome = await mutator(structuredClone(current));
-      const changed = outcome && Object.hasOwn(outcome, "value");
-      const value: Value = changed ? outcome.value as Value : current;
-      if (changed) {
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const connection = await this.pool.getConnection();
+      try {
+        await connection.beginTransaction();
         await connection.execute(
-          "UPDATE birdbox_state SET revision = revision + 1, document = ? WHERE state_key = ?",
-          [JSON.stringify(value), key],
+          "INSERT IGNORE INTO birdbox_state (state_key, revision, document) VALUES (?, 1, ?)",
+          [key, JSON.stringify(initialValue)],
         );
+        const [rows] = await connection.execute<StateRow[]>(
+          "SELECT revision, document FROM birdbox_state WHERE state_key = ? FOR UPDATE",
+          [key],
+        );
+        const row = rows[0];
+        if (!row) throw new Error(`状态 ${key} 初始化失败`);
+        const revision = Number(row.revision);
+        const current = parseDocument<Value>(row.document) as Value;
+        const outcome = await mutator(structuredClone(current));
+        const changed = outcome && Object.hasOwn(outcome, "value");
+        const value: Value = changed ? outcome.value as Value : current;
+        if (changed) {
+          await connection.execute(
+            "UPDATE birdbox_state SET revision = revision + 1, document = ? WHERE state_key = ?",
+            [JSON.stringify(value), key],
+          );
+        }
+        await connection.commit();
+        return { value, result: outcome?.result, revision: revision + Number(changed) };
+      } catch (error) {
+        try { await connection.rollback(); } catch { /* connection may already be aborted */ }
+        const code = String((error as { code?: unknown }).code ?? "");
+        const sqlState = String((error as { sqlState?: unknown }).sqlState ?? "");
+        const retryable = code === "ER_LOCK_DEADLOCK" || code === "ER_LOCK_WAIT_TIMEOUT" || sqlState === "40001";
+        if (!retryable || attempt + 1 >= maxAttempts) throw error;
+        // Jitter prevents a group of concurrent OSPF saves from retrying in
+        // lock-step and reproducing the same InnoDB deadlock.
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1) + Math.floor(Math.random() * 20)));
+      } finally {
+        connection.release();
       }
-      await connection.commit();
-      return { value, result: outcome?.result, revision: revision + Number(changed) };
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
     }
+    throw new Error("状态写入重试次数超限");
   }
 
   async replaceState<Value>(key: string, expectedRevision: number, value: Value): Promise<StateRecord<Value>> {

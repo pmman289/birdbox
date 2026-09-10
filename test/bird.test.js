@@ -1331,7 +1331,8 @@ printf '%s\r\n' \
   "Warning: Permanently added 'router.example' (ED25519) to the list of known hosts." \
   '** WARNING: connection is not using a post-quantum key exchange algorithm.' \
   '** This session may be vulnerable to "store now, decrypt later" attacks.' \
-  '** The server may need to be upgraded. See https://openssh.com/pq.html' >&2
+  '** The server may need to be upgraded. See https://openssh.com/pq.html' \
+  'bash: warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8): No such file or directory' >&2
 exit 1
 `, { mode: 0o755 });
   process.env.PATH = `${binDir}:${originalPath}`;
@@ -1446,16 +1447,26 @@ process.exit(result.status ?? 1);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
   await fs.writeFile(mainConfigPath, `// ${includeLine}\n# ${includeLine}\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, false);
-  await fs.writeFile(mainConfigPath, `/* managed include */ ${includeLine} # active\n`);
+  await fs.writeFile(mainConfigPath, `/* managed include */ ${includeLine} # active\nprotocol device birdbox_device { }\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
-  await fs.writeFile(mainConfigPath, `  include    "${generatedConfigPath}"   ; // active\n`);
+  await fs.writeFile(mainConfigPath, `  include    "${generatedConfigPath}"   ; // active\nprotocol device { }\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
-  await fs.writeFile(mainConfigPath, `include "/etc/bird/conf.d/*.conf";\n${includeLine}\n`);
+  await fs.writeFile(mainConfigPath, `include "/etc/bird/conf.d/*.conf";\n${includeLine}\nprotocol device host_device { }\n`);
   assert.equal((await checkIncludeNodeAccess(includeNode)).ok, true);
   await fs.writeFile(mainConfigPath, `include "${generatedConfigPath}" unexpected;\n`);
   const invalid = await checkIncludeNodeAccess(includeNode);
   assert.equal(invalid.ok, false);
   assert.match(invalid.stderr, /缺少活动 Include/);
+
+  await fs.writeFile(mainConfigPath, `${includeLine}\n# protocol device commented { }\n`);
+  const missingDevice = await checkIncludeNodeAccess(includeNode);
+  assert.equal(missingDevice.ok, false);
+  assert.match(missingDevice.stderr, /缺少活动 protocol device/);
+
+  await fs.writeFile(mainConfigPath, `${includeLine}\n/* protocol device commented { } */\n`);
+  const blockCommentDevice = await checkIncludeNodeAccess(includeNode);
+  assert.equal(blockCommentDevice.ok, false);
+  assert.match(blockCommentDevice.stderr, /缺少活动 protocol device/);
 });
 
 test("parses multiple BGP protocol states independently", () => {

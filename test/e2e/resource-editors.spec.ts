@@ -71,10 +71,11 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(rpkiWarning).toContainText("确认新节点可访问该 RPKI-RTR 地址和端口");
   await expect(rpkiWarning).toContainText("把作用域改为指定节点");
   await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("E2E 全局出口");
-  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("ip rule 不会自动配置");
-  await page.locator("#nodeEditorName").fill("E2E SSH Router");
-  await page.locator("#nodeEditorSshHost").fill("192.0.2.10");
-  await page.locator("#nodeEditorSshUser").fill("birdbox");
+  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("自动下发这些 BIRD 映射和系统 ip rule");
+  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("请先升级该节点为 Agent");
+  await expect(page.locator("#nodeGlobalSourcePolicyWarning")).toContainText("旧节点不会被自动执行规则");
+  await page.locator("#nodeEditorName").fill("E2E Agent Router");
+  await expect(page.locator("#nodeEditorSshHost")).toHaveCount(0);
   await page.locator("#nodeEditorRouterId").fill("192.0.2.10");
   await page.getByText("OpenWrt", { exact: true }).click();
   await expect(page.locator("#nodeEditorMainConfigPath")).toHaveValue("/etc/bird.conf");
@@ -190,7 +191,8 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator("#sourcePolicyKernelTable0").fill("50000");
   await expect(page.locator("#sourcePolicyKernelTable0")).toHaveValue("50000");
   await expect(page.locator("#sourcePolicyDialog")).toContainText("kernel table 50000");
-  await expect(page.locator("#sourcePolicyDialog")).toContainText("systemd 安装/更新脚本");
+  await expect(page.locator("#sourcePolicyDialog")).toContainText("本机自动下发");
+  await expect(page.locator("#sourcePolicyDialog")).toContainText("BIRD 配置片段");
   const sourcePolicyOverflow = await page.locator("#sourcePolicyDialog").evaluate((element) => element.scrollWidth > element.clientWidth + 1);
   expect(sourcePolicyOverflow).toBe(false);
   await page.locator("#sourcePolicyDialog").getByRole("button", { name: "关闭" }).click();
