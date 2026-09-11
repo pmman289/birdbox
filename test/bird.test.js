@@ -27,8 +27,11 @@ import {
   parseBirdPrefixEntries,
   parseProtocolStatuses,
   parseRouteDetails,
+  applyStagedConfig,
+  rollbackNode,
   renderBirdConfig,
   runOnNode,
+  stageAndValidate,
   validateInventory,
 } from "../src/bird.js";
 import {
@@ -1316,6 +1319,38 @@ test("executes a managed node command through the Agent RPC transport", async ()
   assert.deepEqual(await command, { ok: true, stdout: "agent-ok", stderr: "" });
 });
 
+test("surfaces legacy Agent generated-config errors without treating regular files as invalid locally", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const token = await broker.issueToken("agent_stale_generated");
+  await broker.register({ nodeId: "agent_stale_generated", token, agentVersion: "old", protocolVersion: 1 });
+  configureAgentBroker(broker);
+  const agentNode = normalizeNode({
+    ...node,
+    id: "agent_stale_generated",
+    name: "Stale generated config",
+    transport: "agent",
+    deploymentMode: "include",
+    mainConfigPath: "/etc/bird.conf",
+    generatedConfigPath: "/var/lib/birdbox/generated.conf",
+    socketPath: "/run/bird/bird.ctl",
+  });
+  const pending = stageAndValidate(agentNode, "protocol device { }\n");
+  const task = await broker.poll("agent_stale_generated", token, 1000);
+  assert.equal(task?.method, "bird.stage");
+  broker.result({
+    taskId: task.taskId,
+    nodeId: task.nodeId,
+    ok: false,
+    stdout: "",
+    stderr: "readlink /var/lib/birdbox/generated.conf: invalid argument",
+    code: "STAGE_FAILED",
+  }, token);
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.stderr, /invalid argument/);
+});
+
 test("filters informational OpenSSH warnings without hiding a remote failure", async (context) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ssh-warning-"));
   const binDir = path.join(root, "bin");
@@ -1467,6 +1502,61 @@ process.exit(result.status ?? 1);
   const blockCommentDevice = await checkIncludeNodeAccess(includeNode);
   assert.equal(blockCommentDevice.ok, false);
   assert.match(blockCommentDevice.stderr, /缺少活动 protocol device/);
+
+  await fs.unlink(generatedConfigPath);
+  await fs.writeFile(generatedConfigPath, "external change\n");
+  await fs.writeFile(mainConfigPath, `${includeLine}\nprotocol device { }\n`);
+  const replacedGenerated = await checkIncludeNodeAccess(includeNode);
+  assert.equal(replacedGenerated.ok, true);
+});
+
+test("generates SSH mutations that support regular generated configs and preserve rollback", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-regular-generated-"));
+  const binDir = path.join(root, "bin");
+  const logPath = path.join(root, "commands.log");
+  const originalPath = process.env.PATH;
+  context.after(async () => {
+    process.env.PATH = originalPath;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.mkdir(binDir, { recursive: true });
+  const sshScript = [
+    "#!/usr/bin/env node",
+    "const fs = require(\"node:fs\");",
+    `fs.appendFileSync(${JSON.stringify(logPath)}, process.argv.at(-1) + \"\\n---END---\\n\");`,
+    "process.exit(0);",
+    "",
+  ].join("\n");
+  await fs.writeFile(path.join(binDir, "ssh"), sshScript, { mode: 0o755 });
+  process.env.PATH = `${binDir}:${originalPath}`;
+  configureManagedSsh({
+    identityFile: path.join(root, "unused-identity"),
+    knownHostsFile: path.join(root, "unused-known-hosts"),
+  });
+  const generatedConfigPath = path.join(root, "birdbox", "generated.conf");
+  const managedNode = normalizeNode({
+    id: "regular_generated",
+    name: "Regular generated config",
+    transport: "ssh",
+    sshHost: "router.example",
+    sshUser: "birdbox",
+    sshIdentity: "managed",
+    deploymentMode: "include",
+    mainConfigPath: path.join(root, "bird.conf"),
+    generatedConfigPath,
+    socketPath: path.join(root, "bird.ctl"),
+    routerId: "192.0.2.1",
+  });
+  const bundle = { main: "protocol device { }\n", resources: [], removedResources: [] };
+  assert.equal((await stageAndValidate(managedNode, bundle)).ok, true);
+  assert.equal((await applyStagedConfig(managedNode, bundle)).ok, true);
+  assert.equal((await rollbackNode(managedNode, bundle)).ok, true);
+  const commands = await fs.readFile(logPath, "utf8");
+  assert.match(commands, /current_kind=missing/);
+  assert.match(commands, /elif \[ -f '[^']*generated\.conf' \]/);
+  assert.match(commands, /current_backup=/);
+  assert.match(commands, /rollback_kind=missing/);
+  assert.doesNotMatch(commands, /test -L '[^']*\/generated\.conf'\n/);
 });
 
 test("parses multiple BGP protocol states independently", () => {

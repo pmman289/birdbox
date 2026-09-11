@@ -273,23 +273,26 @@ func runBirdcVerbose(parent context.Context, socket, command string) commandResu
 }
 
 func capturePath(path string) (pathState, error) {
-	target, err := os.Readlink(path)
-	if err == nil {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return pathState{kind: "missing"}, nil
+		}
+		return pathState{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, readErr := os.Readlink(path)
+		if readErr != nil {
+			return pathState{}, readErr
+		}
 		return pathState{kind: "symlink", target: target}, nil
 	}
-	if !os.IsNotExist(err) {
-		return pathState{}, err
+	if !info.Mode().IsRegular() {
+		return pathState{}, fmt.Errorf("managed path is not a regular file")
 	}
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
-			return pathState{kind: "missing"}, nil
-		}
 		return pathState{}, readErr
-	}
-	info, statErr := os.Stat(path)
-	if statErr != nil {
-		return pathState{}, statErr
 	}
 	return pathState{kind: "file", data: data, mode: info.Mode().Perm()}, nil
 }
@@ -635,8 +638,13 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 			r.Stderr, r.Code = "generated config candidate is missing", "APPLY_FAILED"
 			return r
 		}
-		if old, ok := genState.target, genState.kind == "symlink"; ok {
-			_ = replaceSymlink(generated+".rollback", old)
+		rollbackPath := generated + ".rollback"
+		_ = removePath(rollbackPath)
+		switch genState.kind {
+		case "symlink":
+			_ = replaceSymlink(rollbackPath, genState.target)
+		case "file":
+			_ = atomicWrite(rollbackPath, genState.data, genState.mode, gid)
 		}
 		if err = replaceSymlink(generated, candidate); err != nil {
 			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
@@ -728,12 +736,13 @@ func rollbackBirdTask(parent context.Context, params map[string]any, r result) r
 		snapshot[active] = state
 	}
 	if mode == "include" {
-		target, readErr := os.Readlink(generated + ".rollback")
-		if readErr != nil {
+		rollbackPath := generated + ".rollback"
+		rollbackState, readErr := capturePath(rollbackPath)
+		if readErr != nil || rollbackState.kind == "missing" {
 			r.Stderr, r.Code = "generated config rollback is missing", "ROLLBACK_FAILED"
 			return r
 		}
-		if err = replaceSymlink(generated, target); err != nil {
+		if err = restorePath(generated, rollbackState, gid); err != nil {
 			r.Stderr, r.Code = err.Error(), "ROLLBACK_FAILED"
 			return r
 		}
