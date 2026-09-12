@@ -700,6 +700,13 @@ dialog { width: min(460px, calc(100vw - 32px)); padding: 0; color: var(--ink); b
 dialog[open] { animation: dialog-in var(--motion-base) ease-out both; }
 dialog.editor-dialog { width: min(580px, calc(100vw - 32px)); }
 dialog.editor-dialog { max-height: calc(100vh - 32px); overflow: auto; }
+dialog.ospf-warning-dialog { width: min(560px, calc(100vw - 32px)); }
+.ospf-warning-dialog .dialog-head { padding: 20px 22px 0; }
+.ospf-warning-dialog .dialog-icon.warning { color: #fff; background: var(--red); }
+.ospf-warning-copy { margin: 18px 22px 4px; color: var(--ink-soft); font-size: 13px; line-height: 1.7; }
+.ospf-warning-dialog .dialog-actions { padding: 18px 22px 22px; }
+.ospf-warning-dialog .primary-button.danger { background: var(--red); border-color: var(--red); }
+.ospf-warning-dialog .primary-button.danger:hover { background: color-mix(in srgb, var(--red) 82%, #000); }
 dialog.static-editor-dialog { width: min(1080px, calc(100vw - 32px)); }
 dialog.policy-editor-dialog { width: min(860px, calc(100vw - 32px)); }
 .irr-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }

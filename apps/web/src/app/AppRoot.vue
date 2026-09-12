@@ -31,6 +31,7 @@ const RUNTIME_REFRESH_INTERVAL_MS = 3_000;
 const authenticated = ref(false);
 const activeWorkspace = ref<"sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace" | "ospfWorkspace">("sessionWorkspace");
 const accountDialog = ref<HTMLDialogElement | null>(null);
+const ospfWarningDialog = ref<HTMLDialogElement | null>(null);
 const passwordForm = ref<HTMLFormElement | null>(null);
 const mutationDialog = ref<HTMLDialogElement | null>(null);
 const currentPassword = ref("");
@@ -38,6 +39,7 @@ const newPassword = ref("");
 const newPasswordConfirmation = ref("");
 const passwordError = ref("");
 const passwordPending = ref(false);
+const ospfWarningAcknowledged = ref(false);
 const dashboardError = ref(false);
 const theme = ref<"light" | "dark">("light");
 const toasts = ref<ToastItem[]>([]);
@@ -212,6 +214,10 @@ async function logout(): Promise<void> {
 }
 
 function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace" | "ospfWorkspace", resourceTarget: ResourceWorkspaceTarget | null = null): void {
+  if (workspace === "ospfWorkspace" && !ospfWarningAcknowledged.value) {
+    if (!ospfWarningDialog.value?.open) ospfWarningDialog.value?.showModal();
+    return;
+  }
   activeWorkspace.value = workspace;
   if (!resourceTarget) return;
   window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: resourceTarget } }));
@@ -221,6 +227,16 @@ function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace" |
     section?.classList.add("resource-highlight");
     window.setTimeout(() => section?.classList.remove("resource-highlight"), 1200);
   });
+}
+
+function confirmOspfWarning(): void {
+  ospfWarningAcknowledged.value = true;
+  ospfWarningDialog.value?.close();
+  activeWorkspace.value = "ospfWorkspace";
+}
+
+function closeOspfWarning(): void {
+  ospfWarningDialog.value?.close();
 }
 
 function moveWorkspaceTab(event: KeyboardEvent, current: number): void {
@@ -411,6 +427,12 @@ onBeforeUnmount(() => {
 
   <dialog id="mutationWaitDialog" ref="mutationDialog" class="mutation-wait-dialog" aria-labelledby="mutationWaitTitle" aria-describedby="mutationWaitDetail" @cancel.prevent>
     <div class="mutation-wait-content" role="status" aria-live="polite" aria-atomic="true"><span class="mutation-wait-spinner" aria-hidden="true"></span><div class="mutation-wait-copy"><strong id="mutationWaitTitle">{{ mutationPresentation?.title ?? "正在处理变更" }}</strong><span id="mutationWaitDetail">{{ mutationPresentation?.detail ?? "正在变更，请等待节点返回结果" }}</span></div></div>
+  </dialog>
+
+  <dialog id="ospfWarningDialog" ref="ospfWarningDialog" class="editor-dialog ospf-warning-dialog" aria-labelledby="ospfWarningTitle" aria-describedby="ospfWarningDetail" @cancel.prevent="closeOspfWarning">
+    <div class="dialog-head"><span class="dialog-icon warning">!</span><div><p class="eyebrow">EXPERIMENTAL FEATURE</p><h2 id="ospfWarningTitle">OSPF 管理暂不建议使用</h2></div></div>
+    <p id="ospfWarningDetail" class="ospf-warning-copy">OSPF 管理功能目前仍处于实验阶段，配置生成、预检和应用可能存在严重问题。请勿在生产网络使用，建议先在隔离测试环境验证并保留现有配置备份。</p>
+    <div class="dialog-actions"><button class="secondary-button" type="button" @click="closeOspfWarning">返回</button><button class="primary-button danger" type="button" @click="confirmOspfWarning">我已了解风险，继续</button></div>
   </dialog>
 
   <dialog id="passwordDialog" ref="accountDialog" class="editor-dialog account-settings-dialog" aria-labelledby="passwordDialogTitle" @cancel.prevent="closeAccountSettings">
