@@ -1214,6 +1214,30 @@ test("native BIRD 2 parses per-family Kernel export modes", async (context) => {
   await execFileAsync(binary, ["-p", "-c", configPath]);
 });
 
+test("renders Kernel protocols after referenced Functions and Filters", () => {
+  const normalized = normalizeNode({ id: "router", name: "Router", transport: "local", routerId: "192.0.2.1" });
+  const filter = normalizePolicyFilter({
+    id: "filter_kernel_export",
+    nodeId: "router",
+    name: "kernel_export_filter",
+    source: "filter kernel_export_filter { accept; }",
+    enabled: true,
+  });
+  const kernel = normalizeKernelProtocol({
+    id: "kernel_policy_order",
+    label: "Policy order",
+    name: "kernel_policy_order",
+    nodeIds: [normalized.id],
+    ipv4: true,
+    ipv6: false,
+    exportPolicies: {
+      ipv4: { mode: "visual", policy: { mode: "custom", steps: [], filterId: filter.id, formAction: "none" } },
+    },
+  });
+  const config = renderBirdConfig(normalized, [], [], [], [filter], [], [], [], [], [], [], [kernel]);
+  assert.ok(config.indexOf("filter kernel_export_filter") < config.indexOf("protocol kernel kernel_policy_order"));
+});
+
 test("renders local ROA files and RPKI-RTR sources for roa_check filters", () => {
   const fileSource = normalizeRPKI({
     id: "rpki_file", nodeId: "local", label: "Local ROA", name: "local_roa",

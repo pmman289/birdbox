@@ -713,7 +713,6 @@ export function renderBirdConfig(
   } else {
     config += "# This file is included by the system BIRD configuration.\n";
   }
-  config += renderNodeProtocols(node, directResources, kernelResources, functionMap, filterMap);
   for (const resource of defines) {
     if (resource.type !== "expression" && resource.entrySource.kind === "irr-as-set") {
       const resourceDirectory = node.deploymentMode === "include"
@@ -731,6 +730,10 @@ export function renderBirdConfig(
   for (const source of rpki) config += renderRPKISource(source);
   for (const resource of functions) config += `\n${resource.source}\n`;
   for (const resource of filters) config += `\n${resource.source}\n`;
+  // Kernel/Direct policies may reference Functions and Filters. Keep these
+  // protocol declarations after policy resources so BIRD can resolve names
+  // regardless of the selected export mode.
+  config += renderNodeProtocols(node, directResources, kernelResources, functionMap, filterMap);
   config += renderOspfForNode(node, ospfDomainSet, functionMap, filterMap, cidrDefineMap);
   if (active.some(({ session }) => session.bgp.bfd !== "off")) config += "\nprotocol bfd birdbox_bfd {\n}\n";
 
