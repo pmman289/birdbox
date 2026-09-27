@@ -125,6 +125,24 @@ export function createResourceApplicationService(
     return uniqueNodeIds(domain.members.map((member) => member.nodeId));
   }
 
+  // Legacy domains kept a member snapshot. Expose newly managed nodes in the
+  // workspace without creating sessions or mutating persisted state.
+  function domainWithCurrentNodes(domain: IbgpDomain, nodes: readonly ManagedNode[]): IbgpDomain {
+    const members = [...domain.members];
+    const known = new Set(members.map((member) => member.nodeId));
+    for (const node of nodes) {
+      if (known.has(node.id)) continue;
+      // normalizeIbgpDomain requires a valid address. For a node without an
+      // explicit IGP address, use its existing router ID as a display-only
+      // fallback; the user can replace it before saving an adjacency.
+      members.push({ nodeId: node.id, address: node.igpAddress ?? node.routerId });
+      known.add(node.id);
+    }
+    return members.length === domain.members.length
+      ? domain
+      : normalizeIbgpDomain({ ...domain, members });
+  }
+
   function assertDomainUnique(state: Inventory, id: string, name: string, excludedId: string | null = null): void {
     if (state.ibgpDomains.some((item) => item.id !== excludedId && item.id === id)) fail(409, "iBGP 域 ID 已存在");
     if (state.ibgpDomains.some((item) => item.id !== excludedId && item.name === name)) fail(409, "iBGP 域名称已存在");
@@ -954,7 +972,8 @@ export function createResourceApplicationService(
 
   async listIbgpDomains() {
     const state = await store.read();
-    return { status: 200, payload: { domains: state.ibgpDomains, inventory: state } };
+    const domains = state.ibgpDomains.map((domain) => domainWithCurrentNodes(domain, state.nodes));
+    return { status: 200, payload: { domains, inventory: { ...state, ibgpDomains: domains } } };
   },
 
   async previewIbgpDomain(body) {

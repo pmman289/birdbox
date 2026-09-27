@@ -6,11 +6,32 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { expandIbgpDomain, normalizeIbgpDomain, renderBirdConfig, validateInventory } from "../src/bird.js";
+import { createResourceApplicationService } from "../src/resource-application-service.js";
 
 const nodes = [
   { id: "rr", kind: "managed-node", name: "RR", transport: "local", routerId: "192.0.2.1", listenPort: 179 },
   { id: "client", kind: "managed-node", name: "Client", transport: "ssh", sshHost: "192.0.2.2", sshUser: "bird", routerId: "192.0.2.2", listenPort: 179 },
 ];
+
+test("lists newly managed nodes in legacy iBGP domains without creating adjacencies", async () => {
+  const legacyDomain = normalizeIbgpDomain({
+    id: "legacy", name: "Legacy", asn: 65000,
+    members: [{ nodeId: "rr", address: "192.0.2.1" }], adjacencies: [], layout: {},
+  });
+  const state = {
+    version: 28, nodes: [...nodes, { id: "new", kind: "managed-node", name: "New", transport: "ssh", sshHost: "192.0.2.3", sshUser: "bird", routerId: "192.0.2.3", igpAddress: "10.0.0.3", listenPort: 179 }],
+    peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [legacyDomain], ospfDomains: [], ospfLayout: {},
+  };
+  const store = { read: async () => state };
+  const service = createResourceApplicationService({
+    store, deploymentService: { mutateAndApply: async () => { throw new Error("unused"); } }, nodeOnboarding: {}, sessions: {}, withDeploymentLock: async (operation) => operation(), makeId: (prefix) => `${prefix}_test`, addEvent: () => ({}), getEvents: () => [],
+  });
+  const response = await service.listIbgpDomains();
+  assert.deepEqual(response.payload.domains[0].members.map((member) => member.nodeId), ["rr", "client", "new"]);
+  assert.equal(response.payload.domains[0].members.at(-1).address, "10.0.0.3");
+  assert.equal(response.payload.domains[0].adjacencies.length, 0);
+  assert.deepEqual(state.ibgpDomains[0].members.map((member) => member.nodeId), ["rr"]);
+});
 
 test("expands a manual iBGP adjacency into independently configurable equal-ASN sessions", () => {
   const domain = normalizeIbgpDomain({
