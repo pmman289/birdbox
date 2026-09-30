@@ -385,14 +385,31 @@ function renderOspfForNode(
   filterMap: ReadonlyMap<string, PolicyFilter>,
   defineMap: ReadonlyMap<string, CidrDefine>,
 ): string {
+  const ospfAuthAlgorithms = new Map([
+    ["keyed-md5", "keyed md5"], ["keyed-sha1", "keyed sha1"], ["hmac-sha1", "hmac sha1"],
+    ["hmac-sha256", "hmac sha256"], ["hmac-sha384", "hmac sha384"], ["hmac-sha512", "hmac sha512"],
+  ]);
   const renderPassword = (indent: string, password: string, options: OspfPasswordOptions | undefined): string => {
+    assertValidation(!/[\u0000-\u001f\u007f]/.test(password), "OSPF 密码不能包含控制字符");
     if (!options || Object.keys(options).length === 0) return `${indent}password ${birdString(password)};\n`;
     let text = `${indent}password ${birdString(password)} {\n`;
-    if (options.id != null) text += `${indent}  id ${options.id};\n`;
-    for (const [key, directive] of [["generateFrom", "generate from"], ["generateTo", "generate to"], ["acceptFrom", "accept from"], ["acceptTo", "accept to"], ["from", "from"], ["to", "to"]] as const) {
-      if (options[key]) text += `${indent}  ${directive} ${birdString(String(options[key]))};\n`;
+    if (options.id != null) {
+      const id = Number(options.id);
+      assertValidation(Number.isInteger(id) && id >= 0 && id <= 255, "OSPF 密码 ID 必须是 0-255 的整数");
+      text += `${indent}  id ${id};\n`;
     }
-    if (options.algorithm) text += `${indent}  algorithm ${String(options.algorithm).replace("-", " ")};\n`;
+    for (const [key, directive] of [["generateFrom", "generate from"], ["generateTo", "generate to"], ["acceptFrom", "accept from"], ["acceptTo", "accept to"], ["from", "from"], ["to", "to"]] as const) {
+      if (options[key]) {
+        const value = String(options[key]);
+        assertValidation(!/[\u0000-\u001f\u007f]/.test(value), `OSPF 密码 ${directive} 时间不能包含控制字符`);
+        text += `${indent}  ${directive} ${birdString(value)};\n`;
+      }
+    }
+    if (options.algorithm) {
+      const algorithm = ospfAuthAlgorithms.get(String(options.algorithm));
+      assertValidation(Boolean(algorithm), `不支持的 OSPF 认证算法：${String(options.algorithm)}`);
+      text += `${indent}  algorithm ${algorithm};\n`;
+    }
     return `${text}${indent}};\n`;
   };
   let output = "";
@@ -534,7 +551,10 @@ function renderOspfForNode(
           if (options.ttlSecurity === "on") output += "      ttl security yes;\n";
           else if (options.ttlSecurity === "tx-only") output += "      ttl security tx only;\n";
           if (options.txClass != null) output += `      tx class ${options.txClass};\n`;
-          if (options.txDscp != null) output += `      tx dscp ${options.txDscp};\n`;
+          if (options.txDscp != null) {
+            assertValidation(Number.isInteger(options.txDscp) && options.txDscp >= 0 && options.txDscp <= 63, "OSPF TX DSCP 必须是 0-63 的整数");
+            output += `      tx dscp ${options.txDscp};\n`;
+          }
           if (options.txPriority != null) output += `      tx priority ${options.txPriority};\n`;
           if (link.authentication !== "none") {
             const auth = link.authentication === "simple" ? "simple" : "cryptographic";

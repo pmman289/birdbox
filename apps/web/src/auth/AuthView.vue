@@ -9,6 +9,8 @@ const visible = ref(true);
 const setupMode = ref(false);
 const password = ref("");
 const confirmation = ref("");
+const setupToken = ref("");
+const setupTokenRequired = ref(false);
 const errorMessage = ref("");
 const pending = ref(false);
 const passwordInput = ref<HTMLInputElement | null>(null);
@@ -22,11 +24,13 @@ function focusPassword(): void {
   void nextTick(() => passwordInput.value?.focus());
 }
 
-function showAuthentication(status: Pick<AuthStatusResponse, "configured">): void {
+function showAuthentication(status: Pick<AuthStatusResponse, "configured" | "setupTokenRequired">): void {
   setupMode.value = status.configured === false;
   visible.value = true;
   password.value = "";
   confirmation.value = "";
+  setupToken.value = "";
+  setupTokenRequired.value = status.setupTokenRequired === true;
   errorMessage.value = "";
   focusPassword();
 }
@@ -42,7 +46,7 @@ async function initialize(): Promise<void> {
     if (status.authenticated) dispatchAuthenticated();
     else showAuthentication(status);
   } catch (error) {
-    showAuthentication({ configured: true });
+    showAuthentication({ configured: true, setupTokenRequired: false });
     errorMessage.value = errorText(error);
   }
 }
@@ -66,6 +70,7 @@ async function submit(): Promise<void> {
       body: JSON.stringify({
         password: password.value,
         confirmation: setupMode.value ? confirmation.value : undefined,
+        setupToken: setupMode.value ? setupToken.value : undefined,
       }),
     });
     dispatchAuthenticated();
@@ -78,7 +83,7 @@ async function submit(): Promise<void> {
 }
 
 function handleAuthRequired(): void {
-  showAuthentication({ configured: true });
+  showAuthentication({ configured: true, setupTokenRequired: false });
 }
 
 function handleAuthShow(event: CustomEvent<{ configured: boolean }>): void {
@@ -150,6 +155,10 @@ onBeforeUnmount(() => {
             autocomplete="new-password"
             :required="setupMode"
           >
+        </div>
+        <div v-if="setupMode && setupTokenRequired" class="field">
+          <label for="authSetupToken">初始化令牌</label>
+          <input id="authSetupToken" v-model="setupToken" type="password" autocomplete="off" required>
         </div>
         <p id="authError" class="auth-error" role="alert" :hidden="!errorMessage">{{ errorMessage }}</p>
         <button id="authSubmitButton" class="primary-button auth-submit" type="submit" :disabled="pending">

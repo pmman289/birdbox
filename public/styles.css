@@ -1204,7 +1204,7 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 
 .ospf-topology-panel { display: grid; gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .ospf-topology-actions { display: flex; align-items: center; gap: 10px; }.ospf-add-link { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-add-link-head, .ospf-add-link-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.ospf-add-link-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }.ospf-form-error { margin: 10px 0 0; color: var(--danger, #b42318); font-size: 12px; }.ospf-add-link-actions { justify-content: flex-end; margin-top: 12px; }
-.ospf-topology-canvas { position: relative; width: 100%; height: min(78vh, 900px); min-height: 520px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(180deg, rgba(247,251,252,.92), rgba(238,245,247,.92)), var(--surface-soft); touch-action: none; cursor: grab; }
+.ospf-topology-canvas { position: relative; width: 100%; height: min(78vh, 900px); min-height: 520px; overflow: hidden; contain: paint; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(180deg, rgba(247,251,252,.92), rgba(238,245,247,.92)), var(--surface-soft); touch-action: none; cursor: grab; }
 .ospf-topology-canvas:active { cursor: grabbing; }
 .ospf-topology-world { position: absolute; left: 50%; top: 50%; width: 2400px; height: 1600px; margin: -800px 0 0 -1200px; transform-origin: center center; }
 .ospf-topology-zoom { position: absolute; z-index: 4; right: 10px; bottom: 10px; display: inline-flex; align-items: center; gap: 5px; padding: 4px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: 0 4px 12px var(--shadow-soft); }
@@ -1271,3 +1271,41 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ospf-virtual-link-row input, .ospf-virtual-link-row select { min-width: 0; width: 100%; }
 @media (max-width: 1180px) { .ospf-layout { grid-template-columns: 220px minmax(0, 1fr); }.ospf-runtime { grid-column: 1 / -1; position: static; max-height: none; }.ospf-add-link-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 700px) { .ospf-layout, .ospf-form-grid, .ospf-policy-grid { grid-template-columns: 1fr; }.ospf-actions { flex-wrap: wrap; }.ospf-node-panel { order: 0; }.ospf-editor { order: 1; }.ospf-runtime { order: 2; }.ospf-link-endpoints { flex-basis: 100%; }.ospf-version-heading { align-items: flex-start; flex-direction: column; }.ospf-topology-actions { align-items: flex-end; flex-direction: column; gap: 6px; }.ospf-add-link-grid { grid-template-columns: 1fr; }.ospf-topology-canvas { height: min(75vh, 700px); min-height: 420px; } }
+
+/* OSPF controls stay readable on narrow screens instead of collapsing into a
+ * single squeezed flex line. Keep the primary actions in the first viewport
+ * and let the topology itself remain the scroll/pan surface. */
+.ospf-domain-picker { display: grid; gap: 4px; min-width: 160px; color: var(--muted); font-size: 11px; }
+.ospf-domain-picker select, .ospf-domain-name { min-width: 0; width: 100%; }
+.ospf-topology-actions { flex-wrap: wrap; justify-content: flex-end; }
+.ospf-topology-actions > button { white-space: nowrap; }
+.ospf-topology-actions .status-dot-label { white-space: nowrap; }
+@media (max-width: 700px) {
+  .section-heading { flex-direction: column; }
+  .section-heading > * { width: 100%; min-width: 0; }
+  .ospf-topology-panel { padding: 12px; }
+  .ospf-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px; width: 100%; min-width: 0; }
+  .ospf-actions .ospf-domain-picker, .ospf-actions .ospf-domain-name { grid-column: 1 / -1; }
+  .ospf-actions > button { width: 100%; min-width: 0; }
+  .ospf-topology-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; justify-content: stretch; gap: 7px; width: 100%; }
+  .ospf-topology-actions .status-dot-label, .ospf-topology-actions .ospf-layout-status { grid-column: 1 / -1; }
+  .ospf-topology-actions > button { width: 100%; min-width: 0; }
+  .ospf-topology-canvas { height: min(72svh, 620px); min-height: 460px; }
+  .ospf-topology-zoom { right: 7px; bottom: 7px; }
+  .ospf-topology-zoom .compact-button { display: none; }
+  .ospf-link-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
+  .ospf-link-endpoints { grid-column: 1 / -1; min-width: 0; }
+  .ospf-link-editor .field { min-width: 0; }
+  .ospf-link-editor .field input, .ospf-link-editor .field select { width: 100%; min-width: 0; }
+  .ospf-link-editor .ospf-link-advanced, .ospf-link-editor > .danger-button, .ospf-link-editor > .icon-button { grid-column: 1 / -1; }
+  .ospf-node-row { align-items: flex-start; }
+  .ospf-node-stats { max-width: 45%; }
+}
+@media (max-width: 380px) {
+  .ospf-actions { grid-template-columns: 1fr; }
+  .ospf-actions > button { grid-column: 1; }
+  .ospf-topology-actions { grid-template-columns: 1fr; }
+  .ospf-topology-actions .status-dot-label, .ospf-topology-actions .ospf-layout-status { grid-column: 1; }
+  .ospf-link-editor { grid-template-columns: 1fr; }
+  .ospf-link-endpoints, .ospf-link-editor .ospf-link-advanced, .ospf-link-editor > .danger-button, .ospf-link-editor > .icon-button { grid-column: 1; }
+}

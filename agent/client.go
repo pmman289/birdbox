@@ -18,13 +18,16 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var ErrUnauthorized = errors.New("agent credentials rejected")
+var upgradeHTTPClient = http.DefaultClient
 
 type Client struct {
-	cfg  Config
-	http *http.Client
+	cfg    Config
+	http   *http.Client
+	upload *http.Client
 }
 type registration struct {
 	NodeID          string   `json:"nodeId"`
@@ -57,10 +60,24 @@ type result struct {
 }
 
 func NewClient(cfg Config) *Client {
-	return &Client{cfg: cfg, http: &http.Client{Timeout: 45 * time.Second}}
+	return &Client{cfg: cfg, http: &http.Client{Timeout: 45 * time.Second}, upload: &http.Client{Timeout: 5 * time.Minute}}
 }
 
+func NewClientWithTransport(cfg Config, transport *http.Transport) *Client {
+	return &Client{cfg: cfg, http: &http.Client{Timeout: 45 * time.Second, Transport: transport}, upload: &http.Client{Timeout: 5 * time.Minute, Transport: transport}}
+}
+
+const (
+	maxControllerResponse = 24 * 1024 * 1024
+	maxResultStdout       = 6 * 1024 * 1024
+	maxResultStderr       = 1 * 1024 * 1024
+)
+
 func (c *Client) request(ctx context.Context, method, path string, body any, response any) error {
+	return c.doRequest(ctx, c.http, method, path, body, response)
+}
+
+func (c *Client) doRequest(ctx context.Context, client *http.Client, method, path string, body any, response any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return err
@@ -71,12 +88,18 @@ func (c *Client) request(ctx context.Context, method, path string, body any, res
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
-	resp, err := c.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxControllerResponse+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxControllerResponse {
+		return fmt.Errorf("controller response exceeds %d bytes", maxControllerResponse)
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return ErrUnauthorized
 	}
@@ -93,10 +116,14 @@ func (c *Client) request(ctx context.Context, method, path string, body any, res
 
 func (c *Client) Register(ctx context.Context, version string) error {
 	var out map[string]any
+	capabilities := []string{"system.info", "system.interfaces", "network.ip_rules", "bird.inspect", "bird.validate", "bird.stage", "bird.apply", "bird.rollback", "bird.protocol", "bird.routes", "bird.protocol_state", "bird.ospf", "bird.access", "agent.self_upgrade", "task.large_payload"}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("BIRDBOX_AGENT_LEGACY_EXEC")), "enabled") {
+		capabilities = append(capabilities, "legacy.exec")
+	}
 	return c.request(ctx, http.MethodPost, "/api/agent/register", registration{
 		NodeID: c.cfg.NodeID, Token: c.cfg.Token, AgentVersion: version, ProtocolVersion: 1,
-		Capabilities: []string{"system.info", "system.interfaces", "network.ip_rules", "legacy.exec", "bird.inspect", "bird.validate", "bird.stage", "bird.apply", "bird.rollback", "bird.protocol", "bird.routes", "bird.protocol_state", "bird.ospf", "bird.access", "agent.self_upgrade"},
-		Platform:     runtime.GOOS, Architecture: runtime.GOARCH, Hostname: hostname(),
+		Capabilities: capabilities,
+		Platform:     runtime.GOOS, Architecture: reportedArchitecture(), Hostname: hostname(),
 	}, &out)
 }
 
@@ -112,13 +139,58 @@ func (c *Client) RunPoll(ctx context.Context) error {
 		return nil
 	}
 	log.Printf("agent task started node_id=%s task_id=%s method=%s", c.cfg.NodeID, response.Task.TaskID, response.Task.Method)
-	r := executeTask(ctx, *response.Task)
+	deadline, deadlineErr := time.Parse(time.RFC3339Nano, response.Task.DeadlineAt)
+	if deadlineErr != nil {
+		log.Printf("dropping agent task with invalid deadline node_id=%s task_id=%s method=%s", c.cfg.NodeID, response.Task.TaskID, response.Task.Method)
+		return c.deliverResult(ctx, response.Task, result{
+			TaskID: response.Task.TaskID, NodeID: c.cfg.NodeID, Stderr: "task deadline is invalid", Code: "TASK_INVALID_DEADLINE",
+		})
+	}
+	if time.Now().After(deadline) {
+		log.Printf("dropping expired agent task node_id=%s task_id=%s method=%s", c.cfg.NodeID, response.Task.TaskID, response.Task.Method)
+		return c.deliverResult(ctx, response.Task, result{
+			TaskID: response.Task.TaskID, NodeID: c.cfg.NodeID, Stderr: "task deadline expired", Code: "TASK_EXPIRED",
+		})
+	}
+	taskContext := ctx
+	if readOnlyTask(response.Task.Method) {
+		var cancel context.CancelFunc
+		taskContext, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	r := executeTask(taskContext, *response.Task)
+	r.Stdout = truncateUTF8(r.Stdout, maxResultStdout)
+	r.Stderr = truncateUTF8(r.Stderr, maxResultStderr)
 	log.Printf("agent task finished node_id=%s task_id=%s method=%s ok=%t code=%v", c.cfg.NodeID, response.Task.TaskID, response.Task.Method, r.OK, r.Code)
-	if err := c.request(ctx, http.MethodPost, "/api/agent/tasks/"+response.Task.TaskID+"/result", r, nil); err != nil {
+	if err := c.deliverResult(ctx, response.Task, r); err != nil {
 		log.Printf("agent task result delivery failed node_id=%s task_id=%s error=%v", c.cfg.NodeID, response.Task.TaskID, err)
 		return err
 	}
 	return nil
+}
+
+func (c *Client) deliverResult(ctx context.Context, t *task, r result) error {
+	return c.doRequest(ctx, c.upload, http.MethodPost, "/api/agent/tasks/"+t.TaskID+"/result", r, nil)
+}
+
+func readOnlyTask(method string) bool {
+	switch method {
+	case "system.info", "system.interfaces", "bird.inspect", "bird.protocol", "bird.routes", "bird.ospf", "bird.access":
+		return true
+	default:
+		return false
+	}
+}
+
+func truncateUTF8(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "\n...[birdbox-agent: output truncated]"
 }
 
 func executeTask(parent context.Context, t task) result {
@@ -151,6 +223,11 @@ func executeTask(parent context.Context, t task) result {
 	if command == "" || len(command) > 256*1024 || strings.IndexByte(command, 0) >= 0 {
 		r.Stderr = "invalid command"
 		r.Code = "INVALID_COMMAND"
+		return r
+	}
+	if !strings.EqualFold(strings.TrimSpace(os.Getenv("BIRDBOX_AGENT_LEGACY_EXEC")), "enabled") {
+		r.Stderr = "legacy.exec disabled on this agent; use structured RPC"
+		r.Code = "METHOD_NOT_ALLOWED"
 		return r
 	}
 	if input, ok := t.Params["input"].(string); ok && (len(input) > 16*1024*1024 || strings.IndexByte(input, 0) >= 0) {
@@ -244,7 +321,7 @@ func upgradeTask(t task, r result) result {
 		r.Code = "DOWNLOAD_FAILED"
 		return r
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := upgradeHTTPClient.Do(req)
 	if err != nil {
 		r.Stderr = err.Error()
 		r.Code = "DOWNLOAD_FAILED"
@@ -287,6 +364,15 @@ func upgradeTask(t task, r result) result {
 		r.Code = "INSTALL_FAILED"
 		return r
 	}
+	if err = probeBinary(tmpName); err != nil {
+		r.Stderr = "new agent binary cannot run on this host: " + err.Error()
+		r.Code = "INSTALL_FAILED"
+		return r
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		_ = os.Remove(target + ".prev")
+		_ = os.Link(target, target+".prev")
+	}
 	if err = os.Rename(tmpName, target); err != nil {
 		r.Stderr = err.Error()
 		r.Code = "INSTALL_FAILED"
@@ -298,6 +384,32 @@ func upgradeTask(t task, r result) result {
 	r.OK = true
 	r.Result = map[string]any{"version": t.Params["version"]}
 	return r
+}
+
+func probeBinary(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "-version")
+	cmd.Env = []string{}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(interface {
+			Signaled() bool
+			Signal() os.Signal
+		}); ok && status.Signaled() {
+			return fmt.Errorf("killed by signal %s", status.Signal())
+		}
+		// Older agents may not understand -version; exit status 1 still proves
+		// that the host can execute the binary.
+		if exitErr.ExitCode() == 1 {
+			return nil
+		}
+	}
+	return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 }
 
 func scheduleServiceRestart(service string) {

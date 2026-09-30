@@ -9,7 +9,7 @@ Agent 是受管节点的主动连接模式。节点上的 `birdbox-agent` 以 ro
 3. 脚本会按节点架构下载并校验 SHA-256 后安装 Agent、生成 systemd unit 或 OpenWrt procd 服务、写入 `/etc/birdbox/agent.env`，并为 BIRD 增加生成配置 include。
 4. 等待 Agent 注册后点击“测试连接”，确认通过后保存节点。
 
-主控生成脚本时使用 `BIRDBOX_PUBLIC_URL` 作为节点回连地址。生产环境必须把它设置为节点可达的主控 URL，不能使用监听地址 `0.0.0.0`。
+主控生成脚本时使用 `BIRDBOX_PUBLIC_URL` 作为节点回连地址。生产环境必须把它设置为节点可达的主控 URL，不能使用监听地址 `0.0.0.0`。当该 URL 使用 `https://` 时，生成脚本会自动写入 `BIRDBOX_AGENT_REQUIRE_HTTPS=true`，Agent 会拒绝降级到明文 HTTP。
 
 一键命令使用 `curl` 或 `wget` 配合 POSIX `sh`，兼容默认没有 `bash` 的 OpenWrt。脚本分发 URL 使用随机令牌，15 分钟后失效且最多下载 3 次；不要把 URL 发布到工单、聊天记录或日志中，失效后从页面重新生成即可。
 
@@ -43,4 +43,5 @@ Agent 使用以下主控接口：
 - Agent token 只在生成脚本和创建响应中显示一次，库存接口不返回明文 token。
 - Agent 必须以 root 运行；服务文件和环境文件仅允许 root 读取。
 - 生产环境建议使用 HTTPS，并限制主控发布二进制的下载地址。
+- 自签名证书或私有 CA 场景，把 CA PEM 文件放到节点受 root 保护的路径，并在 `/etc/birdbox/agent.env` 增加 `BIRDBOX_CONTROLLER_CA_FILE=/etc/birdbox/controller-ca.pem`；随后重启 `birdbox-agent`。不要关闭证书校验来绕过错误。
 - 旧 SSH 节点保持 SSH 管理时，不需要安装 Agent；两种模式可以在同一套 Birdbox 库存中并存。

@@ -125,6 +125,7 @@ test("defaults new onboarding to an Agent installer with valid shell syntax", as
   assert.equal(response.status, 200);
   assert.equal(response.payload.nodeId, "agent_test");
   assert.match(response.payload.script, /birdbox-agent/);
+  assert.match(response.payload.script, /BIRDBOX_AGENT_REQUIRE_HTTPS=true/);
   assert.match(response.payload.setupScriptUrl, /^https:\/\/controller\.example\/api\/nodes\/setup-script\/[A-Za-z0-9_-]{32,}$/);
   assert.match(response.payload.script, /systemd|openwrt|init\.d/);
   assert.ok(response.payload.script.indexOf("CHECKSUM_URL") < response.payload.script.indexOf("mv -f \"$TMP\""));

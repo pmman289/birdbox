@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { createHash } from "node:crypto";
+import { normalizeAgentArch } from "../agent-release.js";
 
 import type { AgentBroker } from "../agent-broker.js";
 import type { AgentRegistration, AgentTaskResult } from "../agent-protocol.js";
@@ -13,8 +14,7 @@ interface AgentRoutesOptions { broker: AgentBroker; binaryPath?: string; }
 function binaryForArch(base: string, requested: unknown): string {
   const arch = String(requested ?? "").toLowerCase();
   if (!arch) return base;
-  const mapped: Record<string, string> = { x64: "amd64", "x86_64": "amd64", amd64: "amd64", "aarch64": "arm64", arm64: "arm64", armv7l: "arm", arm: "arm", mips: "mips", mipsel: "mipsle", mipsle: "mipsle", mips64: "mips64", riscv64: "riscv64" };
-  const suffix = mapped[arch];
+  const suffix = normalizeAgentArch(arch);
   if (!suffix) throw new Error("不支持的 Agent 架构");
   return path.extname(base) ? `${path.dirname(base)}/birdbox-agent-${suffix}` : path.join(base, `birdbox-agent-${suffix}`);
 }
@@ -43,9 +43,8 @@ export const agentRoutes: FastifyPluginAsync<AgentRoutesOptions> = async (app, o
   app.get<{ Querystring: { arch?: string } }>("/api/agent/releases/latest/download", async (request, reply) => {
     if (!options.binaryPath) return reply.code(404).send({ error: "Agent 二进制尚未发布" });
     try {
-      let selected = binaryForArch(options.binaryPath, request.query.arch ?? process.arch);
-      let stat;
-      try { stat = await fs.stat(selected); } catch { selected = options.binaryPath; stat = await fs.stat(selected); }
+      const selected = binaryForArch(options.binaryPath, request.query.arch ?? process.arch);
+      const stat = await fs.stat(selected);
       if (!stat.isFile()) return reply.code(404).send({ error: "Agent 二进制不存在" });
       return reply.type("application/octet-stream").header("content-length", stat.size).send(createReadStream(selected));
     } catch { return reply.code(404).send({ error: "Agent 二进制不存在" }); }
@@ -53,8 +52,7 @@ export const agentRoutes: FastifyPluginAsync<AgentRoutesOptions> = async (app, o
   app.get<{ Querystring: { arch?: string } }>("/api/agent/releases/latest/checksum", async (request, reply) => {
     if (!options.binaryPath) return reply.code(404).send({ error: "Agent 二进制尚未发布" });
     try {
-      let selected = binaryForArch(options.binaryPath, request.query.arch ?? process.arch);
-      try { await fs.stat(selected); } catch { selected = options.binaryPath; }
+      const selected = binaryForArch(options.binaryPath, request.query.arch ?? process.arch);
       const digest = createHash("sha256").update(await fs.readFile(selected)).digest("hex");
       return reply.type("text/plain; charset=utf-8").send(`${digest}\n`);
     } catch { return reply.code(404).send({ error: "Agent 二进制不存在" }); }
@@ -76,13 +74,21 @@ export const agentRoutes: FastifyPluginAsync<AgentRoutesOptions> = async (app, o
 
   app.post("/api/agent/tasks/poll", async (request, reply) => {
     const input = body(request); const id = nodeId(request, input);
+    const controller = new AbortController();
+    const onClose = (): void => controller.abort();
+    request.raw.socket.once("close", onClose);
     try {
-      const task = await options.broker.poll(id, token(request, input));
+      const task = await options.broker.poll(id, token(request, input), 25_000, controller.signal);
+      if (task && (controller.signal.aborted || request.raw.socket.destroyed)) {
+        options.broker.requeue(task);
+        return reply;
+      }
       return reply.send({ task });
     } catch (error) { return reject(reply, error instanceof Error ? error.message : "Agent 轮询失败"); }
+    finally { request.raw.socket.off("close", onClose); }
   });
 
-  app.post<{ Params: { taskId: string } }>("/api/agent/tasks/:taskId/result", { bodyLimit: 16 * 1024 * 1024, handler: async (request, reply) => {
+  app.post<{ Params: { taskId: string } }>("/api/agent/tasks/:taskId/result", { bodyLimit: 20 * 1024 * 1024, handler: async (request, reply) => {
     const input = body(request); const id = nodeId(request, input);
     try {
       const result = { ...input, taskId: request.params.taskId, nodeId: id } as unknown as AgentTaskResult;

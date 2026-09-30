@@ -12,6 +12,7 @@ export interface AuthStatusResponse {
   authenticated: boolean;
   username: "admin";
   singleSession: false;
+  setupTokenRequired?: boolean;
 }
 
 export interface AuthMutationResponse extends AuthStatusResponse {

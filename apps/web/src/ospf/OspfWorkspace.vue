@@ -242,6 +242,8 @@ interface OspfNodeConfig {
 }
 const nodeConfigs = ref<Record<string, OspfNodeConfig>>({});
 const ospfDomainId = ref<string | null>(null);
+const ospfDomainName = ref("默认 OSPF 域");
+const ospfDomains = ref<Array<{ id: string; name: string; nodeConfigs: OspfNodeConfig[]; links: OspfLink[]; layout?: Record<string, OspfNodePosition> }>>([]);
 const selectedLink = computed(
   () =>
     topologyLinks.value.find((link) => link.id === selectedLinkId.value) ??
@@ -728,7 +730,7 @@ function domainPayload(): Record<string, unknown> {
   );
   return {
     id: ospfDomainId.value ?? undefined,
-    name: "默认 OSPF 域",
+    name: ospfDomainName.value.trim() || "默认 OSPF 域",
     nodeConfigs: configs,
     links: links.value.map((link) => ({
       id: link.id,
@@ -747,12 +749,54 @@ function domainPayload(): Record<string, unknown> {
     layout: nodePosition.value,
   };
 }
+function clearOspfDraft(): void {
+  ospfDomainId.value = null;
+  ospfDomainName.value = "新 OSPF 域";
+  links.value = [];
+  nodeConfigs.value = {};
+  nodePosition.value = {};
+  ensureNodePositions();
+  if (nodes.value[0]) selectedNodeId.value = nodes.value[0].id;
+}
+async function selectOspfDomain(domainId: string): Promise<void> {
+  const domain = ospfDomains.value.find((item) => item.id === domainId);
+  if (!domain) return;
+  ospfDomainId.value = domain.id;
+  ospfDomainName.value = domain.name;
+  links.value = domain.links.map((link) => ({ ...link, from: (link as unknown as { from?: string }).from ?? (link as unknown as { fromNodeId: string }).fromNodeId, to: (link as unknown as { to?: string }).to ?? (link as unknown as { toNodeId: string }).toNodeId, mode: (link as unknown as { passive?: boolean }).passive ? "passive" : "active", auth: ((value: string) => value === "simple" || value === "md5" || value === "ipsec" ? value : "none")((link as unknown as { authentication?: string }).authentication ?? "none") } as OspfLink));
+  nodeConfigs.value = Object.fromEntries(domain.nodeConfigs.map((config) => [config.nodeId, config]));
+  nodePosition.value = { ...(domain.layout ?? {}) };
+  ensureNodePositions();
+  selectedNodeId.value = nodes.value.find((node) => nodeConfigs.value[node.id])?.id ?? nodes.value[0]?.id ?? "";
+  if (selectedNodeId.value) loadNodeConfig(selectedNodeId.value);
+  await refreshOspfRuntime();
+}
+function newOspfDomain(): void { clearOspfDraft(); }
+async function deleteOspfDomain(): Promise<void> {
+  if (!ospfDomainId.value || !window.confirm(`确认删除 OSPF 域“${ospfDomainName.value}”？两端邻接将被撤销。`)) return;
+  ospfActionPending.value = "save";
+  try {
+    await api(`/api/ospf/${encodeURIComponent(ospfDomainId.value)}`, { method: "DELETE" });
+    ospfDomains.value = ospfDomains.value.filter((domain) => domain.id !== ospfDomainId.value);
+    if (ospfDomains.value[0]) await selectOspfDomain(ospfDomains.value[0].id); else clearOspfDraft();
+    await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
+    dispatchToast("OSPF 域已删除", "success");
+  } catch (error) { dispatchToast(error instanceof Error ? error.message : "删除 OSPF 域失败", "error"); }
+  finally { ospfActionPending.value = null; }
+}
+function removeSelectedLink(): void {
+  if (!selectedLinkId.value) return;
+  const link = links.value.find((item) => item.id === selectedLinkId.value);
+  if (!link || !window.confirm(`确认删除链路 ${link.from} ↔ ${link.to}？`)) return;
+  links.value = links.value.filter((item) => item.id !== selectedLinkId.value);
+  selectedLinkId.value = null;
+}
 async function saveOspf(): Promise<void> {
   if (ospfActionPending.value || !nodes.value.length) return;
   ospfActionPending.value = "save";
   try {
     const payload = domainPayload();
-    const response = await api<{ domain: { id: string } }>(
+    const response = await api<{ domain: { id: string; name?: string } }>(
       ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
       {
         method: ospfDomainId.value ? "PUT" : "POST",
@@ -761,6 +805,8 @@ async function saveOspf(): Promise<void> {
       },
     );
     ospfDomainId.value = response.domain.id;
+    ospfDomainName.value = response.domain.name ?? ospfDomainName.value;
+    await loadOspfDomains();
     await saveLayout(nodePosition.value);
     await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
     await refreshOspfRuntime();
@@ -1326,23 +1372,25 @@ async function loadOspfDomains(): Promise<void> {
     const response = await api<{
       domains: Array<{
         id: string;
+        name: string;
         nodeConfigs: OspfNodeConfig[];
         links: OspfLink[];
         layout: Record<string, { x: number; y: number }>;
       }>;
       layout: Record<string, { x: number; y: number }>;
     }>("/api/ospf");
-    const domain = response.domains[0];
+    ospfDomains.value = response.domains;
+    const selectedId = ospfDomainId.value;
+    const domain = response.domains.find((item) => item.id === selectedId) ?? response.domains[0];
     if (!domain) {
-      ospfDomainId.value = null;
-      links.value = [];
-      nodeConfigs.value = {};
+      clearOspfDraft();
       nodePosition.value = response.layout ?? {};
       ensureNodePositions();
       await loadNodeInterfaces();
       return;
     }
     ospfDomainId.value = domain.id;
+    ospfDomainName.value = domain.name;
     links.value = domain.links.map(
       (link) =>
         ({
@@ -1428,6 +1476,15 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="ospf-actions" :aria-busy="ospfActionPending !== null">
+        <label class="ospf-domain-picker">OSPF 域
+          <select :value="ospfDomainId ?? ''" @change="selectOspfDomain(($event.currentTarget as HTMLSelectElement).value)">
+            <option value="" disabled>选择域</option>
+            <option v-for="domain in ospfDomains" :key="domain.id" :value="domain.id">{{ domain.name }}</option>
+          </select>
+        </label>
+        <input v-model.trim="ospfDomainName" class="ospf-domain-name" aria-label="OSPF 域名称" placeholder="OSPF 域名称" />
+        <button class="secondary-button compact-button" type="button" :disabled="ospfActionPending !== null" @click="newOspfDomain">新建域</button>
+        <button v-if="ospfDomainId" class="danger-button compact-button" type="button" :disabled="ospfActionPending !== null" @click="deleteOspfDomain">删除域</button>
         <button class="secondary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="previewOspf">
           {{ ospfActionPending === "preview" ? "正在预检" : "预检配置" }}</button
         ><button class="primary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="saveOspf">
@@ -1774,8 +1831,9 @@ onBeforeUnmount(() => {
             <details class="ospf-password-timing area-wide"><summary>认证密钥生效时间</summary><div class="ospf-advanced-grid"><label class="field">Generate From<input v-model="ensurePasswordOptions(selectedLink.options!).generateFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Generate To<input v-model="ensurePasswordOptions(selectedLink.options!).generateTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept From<input v-model="ensurePasswordOptions(selectedLink.options!).acceptFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept To<input v-model="ensurePasswordOptions(selectedLink.options!).acceptTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 From<input v-model="ensurePasswordOptions(selectedLink.options!).from" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 To<input v-model="ensurePasswordOptions(selectedLink.options!).to" placeholder="YYYY-MM-DD HH:mm:ss" /></label></div></details>
             <label class="field area-wide">NBMA/PtMP 邻居（逗号分隔，可加 eligible）<input :value="neighborText(selectedLink)" @input="setNeighborText(selectedLink, ($event.currentTarget as HTMLInputElement).value)" placeholder="192.0.2.2 eligible, 192.0.2.3" /></label>
           </div>
-          <p class="field-hint">未填写的项目使用 BIRD 默认值。NBMA/PtMP 邻居地址可在高级配置数据中配置。</p>
+        <p class="field-hint">未填写的项目使用 BIRD 默认值。NBMA/PtMP 邻居地址可在高级配置数据中配置。</p>
         </details>
+        <button class="danger-button compact-button" type="button" @click="removeSelectedLink">删除此链路</button>
           ><button
           class="icon-button"
           type="button"

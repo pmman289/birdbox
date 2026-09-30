@@ -31,13 +31,14 @@ MYSQL_PASSWORD=<随机的应用数据库密码>
 MYSQL_ROOT_PASSWORD=<随机的数据库 root 密码>
 BIRDBOX_BIND_ADDRESS=127.0.0.1
 BIRDBOX_PORT=3000
-BIRDBOX_SECURE_COOKIE=true
+BIRDBOX_SECURE_COOKIE=false
 BIRDBOX_SHUTDOWN_TIMEOUT_MS=1800000
 BIRDBOX_PUBLIC_URL=https://birdbox.example.com
 ```
 
-`.env` 含有凭据，不要提交 Git 或公开分享。`BIRDBOX_SECURE_COOKIE=true` 只应
-在 HTTPS 已由 Birdbox 或可信反向代理提供时启用。端口默认只绑定宿主机
+`.env` 含有凭据，不要提交 Git 或公开分享。直接使用 HTTP 时保持
+`BIRDBOX_SECURE_COOKIE=false`；只有 HTTPS 已由 Birdbox 或可信反向代理提供时才启用
+`BIRDBOX_SECURE_COOKIE=true`。端口默认只绑定宿主机
 `127.0.0.1`；只有防火墙和 HTTPS 入口已准备好时，才把
 `BIRDBOX_BIND_ADDRESS` 改为 `0.0.0.0`。
 
@@ -130,6 +131,39 @@ docker compose exec birdbox id
 ```
 
 Birdbox 控制器日志按 JSON 单行输出，包含时间、级别、操作、节点 ID、任务 ID 和耗时等字段，适合直接接入日志平台。日志不会记录 SSH 命令正文、控制器私钥、Agent 令牌或完整 BIRD 配置；页面里的变更日志只保留面向用户的关键变更。
+
+### 审计与 Prometheus 指标
+
+控制器会把非 GET 的人工 API 变更异步写入 MySQL 的 `birdbox_audit_events` 表。登录管理员可以在浏览器登录状态下查询：
+
+```bash
+curl -fsS --cookie 'birdbox_session=<管理员会话 Cookie>' \
+  'http://127.0.0.1:3000/api/audit/events?limit=100'
+```
+
+Agent 的注册、心跳、轮询和结果回传不会逐条写入审计表，避免长轮询造成表膨胀；Agent 状态仍会出现在结构化日志和指标中。
+审计表由数据库迁移自动创建，并保留最近 50,000 条记录。备份 MySQL 时会一并备份审计记录。
+
+Prometheus 指标位于 `/metrics`。生产环境应设置一个随机的 `BIRDBOX_METRICS_TOKEN`，并只允许监控网络访问：
+
+```dotenv
+BIRDBOX_METRICS_TOKEN=<随机的只读抓取令牌>
+```
+
+```bash
+curl -fsS -H "Authorization: Bearer $BIRDBOX_METRICS_TOKEN" \
+  http://127.0.0.1:3000/metrics
+```
+
+指标只包含请求方法、有限路由模板、状态类别和耗时，不包含节点名称、IP、路由前缀或配置内容。
+
+## 单副本约束
+
+当前 Agent Broker、任务队列、长轮询等待者、一次性脚本令牌、部署锁和变更事件保存在
+Birdbox 进程内存中。因此一个环境只能运行一个 Birdbox 控制器副本，不要设置
+`replicas>1`，也不要在负载均衡器后放置多个独立 Birdbox 容器。MySQL 的锁只能保证
+库存写入互斥，不能共享 Agent 任务队列。需要多副本时必须先引入共享 Broker/队列和
+持久化脚本令牌，并完成专门的高可用改造。
 
 若 Birdbox 无法启动，先检查 `docker compose ps` 中 MySQL 是否为 `healthy`，再
 检查 `.env` 中的数据库名称、用户和密码是否一致。健康接口只检查控制器进程和

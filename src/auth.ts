@@ -70,6 +70,7 @@ export interface AuthStatus {
   authenticated: boolean;
   username: "admin";
   singleSession: false;
+  setupTokenRequired?: boolean;
 }
 
 export interface ListedAuthSession {

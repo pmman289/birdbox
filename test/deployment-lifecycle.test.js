@@ -5,7 +5,12 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { AuthStore } from "../src/auth.js";
+import { AgentBroker } from "../src/agent-broker.js";
 import { validateInventory } from "../src/bird.js";
+import { MemoryDatabase } from "../src/database.js";
+import { createDeploymentRecoveryRunner } from "../src/deployment-recovery.js";
+import { createHttpApplication } from "../src/http/application.js";
 
 async function requestJson(port, pathname, options = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
@@ -388,4 +393,128 @@ exit 0
   await fs.writeFile(releaseValidation, "1\n");
   assert.equal((await drainingRequest).status, 200);
   assert.deepEqual(await exited, { code: 0, signal: null });
+});
+
+test("starts HTTP before pending deployment recovery and unlocks after Agent replay", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-recovery-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const database = new MemoryDatabase();
+  const authStore = new AuthStore({ database, dataDir: root });
+  await database.initialize();
+  await authStore.initialize();
+  const agentBroker = new AgentBroker({ database });
+  await agentBroker.initialize();
+  const agentToken = await agentBroker.issueToken("recovery_agent");
+  const events = [];
+  let recoveryState = "pending";
+  const withDeploymentLock = async (operation) => {
+    if (recoveryState !== "idle") {
+      const error = new Error("未完成部署恢复，暂不接受新的部署");
+      error.status = 503;
+      error.code = "DEPLOYMENT_RECOVERY_PENDING";
+      throw error;
+    }
+    return operation();
+  };
+  const mutationService = new Proxy({}, {
+    get: (_target, property) => {
+      if (property === "createStatic") {
+        return async () => withDeploymentLock(async () => ({ status: 201, payload: { ok: true } }));
+      }
+      return async () => ({ status: 200, payload: {} });
+    },
+  });
+  const recoveryRunner = createDeploymentRecoveryRunner({
+    pending: true,
+    onStateChange: (state) => { recoveryState = state; },
+    recover: async () => {
+      const result = await agentBroker.dispatch("recovery_agent", "bird.apply", { config: "recovery-candidate" }, 3000);
+      if (!result.ok) throw new Error(result.stderr || result.code || "Agent 恢复任务失败");
+    },
+    initialDelayMs: 5,
+    maxDelayMs: 10,
+  });
+  const app = await createHttpApplication({
+    publicDirectory: path.resolve("public"),
+    appVersion: "test",
+    authStore,
+    store: {},
+    secureCookieSetting: false,
+    ping: async () => true,
+    isDeploymentLocked: () => recoveryState !== "idle",
+    recoveryState: () => recoveryState,
+    loadDashboard: async () => ({}),
+    withDeploymentLock,
+    withNodeOperationLock: async (_nodeId, operation) => operation(),
+    mutationService,
+    addEvent: (level, message, nodeId = null) => {
+      const event = { level, message: String(message), nodeId };
+      events.push(event);
+      return event;
+    },
+    getEvents: () => events,
+    agentBroker,
+    database,
+  });
+  await app.listen({ host: "127.0.0.1", port: 0 });
+  context.after(() => app.close());
+  const address = app.server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const jsonRequest = (pathname, options = {}) => fetch(`${baseUrl}${pathname}`, {
+    ...options,
+    headers: { "content-type": "application/json", ...(options.headers ?? {}) },
+  });
+
+  // The listener is available while recovery is still waiting for Agent work.
+  const pendingHealth = await jsonRequest("/api/health");
+  assert.equal(pendingHealth.status, 200);
+  assert.deepEqual(await pendingHealth.json(), { status: "ok", deploymentLocked: true, recovery: "pending" });
+
+  const setup = await jsonRequest("/api/auth/setup", {
+    method: "POST",
+    body: JSON.stringify({ password: "recovery-test-password", confirmation: "recovery-test-password" }),
+  });
+  assert.equal(setup.status, 201);
+  const cookie = setup.headers.get("set-cookie").split(";", 1)[0];
+  const blockedMutation = await jsonRequest("/api/statics", {
+    method: "POST",
+    headers: { cookie },
+    body: JSON.stringify({}),
+  });
+  assert.equal(blockedMutation.status, 503);
+  assert.match((await blockedMutation.json()).error, /恢复/);
+
+  const recoveryPromise = recoveryRunner.run();
+  const register = await jsonRequest("/api/agent/register", {
+    method: "POST",
+    body: JSON.stringify({ nodeId: "recovery_agent", token: agentToken, agentVersion: "test", protocolVersion: 1 }),
+  });
+  assert.equal(register.status, 200);
+  const poll = await jsonRequest("/api/agent/tasks/poll", {
+    method: "POST",
+    headers: { authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({ nodeId: "recovery_agent" }),
+  });
+  assert.equal(poll.status, 200);
+  const task = (await poll.json()).task;
+  assert.equal(task.method, "bird.apply");
+  const result = await jsonRequest(`/api/agent/tasks/${task.taskId}/result`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({ nodeId: "recovery_agent", ok: true, stdout: "", stderr: "" }),
+  });
+  assert.equal(result.status, 200);
+  await recoveryPromise;
+
+  const recoveredHealth = await jsonRequest("/api/health");
+  assert.equal(recoveredHealth.status, 200);
+  assert.deepEqual(await recoveredHealth.json(), { status: "ok", deploymentLocked: false, recovery: "idle" });
+  const mutation = await jsonRequest("/api/statics", {
+    method: "POST",
+    headers: { cookie },
+    body: JSON.stringify({}),
+  });
+  assert.equal(mutation.status, 201);
 });

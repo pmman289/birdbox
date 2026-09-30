@@ -212,6 +212,10 @@ export async function executeNodeCommand(
   const node = normalizeNode(nodeInput);
   const { timeout, maxBuffer } = validateExecutionOptions(command, options);
   if (node.transport === "agent") {
+    if (process.env.NODE_ENV === "production" && process.env.BIRDBOX_AGENT_LEGACY_EXEC !== "enabled") {
+      logger.warn("拒绝通过 legacy.exec 向 Agent 下发 shell 命令", { nodeId: node.id });
+      return { ok: false, stdout: "", stderr: "Agent 节点不支持 shell 命令，请使用结构化 RPC", code: "LEGACY_EXEC_DISABLED" };
+    }
     const result = await executeNodeRpc(node, "legacy.exec", {
       command,
       input: options.input ?? null,

@@ -73,6 +73,26 @@ function migrationTableMetadata() {
   };
 }
 
+function auditTableMetadata() {
+  return {
+    tables: [{ ENGINE: "InnoDB", TABLE_COLLATION: "utf8mb4_unicode_ci" }],
+    columns: [
+      column("id", "bigint unsigned", 1, { extra: "auto_increment" }),
+      column("occurred_at", "timestamp(3)", 2, { defaultValue: "CURRENT_TIMESTAMP(3)", extra: "DEFAULT_GENERATED" }),
+      column("request_id", "varchar(64)", 3, { characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("actor", "varchar(16)", 4, { characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("method", "varchar(16)", 5, { characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("path", "varchar(255)", 6, { characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("status", "smallint unsigned", 7),
+      column("outcome", "varchar(16)", 8, { characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("remote_address", "varchar(128)", 9, { nullable: "YES", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("user_agent", "varchar(512)", 10, { nullable: "YES", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" }),
+      column("detail", "json", 11, { nullable: "YES" }),
+    ],
+    indexes: [primaryKey("id")],
+  };
+}
+
 function assertInvalid(tableName, metadata) {
   assert.throws(
     () => validateMySqlTableContract(tableName, metadata),
@@ -83,6 +103,7 @@ function assertInvalid(tableName, metadata) {
 test("accepts the exact state and migration table contracts reported by MySQL", () => {
   assert.doesNotThrow(() => validateMySqlTableContract("birdbox_state", stateTableMetadata()));
   assert.doesNotThrow(() => validateMySqlTableContract("birdbox_schema_migrations", migrationTableMetadata()));
+  assert.doesNotThrow(() => validateMySqlTableContract("birdbox_audit_events", auditTableMetadata()));
 });
 
 test("rejects unsafe state table engine, columns, defaults, and update behavior", () => {

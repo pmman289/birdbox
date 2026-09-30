@@ -171,21 +171,12 @@ function agentArchitecture(): string {
   const value = String(agentStatus.value?.architecture ?? "").toLowerCase();
   const mapped: Record<string, string> = {
     x64: "amd64", x86_64: "amd64", amd64: "amd64",
-    aarch64: "arm64", arm64: "arm64", armv7l: "arm",
-    arm: "arm", mips: "mips", mipsel: "mipsle", mipsle: "mipsle",
-    mips64: "mips64", mips64le: "mips64", riscv64: "riscv64",
+    aarch64: "arm64", arm64: "arm64", armv7l: "arm", armv7: "arm",
+    arm: "arm", armv6l: "armv6", armv6: "armv6", armv5l: "armv5", armv5: "armv5",
+    mips: "mips", mipsel: "mipsle", mipsle: "mipsle",
+    mips64: "mips64", mips64le: "mips64le", riscv64: "riscv64",
   };
-  return mapped[value] ?? "amd64";
-}
-
-async function latestAgentChecksum(arch: string): Promise<string> {
-  const response = await fetch(`/api/agent/releases/latest/checksum?arch=${encodeURIComponent(arch)}`, {
-    credentials: "same-origin",
-    cache: "no-store",
-  });
-  const checksum = (await response.text()).trim();
-  if (!response.ok || !/^[0-9a-f]{64}$/i.test(checksum)) throw new Error("控制器没有提供该架构的 Agent 发布包或校验值");
-  return checksum;
+  return mapped[value] ?? "";
 }
 
 async function upgradeAgent(): Promise<void> {
@@ -199,19 +190,12 @@ async function upgradeAgent(): Promise<void> {
   agentUpgradeStatus.value = "正在获取发布包校验值";
   try {
     const arch = agentArchitecture();
-    const checksum = await latestAgentChecksum(arch);
+    if (!arch) throw new Error("Agent 上报的架构不受支持，请先升级或重新安装 Agent");
     agentUpgradeStatus.value = "正在下发升级任务，请等待 Agent 重启";
-    const url = `${window.location.origin}/api/agent/releases/latest/download?arch=${encodeURIComponent(arch)}`;
     const result = await api<AgentUpgradeResponse>(`/api/agent/nodes/${encodeURIComponent(nodeId)}/upgrade`, {
       method: "POST",
       timeoutMs: 650_000,
-      body: JSON.stringify({
-        url,
-        sha256: checksum,
-        targetPath: "/usr/local/bin/birdbox-agent",
-        service: "birdbox-agent",
-        version: __BIRDBOX_VERSION__,
-      }),
+      body: JSON.stringify({}),
     });
     if (!result.ok) throw new Error(result.stderr || result.stdout || "Agent 升级失败");
     agentUpgradeStatus.value = `升级任务完成，目标版本 ${String(result.result?.version ?? __BIRDBOX_VERSION__)}；等待 Agent 重新注册`;

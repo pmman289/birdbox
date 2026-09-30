@@ -165,13 +165,13 @@ actual_date=$(docker image inspect --format '{{index .Config.Labels "org.opencon
 docker run --rm --platform linux/amd64 --user 0:0 --entrypoint /bin/sh "$VERSION_IMAGE" -c '
   set -eu
   directory=/usr/local/lib/birdbox-agent
-  expected="amd64 arm64 arm mips mipsle mips64 riscv64"
+  expected="amd64 arm64 arm armv6 armv5 mips mipsle mips64 mips64le riscv64"
   for arch in $expected; do
-    path="$directory/birdbox-agent-$arch"
+    path="/usr/local/lib/birdbox-agent-$arch"
     test -f "$path"
     test -x "$path"
   done
-  test "$(find "$directory" -maxdepth 1 -type f -name "birdbox-agent-*" | wc -l)" -eq 7
+  test "$(find /usr/local/lib -maxdepth 1 -type f -name "birdbox-agent-*" | wc -l)" -eq 10
 '
 
 SMOKE_PROJECT=${RELEASE_SMOKE_PROJECT:-}
@@ -257,7 +257,7 @@ if ((SKIP_SMOKE == 0)); then
   auth_response=$(curl -fsS --retry 10 --retry-all-errors --retry-delay 1 "$base_url/api/auth/status")
   node -e 'const value = JSON.parse(process.argv[1]); if (typeof value.authenticated !== "boolean") process.exit(1)' "$auth_response"
 
-  for arch in amd64 arm64 arm mips mipsle mips64 riscv64; do
+  for arch in amd64 arm64 arm armv6 armv5 mips mipsle mips64 mips64le riscv64; do
     binary_file="$SMOKE_TMP/birdbox-agent-$arch"
     download_url="$base_url/api/agent/releases/latest/download?arch=$arch"
     checksum_url="$base_url/api/agent/releases/latest/checksum?arch=$arch"

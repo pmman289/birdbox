@@ -9,6 +9,7 @@ import type {
 import type { Inventory, ManagedNode, Peer } from "../packages/contracts/src/inventory.js";
 import { resourceAppliesToNode } from "../packages/contracts/src/resource-scope.js";
 import { inspectNode } from "./bird.js";
+import { redactDashboardResponse } from "./inventory-redaction.js";
 import {
   configForNode,
   nodePeers,
@@ -139,7 +140,7 @@ export class DashboardService {
   ): Promise<DashboardResponse> {
     const selection = chooseEbgpSelection(state, requestedNodeId, requestedPeerId);
     if (!selection.node) {
-      return {
+      return redactDashboardResponse({
         inventory: state,
         selection: { nodeId: null, peerId: null },
         node: null,
@@ -166,7 +167,7 @@ export class DashboardService {
         established: false,
         config: "",
         events: this.#options.getEvents(),
-      };
+      });
     }
     const selectedNode = selection.node;
     const runtimes = await Promise.all(state.nodes.map((node) => inspectNodeForDashboard(node)));
@@ -185,7 +186,7 @@ export class DashboardService {
       return { ...peer, session, protocol: session ? protocolFor(runtime, session.protocolName) : null };
     });
     const selected = peers.find((item) => item.id === selection.peer?.id) ?? null;
-    return {
+    return redactDashboardResponse({
       inventory: state,
       selection: { nodeId: selectedNode.id, peerId: selected?.id ?? null },
       node: selectedNode,
@@ -210,6 +211,6 @@ export class DashboardService {
       established: selected?.protocol?.established ?? false,
       config: configForNode(state, selectedNode),
       events: this.#options.getEvents(),
-    };
+    });
   }
 }

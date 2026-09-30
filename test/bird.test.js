@@ -1581,6 +1581,12 @@ test("generates SSH mutations that support regular generated configs and preserv
   assert.match(commands, /current_backup=/);
   assert.match(commands, /rollback_kind=missing/);
   assert.doesNotMatch(commands, /test -L '[^']*\/generated\.conf'\n/);
+  const isolatedPreflight = commands.split("---END---").find((command) => command.includes("check_dir=$(mktemp -d"));
+  assert.ok(isolatedPreflight, "Include preflight command was not captured");
+  assert.match(isolatedPreflight, /bird -p -c/);
+  assert.match(isolatedPreflight, /awk -v target=/);
+  assert.doesNotMatch(isolatedPreflight, /\.switch['"]?\s*$/m);
+  assert.doesNotMatch(isolatedPreflight, /mv -f [^\n]*generated\.conf['"]?\s*$/m);
 });
 
 test("parses multiple BGP protocol states independently", () => {

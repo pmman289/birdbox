@@ -17,6 +17,7 @@ export interface AuthShowEventDetail {
   configured: boolean;
   authenticated: false;
   username: "admin";
+  setupTokenRequired?: boolean;
 }
 
 export interface DashboardUpdatedEventDetail {

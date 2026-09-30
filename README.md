@@ -53,7 +53,7 @@ BIRDBOX_BIND_ADDRESS=127.0.0.1
 BIRDBOX_PORT=3000
 # Agent 节点回连时必须填写节点实际可达的 URL，不能填写 0.0.0.0
 BIRDBOX_PUBLIC_URL=http://127.0.0.1:3000
-BIRDBOX_SECURE_COOKIE=true
+BIRDBOX_SECURE_COOKIE=false
 ```
 
 `latest` 便于首次部署直接取得当前稳定版本。生产环境完成验证后，建议把

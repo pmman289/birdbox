@@ -9,6 +9,7 @@ interface DashboardRoutesOptions {
   secureCookieSetting: boolean | null;
   ping(): Promise<unknown>;
   isDeploymentLocked(): boolean;
+  recoveryState?: () => "idle" | "pending" | "failed";
   loadDashboard(nodeId: string | null, peerId: string | null): Promise<DashboardResponse>;
 }
 
@@ -35,7 +36,7 @@ async function requireAuthentication(
 export const dashboardRoutes: FastifyPluginAsync<DashboardRoutesOptions> = async (app, options) => {
   app.get("/api/health", async (_request, reply) => {
     await options.ping();
-    return jsonReply(reply, 200, { status: "ok", deploymentLocked: options.isDeploymentLocked() });
+    return jsonReply(reply, 200, { status: "ok", deploymentLocked: options.isDeploymentLocked(), recovery: options.recoveryState?.() ?? "idle" });
   });
 
   const dashboardHandler = async (

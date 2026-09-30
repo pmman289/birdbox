@@ -20,6 +20,7 @@ import { configForNode, findNode, findPeer, findPolicyResource } from "./invento
 import type { InventoryStore } from "./store.js";
 import { errorContext, logger } from "./logger.js";
 import { extractBgpProtocolConfig } from "../packages/contracts/src/config-snippet.js";
+import { restoreSecretPlaceholders } from "./inventory-redaction.js";
 
 interface PreparedSession {
   inventory: Inventory;
@@ -274,6 +275,7 @@ export class SessionApplicationService {
       exportDefines[family] = exportDefine;
     }
     const existing = state.sessions.find((item) => item.nodeId === node.id && item.peerId === peer.id);
+    const requestedBgp = restoreSecretPlaceholders(payload.bgp, existing?.bgp ?? null);
     const session = normalizeSession({
       id: existing?.id ?? this.#options.makeId("session"),
       nodeId: node.id,
@@ -283,7 +285,7 @@ export class SessionApplicationService {
       localAsn: payload.localAsn,
       localPort: payload.localPort,
       sessionType: "ebgp",
-      bgp: payload.bgp,
+      bgp: requestedBgp,
       channels: requestedChannels,
       enabled: payload.enabled !== false,
     });

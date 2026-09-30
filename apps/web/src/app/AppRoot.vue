@@ -41,6 +41,7 @@ const passwordError = ref("");
 const passwordPending = ref(false);
 const ospfWarningAcknowledged = ref(false);
 const dashboardError = ref(false);
+const recoveryState = ref<"idle" | "pending" | "failed">("idle");
 const theme = ref<"light" | "dark">("light");
 const toasts = ref<ToastItem[]>([]);
 const mutations = reactive(new Map<number, MutationWaitPresentation>());
@@ -53,12 +54,23 @@ let systemThemeQuery: MediaQueryList | null = null;
 
 const mutationPresentation = computed(() => [...mutations.values()].at(-1) ?? null);
 const globalHealth = computed(() => {
+  if (recoveryState.value !== "idle") {
+    return {
+      status: recoveryState.value === "failed" ? "error" : "warning",
+      text: recoveryState.value === "failed" ? "部署恢复失败，正在重试" : "正在恢复中，请等待",
+    };
+  }
   if (dashboardError.value) return { status: "error", text: "控制器异常" };
   if (!dashboard.value) return { status: "", text: "正在连接" };
   const health = dashboard.value.health;
   return { status: health.status, text: `${health.onlineNodes}个节点在线，${health.normalSessions}个会话正常` };
 });
 const globalHealthDetails = computed(() => {
+  if (recoveryState.value !== "idle") {
+    return [recoveryState.value === "failed"
+      ? "上一次部署未完成，控制器正在重试恢复；恢复完成前不会接受新的变更。"
+      : "控制器正在恢复上一次未完成的部署，新的变更暂时锁定。"];
+  }
   if (dashboardError.value) return ["控制器请求失败，请检查 Birdbox 服务日志和网络连接。"];
   const health = dashboard.value?.health;
   if (!health) return ["正在获取受管节点状态…"];
@@ -141,6 +153,15 @@ async function refresh(nodeId = dashboard.value?.node?.id ?? null, peerId = dash
   }
 }
 
+async function refreshControllerHealth(): Promise<void> {
+  try {
+    const health = await api<{ recovery?: "idle" | "pending" | "failed" }>("/api/health");
+    recoveryState.value = health.recovery ?? "idle";
+  } catch {
+    // Dashboard and authentication monitors present connectivity errors.
+  }
+}
+
 function stopAuthMonitor(): void {
   if (authMonitorTimer !== null) window.clearInterval(authMonitorTimer);
   authMonitorTimer = null;
@@ -167,7 +188,7 @@ function handleVisibilityChange(): void {
   if (!document.hidden) refreshRuntimeInBackground();
 }
 
-function showAuthentication(status: Pick<AuthStatusResponse, "configured"> = { configured: true }): void {
+function showAuthentication(status: Pick<AuthStatusResponse, "configured" | "setupTokenRequired"> = { configured: true }): void {
   stopAuthMonitor();
   stopRuntimeMonitor();
   authenticated.value = false;
@@ -178,7 +199,7 @@ function showAuthentication(status: Pick<AuthStatusResponse, "configured"> = { c
   document.querySelectorAll<HTMLDialogElement>("dialog[open]").forEach((item) => item.close());
   document.body.classList.add("auth-active");
   window.dispatchEvent(new CustomEvent("birdbox:auth-show", {
-    detail: { configured: status.configured, authenticated: false, username: "admin" },
+    detail: { configured: status.configured, authenticated: false, username: "admin", setupTokenRequired: status.setupTokenRequired },
   }));
 }
 
@@ -188,6 +209,7 @@ function startAuthMonitor(): void {
     try {
       const status = await api<AuthStatusResponse>("/api/auth/status");
       if (!status.authenticated) showAuthentication(status);
+      await refreshControllerHealth();
     } catch {
       // Dashboard requests surface connectivity failures without ejecting the user.
     }
@@ -199,6 +221,7 @@ async function showApplication(): Promise<void> {
   document.body.classList.remove("auth-active");
   window.dispatchEvent(new CustomEvent("birdbox:app-ready"));
   startAuthMonitor();
+  await refreshControllerHealth();
   await refresh(null, null);
   startRuntimeMonitor();
 }

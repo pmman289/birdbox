@@ -638,7 +638,6 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
     const versionPath = `${directory}/versions/${versionName}`;
     const candidateTarget = `versions/${versionName}`;
     const candidateLink = `${activePath}.candidate`;
-    const switchLink = `${activePath}.switch`;
     const deviceCheck = await executeNodeCommand(node, [
       "set -eu",
       `test -r '${node.mainConfigPath}'`,
@@ -659,7 +658,7 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
       `mkdir -p '${directory}/versions'`,
       `chgrp "$bird_group" '${directory}/versions'`,
       `chmod 0750 '${directory}/versions'`,
-      `current_kind=missing; current_target=''; current_file=''; current_backup='${activePath}.stage-backup.$$'; if [ -L '${activePath}' ]; then current_kind=symlink; current_target=$(readlink '${activePath}'); current_file=$(readlink -f '${activePath}'); elif [ -f '${activePath}' ]; then current_kind=file; current_file='${activePath}'; cp -p '${activePath}' "$current_backup"; fi`,
+      `current_file=$(readlink -f '${activePath}' 2>/dev/null || true)`,
       `cleanup_staged_versions() { for file in '${directory}/versions/'${basename}.*.conf '${directory}/versions/'${basename}.*.conf.tmp; do [ -e "$file" ] || continue; file_target=$(readlink -f "$file" 2>/dev/null || true); if [ "$file_target" != "$current_file" ]; then rm -f -- "$file"; fi; done; }`,
       "cleanup_staged_versions",
       `cat > '${versionPath}.tmp'`,
@@ -667,13 +666,28 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
       `chmod 0640 '${versionPath}.tmp'`,
       `mv -f '${versionPath}.tmp' '${versionPath}'`,
       `ln -sfn '${candidateTarget}' '${candidateLink}'`,
-      "resource_restore_commands=''",
-      ...resourceSwitchCommands(bundle, directory, "check"),
-      `restore_active() { eval "$resource_restore_commands"; case "$current_kind" in symlink) ln -sfn "$current_target" '${switchLink}'; mv -f '${switchLink}' '${activePath}';; file) cp -p "$current_backup" '${activePath}'; rm -f "$current_backup";; missing) rm -f '${activePath}';; esac; }`,
-      "trap restore_active EXIT HUP INT TERM",
-      `ln -sfn '${candidateTarget}' '${switchLink}'`,
-      `mv -f '${switchLink}' '${activePath}'`,
-      `birdc -s '${node.socketPath}' 'configure check'`,
+      // Preflight must never replace the active generated symlink. Build a
+      // temporary main/generated pair instead, then ask BIRD's parser to
+      // validate that isolated include graph. This removes the crash window
+      // where a killed controller could leave an unvalidated config active.
+      `check_dir=$(mktemp -d "${directory}/.birdbox-check.XXXXXX")`,
+      `cleanup_check() { rm -rf "$check_dir"; }`,
+      "trap cleanup_check EXIT HUP INT TERM",
+      `candidate_file=$(readlink -f '${candidateLink}')`,
+      `test -n "$candidate_file" && test -r "$candidate_file"`,
+      `cp -p "$candidate_file" "$check_dir/generated.conf"`,
+      ...bundle.resources.flatMap((resource) => {
+        const activeResource = `${directory}/resources/${resource.relativePath}`;
+        return [
+          `resource_target=$(readlink -f '${activeResource}.candidate')`,
+          `test -n "$resource_target" && test -r "$resource_target"`,
+          `sed "s|${activeResource}|$resource_target|g" "$check_dir/generated.conf" > "$check_dir/generated.next"`,
+          `mv -f "$check_dir/generated.next" "$check_dir/generated.conf"`,
+        ];
+      }),
+      `awk -v target='${activePath}' '${ACTIVE_BIRD_INCLUDE_AWK}' '${node.mainConfigPath}' || { echo 'BIRD 主配置缺少活动 Include：${activePath}' >&2; exit 1; }`,
+      `sed "s|${activePath}|$check_dir/generated.conf|g" '${node.mainConfigPath}' > "$check_dir/main.conf"`,
+      `cd '${path.posix.dirname(node.mainConfigPath)}' && bird -p -c "$check_dir/main.conf"`,
     ].join("\n");
     return executeNodeCommand(node, command, { timeout: 15_000, input: config });
   }

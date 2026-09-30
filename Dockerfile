@@ -1,4 +1,4 @@
-FROM node:24-alpine AS web-build
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS web-build
 
 WORKDIR /app
 COPY package*.json ./
@@ -11,18 +11,17 @@ COPY public ./public
 COPY src ./src
 RUN npm run build
 
-FROM golang:1.24-alpine AS agent-build
+FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS agent-build
 ARG BIRDBOX_VERSION=dev
 WORKDIR /src/agent
 COPY agent/go.mod ./
 COPY agent/*.go ./
-RUN mkdir -p /out \
-    && for target in amd64 arm64 mips mipsle mips64 riscv64; do \
-      GOOS=linux GOARCH="$target" CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${BIRDBOX_VERSION}" -o "/out/birdbox-agent-$target" .; \
-    done \
-    && GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${BIRDBOX_VERSION}" -o /out/birdbox-agent-arm .
+RUN set -eux; go vet ./...; go test ./...; mkdir -p /out; \
+    build() { target="$1"; shift; env GOOS=linux CGO_ENABLED=0 "$@" go build -trimpath -ldflags="-s -w -X main.version=${BIRDBOX_VERSION} -X main.buildArch=$target" -o "/out/birdbox-agent-$target" .; }; \
+    build amd64 GOARCH=amd64; build arm64 GOARCH=arm64; build arm GOARCH=arm GOARM=7; build armv6 GOARCH=arm GOARM=6; build armv5 GOARCH=arm GOARM=5; \
+    build mips GOARCH=mips GOMIPS=softfloat; build mipsle GOARCH=mipsle GOMIPS=softfloat; build mips64 GOARCH=mips64 GOMIPS64=softfloat; build mips64le GOARCH=mips64le GOMIPS64=softfloat; build riscv64 GOARCH=riscv64
 
-FROM node:24-alpine AS bgpq4-build
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS bgpq4-build
 
 ARG BGPQ4_VERSION=1.12
 ARG BGPQ4_COMMIT=95d3a4c12b18dce45a1fbb62a2327ed302a8f046
@@ -35,7 +34,7 @@ RUN apk add --no-cache autoconf automake build-base git libtool \
     && make -j"$(getconf _NPROCESSORS_ONLN)" \
     && strip bgpq4
 
-FROM node:24-alpine
+FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
 
 ARG BIRDBOX_VERSION=dev
 ARG VCS_REF=unknown
@@ -68,7 +67,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=web-build /app/dist ./dist
 COPY --from=web-build /app/public ./public
-COPY --from=agent-build /out /usr/local/lib/birdbox-agent
+COPY --from=agent-build /out /usr/local/lib/
 COPY README.md ./README.md
 
 RUN chown -R birdbox:birdbox /app /var/lib/birdbox

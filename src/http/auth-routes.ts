@@ -1,4 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { AuthStore } from "../auth.js";
 import { AUTH_COOKIE_NAME, AUTH_SESSION_TTL_MS } from "../auth.js";
@@ -30,6 +31,12 @@ declare module "fastify" {
 const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000;
 const LOGIN_ATTEMPT_LIMIT = 5;
 const MAX_LOGIN_FAILURE_KEYS = 10_000;
+const setupToken = process.env.BIRDBOX_SETUP_TOKEN?.trim() || null;
+
+function setupTokenMatches(value: unknown): boolean {
+  if (!setupToken) return true;
+  return timingSafeEqual(createHash("sha256").update(String(value ?? "")).digest(), createHash("sha256").update(setupToken).digest());
+}
 
 function routeError(status: number, code: string, message: string): BirdboxError {
   const error = new Error(message) as BirdboxError;
@@ -86,12 +93,12 @@ export function sessionCookie(
 }
 
 function loginAttemptKey(request: FastifyRequest): string {
-  return request.socket.remoteAddress ?? "unknown";
+  return request.ip ?? request.socket.remoteAddress ?? "unknown";
 }
 
 function authSessionContext(request: FastifyRequest): { address: string; userAgent: string | string[] } {
   return {
-    address: request.socket.remoteAddress ?? "",
+    address: request.ip ?? request.socket.remoteAddress ?? "",
     userAgent: request.headers["user-agent"] ?? "",
   };
 }
@@ -154,11 +161,13 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOptions> = async (app, opt
   };
 
   app.get("/api/auth/status", async (request, reply) => {
-    return jsonReply(reply, 200, await options.authStore.status(requestSessionToken(request)));
+    const status = await options.authStore.status(requestSessionToken(request));
+    return jsonReply(reply, 200, setupToken ? { ...status, setupTokenRequired: true } : status);
   });
 
   app.post("/api/auth/setup", async (request, reply) => {
     const body = jsonBody(request);
+    if (!setupTokenMatches(body.setupToken)) throw routeError(403, "SETUP_TOKEN_INVALID", "初始化令牌不正确");
     const token = await options.authStore.setup(body.password, body.confirmation, authSessionContext(request));
     return jsonReply(reply, 201, { ok: true, ...await options.authStore.status(token) }, {
       "set-cookie": sessionCookie(request, token, options.secureCookieSetting),

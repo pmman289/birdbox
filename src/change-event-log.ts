@@ -17,6 +17,7 @@ export class ChangeEventLog {
   }
 
   list(): ChangeEvent[] {
-    return this.#events;
+    // Do not expose the mutable backing array to route handlers or plugins.
+    return [...this.#events];
   }
 }

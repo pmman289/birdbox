@@ -165,6 +165,22 @@ test("normalizes and renders BIRD OSPF advanced protocol and interface options",
   assert.doesNotMatch(config, /secondary yes;/);
 });
 
+test("rejects OSPF authentication injection and out-of-range DSCP during rendering", () => {
+  const base = domain();
+  const malformed = normalizeOspfDomain({
+    ...base,
+    links: [{ ...base.links[0], options: {
+      type: "ptp", password: "secret", passwordOptions: { id: "7; } protocol static injected {", algorithm: "hmac-sha256" }, txDscp: 64,
+    } }],
+  });
+  assert.throws(() => renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [malformed]), /OSPF 密码 ID|TX DSCP/);
+  const invalidAlgorithm = normalizeOspfDomain({
+    ...base,
+    links: [{ ...base.links[0], options: { type: "ptp", password: "secret", passwordOptions: { algorithm: "hmac-sha256; }" } } }],
+  });
+  assert.throws(() => renderBirdConfig(node("n1", "192.0.2.1"), [], [], [], [], [], [], [], [], [invalidAlgorithm]), /不支持的 OSPF 认证算法/);
+});
+
 test("filters OSPF interface options by address-family support", async () => {
   const base = domain();
   const input = normalizeOspfDomain({

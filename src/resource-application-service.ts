@@ -52,6 +52,7 @@ import { normalizeOspfDomain, ospfDomainNodeIds } from "./ospf.js";
 import type { SessionApplicationService } from "./session-application-service.js";
 import type { InventoryStore } from "./store.js";
 import { logger } from "./logger.js";
+import { restoreSecretPlaceholders } from "./inventory-redaction.js";
 
 interface ResourceApplicationServiceOptions {
   store: InventoryStore;
@@ -68,7 +69,7 @@ export function createResourceApplicationService(
   options: ResourceApplicationServiceOptions,
 ): MutationService {
   const store = options.store;
-  const events = options.getEvents();
+  const events = (): ChangeEvent[] => options.getEvents();
   const makeId = options.makeId;
   const event = (level: string, message: unknown, nodeId?: string | null): ChangeEvent => {
     logger.info("记录资源变更", {
@@ -149,7 +150,8 @@ export function createResourceApplicationService(
   }
 
   function materializeDomain(input: Record<string, unknown>, previous: IbgpDomain | null = null): IbgpDomain {
-    const base = { ...(previous ?? {}), ...input } as Record<string, unknown>;
+    const restoredInput = previous ? restoreSecretPlaceholders(input, previous) : input;
+    const base = { ...(previous ?? {}), ...restoredInput } as Record<string, unknown>;
     const members = Array.isArray(base.members) ? base.members : previous?.members ?? [];
     const requested = Array.isArray(base.adjacencies) ? base.adjacencies : [];
     const seed = normalizeIbgpDomain({
@@ -191,7 +193,7 @@ export function createResourceApplicationService(
       const id = String(item.id ?? "");
       const previous = byId.get(id);
       if (previous) {
-        byId.set(id, normalizeSession({
+        byId.set(id, normalizeSession(restoreSecretPlaceholders({
           ...previous,
           ...item,
           id,
@@ -200,7 +202,7 @@ export function createResourceApplicationService(
           localAsn: previous.localAsn,
           sessionType: "ibgp",
           managedBy: previous.managedBy,
-        }));
+        }, previous)));
       }
     }
     return [...byId.values()];
@@ -217,7 +219,8 @@ export function createResourceApplicationService(
   }
 
   function materializeOspf(input: Record<string, unknown>, previous: OspfDomain | null = null): OspfDomain {
-    return normalizeOspfDomain({ ...(previous ?? {}), ...input, id: previous?.id ?? input.id ?? makeId("ospf") });
+    const restoredInput = previous ? restoreSecretPlaceholders(input, previous) : input;
+    return normalizeOspfDomain({ ...(previous ?? {}), ...restoredInput, id: previous?.id ?? input.id ?? makeId("ospf") });
   }
 
   function stripUnknownOspfLayout(domain: OspfDomain): OspfDomain {
@@ -431,7 +434,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => [nodeId]);
     event("success", `已更新受管节点 ${node.name}`, node.id);
-    return { status: 200, payload: { node, inventory: state, deployment, events } };
+    return { status: 200, payload: { node, inventory: state, deployment, events: events() } };
   },
 
   async deleteNode(nodeId, force) {
@@ -445,7 +448,7 @@ export function createResourceApplicationService(
         inventory: state,
         cleanupRequired: forced,
         deployment: { applied: !forced, nodeIds: [node.id], nodes: [{ id: node.id, name: node.name }], sessions: [] },
-        events,
+        events: events(),
       },
     };
   },
@@ -459,7 +462,7 @@ export function createResourceApplicationService(
       return resource;
     }, () => [resource.nodeId]);
     event("success", `已添加 Direct 资源 ${resource.label}`, resource.nodeId);
-    return { status: 201, payload: { resource, inventory: state, deployment, events } };
+    return { status: 201, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async updateDirect(resourceId, body) {
@@ -475,7 +478,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 Direct 资源 ${resource.label}`, resource.nodeId);
-    return { status: 200, payload: { resource, inventory: state, deployment, events } };
+    return { status: 200, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async deleteDirect(resourceId) {
@@ -487,7 +490,7 @@ export function createResourceApplicationService(
       return target;
     }, (target) => [target.nodeId]);
     event("success", `已删除 Direct 资源 ${resource.label}`, resource.nodeId);
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async createKernel(body) {
@@ -499,7 +502,7 @@ export function createResourceApplicationService(
       return resource;
     }, (_result, inventory) => resource.nodeIds ?? inventory.nodes.map((node) => node.id));
     event("success", `已添加 Kernel 资源 ${resource.label}`);
-    return { status: 201, payload: { resource, inventory: state, deployment, events } };
+    return { status: 201, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async updateKernel(resourceId, body) {
@@ -516,7 +519,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affected);
     event("success", `已更新 Kernel 资源 ${resource.label}`);
-    return { status: 200, payload: { resource, inventory: state, deployment, events } };
+    return { status: 200, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async deleteKernel(resourceId) {
@@ -530,7 +533,7 @@ export function createResourceApplicationService(
       return target;
     }, () => affected);
     event("success", `已删除 Kernel 资源 ${resource.label}`);
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async createPeer(nodeId, body) {
@@ -540,7 +543,7 @@ export function createResourceApplicationService(
       draft.peers.push(peer);
     }));
     event("success", `已添加外部 Peer ${peer.name}`, nodeId);
-    return { status: 201, payload: { peer, inventory: state, events } };
+    return { status: 201, payload: { peer, inventory: state, events: events() } };
   },
 
   async updatePeer(peerId, body) {
@@ -550,12 +553,18 @@ export function createResourceApplicationService(
       const previous = draft.peers[index];
       if (!previous) fail(404, "远端 Peer 不存在");
       if (previous.managedBy?.kind === "ibgp-domain") fail(409, "该 Peer 由 iBGP 管理，请在 iBGP 管理中修改");
-      const updated = normalizePeer({ ...previous, ...body, id: peerId, nodeId: previous.nodeId, managedBy: undefined });
+      const updated = normalizePeer({
+        ...previous,
+        ...restoreSecretPlaceholders(body, previous),
+        id: peerId,
+        nodeId: previous.nodeId,
+        managedBy: undefined,
+      });
       draft.peers[index] = updated;
       return updated;
     }, (updated) => [updated.nodeId]);
     event("success", `已更新外部 Peer ${peer.name}`, peer.nodeId);
-    return { status: 200, payload: { peer, inventory: state, deployment, events } };
+    return { status: 200, payload: { peer, inventory: state, deployment, events: events() } };
   },
 
   async deletePeer(peerId) {
@@ -568,7 +577,7 @@ export function createResourceApplicationService(
     }));
     if (!peer) fail(500, "删除 Peer 后未返回资源");
     event("success", `已删除外部 Peer ${peer.name}`, peer.nodeId);
-    return { status: 200, payload: { inventory: state, events } };
+    return { status: 200, payload: { inventory: state, events: events() } };
   },
 
   async createStatic(body) {
@@ -583,7 +592,7 @@ export function createResourceApplicationService(
     event("success", `已添加 Static 资源 ${resource.name}`, resource.nodeId);
     return {
       status: 201,
-      payload: { resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events },
+      payload: { resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events: events() },
     };
   },
 
@@ -612,7 +621,7 @@ export function createResourceApplicationService(
     event("success", `已更新 Static 资源 ${resource.name}`, resource.nodeId);
     return {
       status: 200,
-      payload: { resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events },
+      payload: { resource: state.staticProtocols.find((item) => item.id === resource.id), inventory: state, deployment, events: events() },
     };
   },
 
@@ -626,7 +635,7 @@ export function createResourceApplicationService(
       return target;
     }, (deleted) => [deleted.nodeId]);
     event("success", `已删除 Static 资源 ${resource.name}`, resource.nodeId);
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async createRpki(body) {
@@ -638,7 +647,7 @@ export function createResourceApplicationService(
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
     event("success", `已添加 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 201, payload: { resource, inventory: state, deployment, events } };
+    return { status: 201, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async updateRpki(resourceId, body) {
@@ -651,7 +660,11 @@ export function createResourceApplicationService(
       const scopeCompatibleBody = Object.hasOwn(body, "nodeId") && !Object.hasOwn(body, "nodeIds")
         ? { ...body, nodeIds: body.nodeId }
         : body;
-      const updated = normalizeRPKI({ ...previous, ...scopeCompatibleBody, id: resourceId });
+      const updated = normalizeRPKI({
+        ...previous,
+        ...restoreSecretPlaceholders(scopeCompatibleBody, previous),
+        id: resourceId,
+      });
       for (const symbol of [previous.name, previous.roa4Table, previous.roa6Table]) {
         if (symbol && symbol !== updated.name && symbol !== updated.roa4Table && symbol !== updated.roa6Table && resourceReferencesSymbol(draft, symbol)) {
           fail(409, `请先更新引用 RPKI 符号 ${symbol} 的策略`);
@@ -664,7 +677,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 200, payload: { resource, inventory: state, deployment, events } };
+    return { status: 200, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async deleteRpki(resourceId) {
@@ -682,7 +695,7 @@ export function createResourceApplicationService(
       return target;
     }, () => affectedNodeIds);
     event("success", `已删除 RPKI 资源 ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async getSourcePolicyPlan(resourceId, nodeId) {
@@ -741,7 +754,7 @@ export function createResourceApplicationService(
     const applied = state.sourcePolicies.find((item) => item.id === resource.id) ?? resource;
     const manualPlans = sourcePolicyPlans(state, applied, null, "create");
     event("success", `已添加源地址出口映射 ${applied.label}`);
-    return { status: 201, payload: { resource: applied, inventory: state, deployment, manualPlans, events } };
+    return { status: 201, payload: { resource: applied, inventory: state, deployment, manualPlans, events: events() } };
   },
 
   async updateSourcePolicy(resourceId, body) {
@@ -770,7 +783,7 @@ export function createResourceApplicationService(
     const applied = state.sourcePolicies.find((item) => item.id === resource.id) ?? resource;
     const manualPlans = sourcePolicyPlans(state, applied, previous, "update");
     event("success", `已更新源地址出口映射 ${applied.label}`);
-    return { status: 200, payload: { resource: applied, inventory: state, deployment, manualPlans, events } };
+    return { status: 200, payload: { resource: applied, inventory: state, deployment, manualPlans, events: events() } };
   },
 
   async deleteSourcePolicy(resourceId) {
@@ -791,7 +804,7 @@ export function createResourceApplicationService(
     });
     const manualPlans = sourcePolicyPlans(state, null, resource, "delete");
     event("warning", `已删除源地址出口映射 ${resource.label}；请完成待办的系统规则清理`);
-    return { status: 200, payload: { inventory: state, deployment, manualPlans, events } };
+    return { status: 200, payload: { inventory: state, deployment, manualPlans, events: events() } };
   },
 
   async createPolicy(collection, body) {
@@ -806,7 +819,7 @@ export function createResourceApplicationService(
       return resource;
     }, (_result, inventory) => resourceNodeIds(inventory, resource));
     event("success", `已添加 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 201, payload: { resource, inventory: state, deployment, events } };
+    return { status: 201, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async movePolicy(collection, resourceId, direction) {
@@ -833,7 +846,7 @@ export function createResourceApplicationService(
       return moved;
     }, () => affectedNodeIds);
     event("success", `已调整 ${kind} ${resource.name} 的声明顺序`, resourceSingleNodeId(resource));
-    return { status: 200, payload: { resource, inventory: state, deployment, events } };
+    return { status: 200, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async updatePolicy(collection, resourceId, body) {
@@ -861,7 +874,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 200, payload: { resource, inventory: state, deployment, events } };
+    return { status: 200, payload: { resource, inventory: state, deployment, events: events() } };
   },
 
   async deletePolicy(collection, resourceId) {
@@ -910,7 +923,7 @@ export function createResourceApplicationService(
       return target;
     }, () => affectedNodeIds);
     event("success", `已删除 ${kind} ${resource.name}`, resourceSingleNodeId(resource));
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async resolveIrrDefine(body) {
@@ -950,7 +963,9 @@ export function createResourceApplicationService(
     }
     const now = new Date();
     let changed = false;
-    const { state, result: resource, deployment } = await mutateAndApply((draft) => {
+    let deployed: Awaited<ReturnType<typeof mutateAndApply>>;
+    try {
+      deployed = await mutateAndApply((draft) => {
       const current = draft.defines.find((item) => item.id === resourceId);
       if (!current || current.type === "expression" || current.entrySource.kind !== "irr-as-set") fail(409, "Define 在同步期间已被修改");
       if (sourceSignature(current.entrySource) !== signature) fail(409, "AS-SET 来源在同步期间已被修改，请重新同步");
@@ -965,9 +980,27 @@ export function createResourceApplicationService(
         contentHash: resolved.contentHash,
       };
       return current;
-    }, (_result, inventory) => changed ? resourceNodeIds(inventory, define) : []);
-    if (changed) event("success", `AS-SET Define ${resource?.name ?? define.name} 已更新为 ${resolved.entries.length} 条前缀`, resourceSingleNodeId(define));
-    return { status: 200, payload: { resource, inventory: state, deployment, changed, events } };
+      }, (_result, inventory) => changed ? resourceNodeIds(inventory, define) : []);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if ((error as { code?: string }).code !== "DEPLOYMENT_LOCKED") {
+        try {
+          await mutateAndApply((draft) => {
+            const current = draft.defines.find((item) => item.id === resourceId);
+            if (!current || current.type === "expression" || current.entrySource.kind !== "irr-as-set") return null;
+            const failedAt = new Date();
+            const retryMs = Math.min(current.entrySource.refreshIntervalSeconds * 1000, 15 * 60 * 1000);
+            current.sync = { ...current.sync, status: "error", lastAttemptAt: failedAt.toISOString(), nextRefreshAt: new Date(failedAt.getTime() + retryMs).toISOString(), error: `部署失败：${message}`.slice(0, 2048) };
+            return null;
+          }, []);
+        } catch (stateError) { logger.error("AS-SET 同步失败状态写入失败", { error: String(stateError) }); }
+      }
+      event("error", `AS-SET Define ${define.name} 部署失败，继续使用上一版前缀：${message}`, resourceSingleNodeId(define));
+      throw error;
+    }
+    const { state, result: resource, deployment } = deployed;
+    if (changed) event("success", `AS-SET Define ${define.name} 已更新为 ${resolved.entries.length} 条前缀`, resourceSingleNodeId(define));
+    return { status: 200, payload: { resource, inventory: state, deployment, changed, events: events() } };
   },
 
   async listIbgpDomains() {
@@ -1040,7 +1073,7 @@ export function createResourceApplicationService(
       return domain;
     }, () => domainNodeIds(domain));
     event("success", `已创建 iBGP 域 ${domain.name}`);
-    return { status: 201, payload: { domain: state.ibgpDomains.find((item) => item.id === domain.id), inventory: state, deployment, events } };
+    return { status: 201, payload: { domain: state.ibgpDomains.find((item) => item.id === domain.id), inventory: state, deployment, events: events() } };
   },
 
   async updateIbgpDomain(domainId, body) {
@@ -1064,7 +1097,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affectedNodeIds);
     event("success", `已更新 iBGP 域 ${domain.name}`);
-    return { status: 200, payload: { domain, inventory: state, deployment, events } };
+    return { status: 200, payload: { domain, inventory: state, deployment, events: events() } };
   },
 
   async deleteIbgpDomain(domainId) {
@@ -1081,7 +1114,7 @@ export function createResourceApplicationService(
       return target;
     }, () => affectedNodeIds);
     event("success", `已删除 iBGP 域 ${domain.name}`);
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async updateIbgpDomainLayout(domainId, body) {
@@ -1140,7 +1173,7 @@ export function createResourceApplicationService(
       return domain;
     }, () => ospfDomainNodeIds(domain));
     event("success", `已创建 OSPF 域 ${domain.name}`);
-    return { status: 201, payload: { domain: state.ospfDomains.find((item) => item.id === domain.id), inventory: state, deployment, events } };
+    return { status: 201, payload: { domain: state.ospfDomains.find((item) => item.id === domain.id), inventory: state, deployment, events: events() } };
   },
 
   async updateOspfDomain(domainId, body) {
@@ -1157,7 +1190,7 @@ export function createResourceApplicationService(
       return updated;
     }, () => affected);
     event("success", `已更新 OSPF 域 ${domain.name}`);
-    return { status: 200, payload: { domain, inventory: state, deployment, events } };
+    return { status: 200, payload: { domain, inventory: state, deployment, events: events() } };
   },
 
   async deleteOspfDomain(domainId) {
@@ -1170,7 +1203,7 @@ export function createResourceApplicationService(
       affected = ospfDomainNodeIds(target); draft.ospfDomains.splice(index, 1); return target;
     }, () => affected);
     event("success", `已删除 OSPF 域 ${domain.name}`);
-    return { status: 200, payload: { inventory: state, deployment, events } };
+    return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },
 
   async updateOspfDomainLayout(domainId, body) {

@@ -66,6 +66,10 @@ const dashboard = {
   established: false, config: "", events: [],
 };
 
+// This is an intentionally long soak test. Keep it out of the normal release
+// gate; run it explicitly with BIRDBOX_RUN_LONG_E2E=1.
+test.skip(process.env.BIRDBOX_RUN_LONG_E2E !== "1", "一小时压力测试仅在显式设置 BIRDBOX_RUN_LONG_E2E=1 时运行");
+
 test("OSPF 拓扑单会话一小时压力循环", async ({ page }, testInfo) => {
   // The loop intentionally runs for one hour; override Playwright's 45s default.
   test.setTimeout(4_000_000);
@@ -79,7 +83,7 @@ test("OSPF 拓扑单会话一小时压力循环", async ({ page }, testInfo) => 
   await page.goto("/");
   const title = page.locator("#authTitle");
   await expect(title).toHaveText(/^(设置管理密码|登录 Birdbox)$/);
-  const password = "playwright-pressure-password";
+  const password = "playwright-admin-password";
   await page.locator("#authPassword").fill(password);
   if ((await title.textContent()) === "设置管理密码") await page.locator("#authConfirmation").fill(password);
   await page.locator("#authSubmitButton").click();

@@ -20,6 +20,7 @@ import { resolveApplicationRoot } from "./application-root.js";
 import { InventoryStore } from "./store.js";
 import { configureAgentBroker } from "./node-executor.js";
 import { errorContext, logger } from "./logger.js";
+import { createDeploymentRecoveryRunner } from "./deployment-recovery.js";
 
 function normalizeListenHost(value: unknown): string {
   const normalized = String(value ?? "").trim();
@@ -40,6 +41,26 @@ function normalizeEnvironmentBoolean(value: unknown, label: string): boolean | n
   if (value === "true") return true;
   if (value === "false") return false;
   throw new Error(`${label} 必须是 true 或 false`);
+}
+
+function normalizeTrustProxy(value: unknown): boolean | string | number | undefined {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return undefined;
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  return normalized;
+}
+
+function normalizePublicUrl(value: unknown): string {
+  let url: URL;
+  try { url = new URL(String(value ?? "")); } catch { throw new Error("BIRDBOX_PUBLIC_URL 必须是完整的 http(s):// URL"); }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("BIRDBOX_PUBLIC_URL 只支持 http 或 https");
+  if (url.username || url.password || url.search || url.hash) throw new Error("BIRDBOX_PUBLIC_URL 不能包含凭据、查询或片段");
+  if (["0.0.0.0", "[::]"].includes(url.hostname)) throw new Error("BIRDBOX_PUBLIC_URL 不能使用监听地址 0.0.0.0/::");
+  if (/^(127\.|localhost$|\[::1\]$)/.test(url.hostname)) logger.warn("BIRDBOX_PUBLIC_URL 指向回环地址，远端 Agent 将无法连接", { publicUrl: url.origin });
+  if (url.protocol === "http:" && !/^(127\.|localhost$|\[::1\]$)/.test(url.hostname)) logger.warn("BIRDBOX_PUBLIC_URL 使用明文 HTTP，生产环境请使用 HTTPS", { publicUrl: url.origin });
+  return url.toString().replace(/\/$/, "");
 }
 
 function normalizeShutdownTimeout(value: unknown): number {
@@ -66,7 +87,8 @@ const dataDirectory = process.env.BIRDBOX_DATA_DIR ?? path.join(rootDirectory, "
 const nodesPath = process.env.BIRDBOX_NODES_FILE ?? path.join(rootDirectory, "config", "nodes.json");
 const host = normalizeListenHost(process.env.BIRDBOX_HOST ?? "0.0.0.0");
 const port = normalizeListenPort(process.env.BIRDBOX_PORT ?? 3000);
-const publicUrl = String(process.env.BIRDBOX_PUBLIC_URL ?? `http://${host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host}:${port}`).replace(/\/$/, "");
+const publicUrl = normalizePublicUrl(process.env.BIRDBOX_PUBLIC_URL ?? `http://${host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host}:${port}`);
+const trustProxy = normalizeTrustProxy(process.env.BIRDBOX_TRUST_PROXY);
 const secureCookieSetting = normalizeEnvironmentBoolean(
   process.env.BIRDBOX_SECURE_COOKIE,
   "BIRDBOX_SECURE_COOKIE",
@@ -98,12 +120,18 @@ let activeDeployment: Promise<unknown> | null = null;
 const nodeOperationLocks = new Set<string>();
 let shuttingDown = false;
 let deploymentService: DeploymentService;
+let recoveryState: "idle" | "pending" | "failed" = "idle";
 
 async function withDeploymentLock<Result>(
   operation: () => Promise<Result> | Result,
   { allowPendingJournal = false }: { allowPendingJournal?: boolean } = {},
 ): Promise<Result> {
   if (shuttingDown) fail(503, "服务正在关闭，暂不接受新的部署");
+  if (!allowPendingJournal && recoveryState !== "idle") {
+    fail(503, recoveryState === "failed"
+      ? "未完成部署恢复失败，系统正在重试；恢复完成前暂不接受变更"
+      : "存在尚未完成的部署恢复任务，恢复完成前暂不接受变更");
+  }
   if (deploymentLocked) fail(409, "另一个部署正在进行");
   deploymentLocked = true;
   const deployment = database.withLock("deployment", async () => {
@@ -204,7 +232,16 @@ const recoveryNodes = pendingDeployment
   ? [...pendingDeployment.forwardTargets, ...pendingDeployment.rollbackTargets].map((target) => target.node)
   : [];
 await controllerSshIdentity.initialize(recoveryNodes);
-await deploymentService.recover();
+const recoveryRunner = createDeploymentRecoveryRunner({
+  pending: Boolean(pendingDeployment),
+  recover: () => deploymentService.recover(),
+  onStateChange: (state) => { recoveryState = state; },
+  onFailure: (error, retryInMs) => {
+    logger.error("未完成部署恢复失败，稍后重试", { retryInMs, ...errorContext(error) });
+    addEvent("error", `未完成部署恢复失败：${error instanceof Error ? error.message : String(error)}`);
+  },
+});
+recoveryState = recoveryRunner.state;
 
 const app = await createHttpApplication({
   publicDirectory,
@@ -213,7 +250,8 @@ const app = await createHttpApplication({
   store,
   secureCookieSetting,
   ping: () => database.ping(),
-  isDeploymentLocked: () => deploymentLocked,
+  isDeploymentLocked: () => deploymentLocked || recoveryState !== "idle",
+  recoveryState: () => recoveryState,
   loadDashboard: async (nodeId, peerId) => dashboardService.load(await store.read(), nodeId, peerId),
   withDeploymentLock,
   withNodeOperationLock,
@@ -221,16 +259,29 @@ const app = await createHttpApplication({
   addEvent,
   getEvents,
   agentBroker,
+  database,
+  metricsToken: process.env.BIRDBOX_METRICS_TOKEN?.trim() || null,
   agentBinaryPath: process.env.BIRDBOX_AGENT_BINARY_PATH ?? (process.env.NODE_ENV === "production" ? "/usr/local/lib/birdbox-agent" : path.join(rootDirectory, "agent", "bin", "birdbox-agent")),
+  agentPublicUrl: publicUrl,
+  trustProxy,
 });
 
 await app.listen({ port, host });
 logger.info("Birdbox 服务已启动", { host, port, version: appVersion });
 
+if (pendingDeployment) void recoveryRunner.run();
+else await recoveryRunner.run();
+
 async function runIrrSchedule(): Promise<void> {
   if (irrSchedulerStopped || activeIrrSchedule) return;
   activeIrrSchedule = (async () => {
-    const inventory = await store.read();
+    let inventory;
+    try {
+      inventory = await store.read();
+    } catch (error) {
+      logger.error("AS-SET 调度读取库存失败，等待下一个周期", errorContext(error));
+      return;
+    }
     const now = Date.now();
     for (const define of inventory.defines) {
       if (irrSchedulerStopped) break;
@@ -248,13 +299,19 @@ async function runIrrSchedule(): Promise<void> {
   })().finally(() => { activeIrrSchedule = null; });
   await activeIrrSchedule;
 }
-const irrScheduleTimer = setInterval(() => void runIrrSchedule(), irrSchedulerIntervalMs);
+const scheduleIrr = (): void => { void runIrrSchedule().catch((error) => logger.error("AS-SET 调度异常", errorContext(error))); };
+const irrScheduleTimer = setInterval(scheduleIrr, irrSchedulerIntervalMs);
 irrScheduleTimer.unref();
-void runIrrSchedule();
+scheduleIrr();
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("未处理的 Promise 拒绝", errorContext(reason));
+});
 
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  recoveryRunner.stop();
   irrSchedulerStopped = true;
   clearInterval(irrScheduleTimer);
   logger.info("Birdbox 服务开始关闭", { signal });

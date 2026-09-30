@@ -29,7 +29,9 @@ export default defineConfig({
       },
       formats: ["es"],
       fileName: (_format, entryName) => `${entryName}.js`,
+      cssFileName: "birdbox-demo",
     },
+    cssCodeSplit: false,
     rollupOptions: {
       external: ["pinyin-pro"],
       output: {

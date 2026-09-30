@@ -28,15 +28,8 @@ const counts = computed(() => {
 
 function arch(value: string | null): string {
   const key = String(value ?? "").toLowerCase();
-  const mapped: Record<string, string> = { x64: "amd64", x86_64: "amd64", amd64: "amd64", aarch64: "arm64", arm64: "arm64", armv7l: "arm", arm: "arm", mips: "mips", mipsel: "mipsle", mipsle: "mipsle", mips64: "mips64", mips64le: "mips64", riscv64: "riscv64" };
-  return mapped[key] ?? "amd64";
-}
-
-async function checksum(architecture: string): Promise<string> {
-  const response = await fetch(`/api/agent/releases/latest/checksum?arch=${encodeURIComponent(architecture)}`, { credentials: "same-origin", cache: "no-store" });
-  const value = (await response.text()).trim();
-  if (!response.ok || !/^[0-9a-f]{64}$/i.test(value)) throw new Error(`控制器没有提供 ${architecture} 架构的 Agent 发布包`);
-  return value;
+  const mapped: Record<string, string> = { x64: "amd64", x86_64: "amd64", amd64: "amd64", aarch64: "arm64", arm64: "arm64", armv7l: "arm", armv7: "arm", arm: "arm", armv6l: "armv6", armv6: "armv6", armv5l: "armv5", armv5: "armv5", mips: "mips", mipsel: "mipsle", mipsle: "mipsle", mips64: "mips64", mips64el: "mips64le", mips64le: "mips64le", riscv64: "riscv64" };
+  return mapped[key] ?? "";
 }
 
 function stopPolling(): void {
@@ -67,15 +60,13 @@ async function start(): Promise<void> {
   try {
     await loadStatuses();
     const agentMap = new Map(statuses.value.map((item) => [item.nodeId, item]));
-    const url = `${window.location.origin}/api/agent/releases/latest/download`;
     const nodes = [] as Array<{ nodeId: string; params: Record<string, unknown> }>;
-    const checksums = new Map<string, string>();
     for (const node of selectedNodes.value) {
       const status = agentMap.get(node.id);
       if (status?.connected) {
         const architecture = arch(status.architecture);
-        if (!checksums.has(architecture)) checksums.set(architecture, await checksum(architecture));
-        nodes.push({ nodeId: node.id, params: { url: `${url}?arch=${encodeURIComponent(architecture)}`, sha256: checksums.get(architecture), targetPath: "/usr/local/bin/birdbox-agent", service: "birdbox-agent", version: __BIRDBOX_VERSION__ } });
+        if (!architecture) throw new Error(`${node.name} 上报的架构不受支持，请先重新安装 Agent`);
+        nodes.push({ nodeId: node.id, params: {} });
       } else {
         nodes.push({ nodeId: node.id, params: {} });
       }
@@ -145,10 +136,10 @@ onBeforeUnmount(() => { stopPolling(); window.removeEventListener("birdbox:agent
 </template>
 
 <style scoped>
-.batch-upgrade-dialog { max-width: 620px; width: min(calc(100vw - 32px), 620px); }
+.batch-upgrade-dialog { max-width: 620px; width: min(calc(100vw - 32px), 620px); padding: 22px; }
 .batch-upgrade-list { display: grid; gap: 6px; margin: 16px 0; max-height: 320px; overflow: auto; }
-.batch-upgrade-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--border-color, #d7dce2); border-radius: 6px; }
-.batch-upgrade-row small { color: var(--text-muted, #68707a); }
+.batch-upgrade-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--line, #d7dce2); border-radius: 6px; }
+.batch-upgrade-row small { color: var(--muted, #68707a); }
 .batch-upgrade-summary { display: flex; gap: 16px; margin: 14px 0; font-variant-numeric: tabular-nums; }
 .batch-state-success, .ready { color: #18794e; }
 .batch-state-failed { color: #b42318; }

@@ -84,6 +84,23 @@ test("Agent broker removes expired queued tasks before admitting new work", asyn
   assert.equal((await expired).code, "AGENT_TIMEOUT");
 });
 
+test("Agent broker removes an aborted long-poll waiter and requeues the next task", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const token = await broker.issueToken("abort_agent");
+  await broker.register({ nodeId: "abort_agent", token, agentVersion: "test", protocolVersion: 1 });
+  const controller = new AbortController();
+  const waiter = broker.poll("abort_agent", token, 5000, controller.signal);
+  controller.abort();
+  assert.equal(await waiter, null);
+
+  const pending = broker.dispatch("abort_agent", "bird.validate", { config: "next" }, 2000);
+  const task = await broker.poll("abort_agent", token, 1000);
+  assert.equal(task?.method, "bird.validate");
+  broker.result({ taskId: task.taskId, nodeId: task.nodeId, ok: true, stdout: "", stderr: "" }, token);
+  assert.equal((await pending).ok, true);
+});
+
 test("Agent broker runs batch upgrades strictly one node at a time", async () => {
   const broker = new AgentBroker({ database: new MemoryDatabase() });
   await broker.initialize();

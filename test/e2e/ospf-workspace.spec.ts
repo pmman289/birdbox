@@ -99,6 +99,13 @@ async function authenticate(page: import("@playwright/test").Page): Promise<void
   await expect(page.locator("#appMain")).toBeVisible();
 }
 
+async function openOspfWorkspace(page: import("@playwright/test").Page): Promise<void> {
+  await page.locator("#ospfWorkspaceTab").click();
+  const dialog = page.locator("#ospfWarningDialog");
+  if (await dialog.isVisible()) await dialog.getByRole("button", { name: "我已了解风险，继续" }).click();
+  await expect(page.locator("#ospfWorkspace")).toBeVisible();
+}
+
 test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失败恢复", async ({ page }, testInfo) => {
   const pageErrors: string[] = [];
   const requests: string[] = [];
@@ -118,8 +125,7 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ interfaces: interfaces[id] ?? [] }) });
   });
   await authenticate(page);
-  await page.locator("#ospfWorkspaceTab").click();
-  await expect(page.locator("#ospfWorkspace")).toBeVisible();
+  await openOspfWorkspace(page);
   await expect(page.locator(".ospf-topology-node")).toHaveCount(4);
   await expect(page.locator(".ospf-link")).toHaveCount(2);
   await expect(page.locator(".ospf-topology-canvas")).not.toHaveCSS("display", "none");
@@ -215,7 +221,7 @@ test("OSPF 失败保存后恢复交互并可再次操作", async ({ page }) => {
   await page.route("**/api/ospf/*/runtime", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runtime) }));
   await page.route("**/api/nodes/*/interfaces", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ interfaces: ["bbtest23", "bbtest24"] }) }));
   await authenticate(page);
-  await page.locator("#ospfWorkspaceTab").click();
+  await openOspfWorkspace(page);
   await page.getByRole("button", { name: "保存并应用" }).click();
   await expect(page.locator("#toastRegion .toast")).toContainText("OSPF 链路 link_ab 接口不合法");
   await expect(page.getByRole("button", { name: "保存并应用" })).toBeEnabled();
@@ -272,7 +278,7 @@ test("OSPF 20 节点 100 链路拓扑保持可交互", async ({ page }, testInfo
   await page.route("**/api/nodes/*/interfaces", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ interfaces: ["eth0", "large0"] }) }));
   await authenticate(page);
   const started = Date.now();
-  await page.locator("#ospfWorkspaceTab").click();
+  await openOspfWorkspace(page);
   await expect(page.locator("#ospfWorkspace")).toBeVisible();
   await expect(page.locator(".ospf-topology-node")).toHaveCount(20);
   await expect(page.locator(".ospf-link")).toHaveCount(100);
@@ -304,11 +310,45 @@ test("OSPF 节点运行态错误在高缩放下仍可见且页面可继续操作
   // document overflow even though a real browser reflows it.
   await page.setViewportSize({ width: 640, height: 900 });
   await authenticate(page);
-  await page.locator("#ospfWorkspaceTab").click();
+  await openOspfWorkspace(page);
   await expect(page.locator("#ospfWorkspace")).toBeVisible();
   await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Beta" }).click();
   await expect(page.locator(".ospf-runtime")).toContainText("节点 OSPF 运行态检查超时");
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "预检配置" })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
+test("OSPF 320/375/390/430px 移动布局不重叠且关键操作可见", async ({ page }, testInfo) => {
+  await page.route("**/api/dashboard*", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dashboardPayload()) }));
+  await page.route("**/api/ospf", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ domains: [domain], layout: domain.layout, inventory }) }));
+  await page.route("**/api/ospf/*/runtime", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runtime) }));
+  await page.route("**/api/nodes/*/interfaces", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ interfaces: ["bbtest23", "bbtest24", "eth0"] }) }));
+  await page.setViewportSize({ width: 320, height: 844 });
+  await authenticate(page);
+  await openOspfWorkspace(page);
+  for (const width of [320, 375, 390, 430]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.locator("#ospfWorkspace")).toBeVisible();
+    const layout = await page.evaluate(() => {
+      const viewport = document.documentElement.clientWidth;
+      const selectors = [".ospf-actions > button", ".ospf-topology-actions > button", ".ospf-topology-zoom"];
+      const boxes = selectors.flatMap((selector) => [...document.querySelectorAll<HTMLElement>(selector)].map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { selector, width: rect.width, height: rect.height, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+      }));
+      return { viewport, boxes, scrollWidth: document.documentElement.scrollWidth };
+    });
+    expect(layout.scrollWidth).toBeLessThanOrEqual(width);
+    for (const box of layout.boxes) {
+      expect(box.width).toBeGreaterThan(0);
+      expect(box.height).toBeGreaterThan(0);
+      expect(box.left).toBeGreaterThanOrEqual(-1);
+      expect(box.right).toBeLessThanOrEqual(width + 1);
+    }
+    await expect(page.getByRole("button", { name: "预检配置" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "保存并应用" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "查询路径" })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath(`ospf-mobile-${width}.png`), fullPage: true });
+  }
 });

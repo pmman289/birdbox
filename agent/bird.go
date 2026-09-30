@@ -159,6 +159,92 @@ func stripBirdComments(source string) string {
 	return out.String()
 }
 
+// replaceActiveBirdInclude replaces only an active BIRD include directive.
+// A plain byte search is unsafe here because generated.conf may be mentioned
+// in a commented example; the preflight must not treat that as an include.
+func replaceActiveBirdInclude(source []byte, target, replacement string) ([]byte, bool) {
+	type span struct{ start, end int }
+	var matches []span
+	isWord := func(value byte) bool {
+		return value == '_' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+	}
+	for i := 0; i < len(source); {
+		if source[i] == '#' || (source[i] == '/' && i+1 < len(source) && source[i+1] == '/') {
+			for i < len(source) && source[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if source[i] == '/' && i+1 < len(source) && source[i+1] == '*' {
+			i += 2
+			for i+1 < len(source) && !(source[i] == '*' && source[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(source) {
+				i += 2
+			}
+			continue
+		}
+		if source[i] == '"' {
+			i++
+			for i < len(source) {
+				if source[i] == '\\' {
+					i += 2
+					continue
+				}
+				if source[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if i+7 <= len(source) && string(source[i:i+7]) == "include" &&
+			(i == 0 || !isWord(source[i-1])) && (i+7 == len(source) || !isWord(source[i+7])) {
+			j := i + 7
+			for j < len(source) && (source[j] == ' ' || source[j] == '\t' || source[j] == '\r' || source[j] == '\n') {
+				j++
+			}
+			if j < len(source) && source[j] == '"' {
+				quoteStart := j
+				j++
+				for j < len(source) {
+					if source[j] == '\\' {
+						j += 2
+						continue
+					}
+					if source[j] == '"' {
+						break
+					}
+					j++
+				}
+				if j < len(source) {
+					value := string(source[quoteStart+1 : j])
+					if value == target {
+						matches = append(matches, span{start: quoteStart + 1, end: j})
+					}
+					i = j + 1
+					continue
+				}
+			}
+		}
+		i++
+	}
+	if len(matches) == 0 {
+		return source, false
+	}
+	out := make([]byte, 0, len(source)+len(matches)*(len(replacement)-len(target)))
+	last := 0
+	for _, match := range matches {
+		out = append(out, source[last:match.start]...)
+		out = append(out, replacement...)
+		last = match.end
+	}
+	out = append(out, source[last:]...)
+	return out, true
+}
+
 func requireActiveDeviceProtocol(mainConfig string) error {
 	data, err := os.ReadFile(mainConfig)
 	if err != nil {
@@ -227,6 +313,18 @@ func birdPaths(params map[string]any) (mode, mainPath, generatedPath, socketPath
 	if err != nil || !absoluteSafePath(baseDirectory) {
 		return "", "", "", "", "", fmt.Errorf("invalid baseDirectory")
 	}
+	for _, item := range [][2]string{
+		{"BIRDBOX_ALLOWED_MAIN_CONFIG", mainPath},
+		{"BIRDBOX_ALLOWED_GENERATED_CONFIG", generatedPath},
+		{"BIRDBOX_ALLOWED_SOCKET", socketPath},
+	} {
+		if allowed := strings.TrimSpace(os.Getenv(item[0])); allowed != "" && filepath.Clean(allowed) != filepath.Clean(item[1]) {
+			return "", "", "", "", "", fmt.Errorf("%s is pinned to %s by agent.env", item[0], allowed)
+		}
+	}
+	if allowed := strings.TrimSpace(os.Getenv("BIRDBOX_ALLOWED_GENERATED_CONFIG")); allowed != "" && mode == "include" && filepath.Clean(baseDirectory) != filepath.Dir(filepath.Clean(allowed)) {
+		return "", "", "", "", "", fmt.Errorf("baseDirectory must be %s", filepath.Dir(filepath.Clean(allowed)))
+	}
 	return
 }
 
@@ -243,9 +341,16 @@ func commandBinary(name string) string {
 }
 
 func runCommand(parent context.Context, executable string, args []string, timeout time.Duration, max int64) commandResult {
+	return runCommandInDir(parent, executable, args, timeout, max, "")
+}
+
+func runCommandInDir(parent context.Context, executable string, args []string, timeout time.Duration, max int64, directory string) commandResult {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, commandBinary(executable), args...)
+	if directory != "" {
+		cmd.Dir = directory
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &limitedWriter{target: &stdout, remaining: max}
 	cmd.Stderr = &limitedWriter{target: &stderr, remaining: max}
@@ -345,7 +450,16 @@ func replaceSymlink(path, target string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	return nil
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode, gid int) error {
@@ -364,6 +478,9 @@ func atomicWrite(path string, data []byte, mode os.FileMode, gid int) error {
 	if err = tmp.Chmod(mode); err == nil {
 		_, err = tmp.Write(data)
 	}
+	if err == nil {
+		err = tmp.Sync()
+	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
@@ -373,7 +490,10 @@ func atomicWrite(path string, data []byte, mode os.FileMode, gid int) error {
 	if gid >= 0 {
 		_ = os.Chown(tmpPath, 0, gid)
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 func socketGID(socket string) int {
@@ -381,13 +501,13 @@ func socketGID(socket string) int {
 	if err := syscall.Stat(socket, &stat); err == nil {
 		return int(stat.Gid)
 	}
-	// OpenWrt and minimal images may have no getent.  The numeric fallback is
-	// only used when the socket is not available yet.
-	for _, line := range []string{"bird:x:999:", "bird:x:100:"} {
-		parts := strings.Split(line, ":")
-		if len(parts) > 2 {
-			if gid, err := strconv.Atoi(parts[2]); err == nil {
-				return gid
+	if data, err := os.ReadFile("/etc/group"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			parts := strings.Split(line, ":")
+			if len(parts) > 2 && parts[0] == "bird" {
+				if gid, err := strconv.Atoi(parts[2]); err == nil && gid > 0 {
+					return gid
+				}
 			}
 		}
 	}
@@ -491,6 +611,60 @@ func discoverResourceCandidates(base string) []string {
 	return paths
 }
 
+func resolvedTarget(path string) string {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return ""
+	}
+	return abs
+}
+
+func pruneVersions(dir, prefix string, keep map[string]bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) || !(strings.HasSuffix(name, ".conf") || strings.HasSuffix(name, ".conf.tmp")) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if keep[full] {
+			continue
+		}
+		if info, err := os.Lstat(full); err == nil && info.Mode().IsRegular() {
+			_ = os.Remove(full)
+		}
+	}
+}
+
+func gcBirdVersions(generated, base string) {
+	mainKeep := map[string]bool{}
+	for _, path := range []string{generated, generated + ".candidate", generated + ".rollback"} {
+		if target := resolvedTarget(path); target != "" {
+			mainKeep[target] = true
+		}
+	}
+	pruneVersions(filepath.Join(filepath.Dir(generated), "versions"), filepath.Base(generated)+".", mainKeep)
+	resourceDir := filepath.Join(base, "resources")
+	resourceKeep := map[string]bool{}
+	if entries, err := os.ReadDir(resourceDir); err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "define_") {
+				if target := resolvedTarget(filepath.Join(resourceDir, entry.Name())); target != "" {
+					resourceKeep[target] = true
+				}
+			}
+		}
+	}
+	pruneVersions(filepath.Join(resourceDir, "versions"), "define_", resourceKeep)
+}
+
 func switchResourceCandidates(bundle birdBundle, base string) (map[string]pathState, error) {
 	paths := resourceActivePaths(bundle, base)
 	if len(bundle.Resources) == 0 && len(bundle.RemovedResources) == 0 {
@@ -535,6 +709,75 @@ func runBirdCheck(parent context.Context, mode, generated, socket string) comman
 	return runCommand(parent, "bird", []string{"-p", "-c", generated}, 120*time.Second, 8*1024*1024)
 }
 
+// prepareIncludeValidationConfig creates an isolated include graph for a
+// preflight. The active generated/resource links are deliberately untouched;
+// only apply is allowed to switch them and reload the running daemon.
+func prepareIncludeValidationConfig(mainPath, generated string, bundle birdBundle, base string, gid int) (string, string, string, error) {
+	tempDir, err := os.MkdirTemp("", "birdbox-check-")
+	if err != nil {
+		return "", "", "", err
+	}
+	cleanup := func() { _ = os.RemoveAll(tempDir) }
+	candidate, err := filepath.EvalSymlinks(generated + ".candidate")
+	if err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	generatedData, err := os.ReadFile(candidate)
+	if err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	for _, resource := range bundle.Resources {
+		active := filepath.Join(base, "resources", resource.RelativePath)
+		candidateResource, resolveErr := filepath.EvalSymlinks(active + ".candidate")
+		if resolveErr != nil {
+			cleanup()
+			return "", "", "", resolveErr
+		}
+		generatedData = bytes.ReplaceAll(generatedData, []byte(active), []byte(candidateResource))
+	}
+	tempGenerated := filepath.Join(tempDir, "generated.conf")
+	if err = os.WriteFile(tempGenerated, generatedData, 0640); err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	mainData, err := os.ReadFile(mainPath)
+	if err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	var replaced bool
+	mainData, replaced = replaceActiveBirdInclude(mainData, generated, tempGenerated)
+	if !replaced {
+		cleanup()
+		return "", "", "", fmt.Errorf("BIRD 主配置缺少活动 Include：%s", generated)
+	}
+	tempMain := filepath.Join(tempDir, "main.conf")
+	if err = os.WriteFile(tempMain, mainData, 0640); err != nil {
+		cleanup()
+		return "", "", "", err
+	}
+	if gid >= 0 {
+		_ = os.Chown(tempGenerated, 0, gid)
+		_ = os.Chown(tempMain, 0, gid)
+	}
+	return tempMain, tempGenerated, tempDir, nil
+}
+
+func runIncludeBirdCheckWith(parent context.Context, executable, mainPath, generated string, bundle birdBundle, base string, gid int) commandResult {
+	tempMain, _, tempDir, err := prepareIncludeValidationConfig(mainPath, generated, bundle, base, gid)
+	if err != nil {
+		return commandResult{stderr: err.Error(), code: "STAGE_FAILED", ok: false}
+	}
+	defer os.RemoveAll(tempDir)
+	return runCommandInDir(parent, executable, []string{"-p", "-c", tempMain}, 120*time.Second, 8*1024*1024, filepath.Dir(mainPath))
+}
+
+func runIncludeBirdCheck(parent context.Context, mainPath, generated string, bundle birdBundle, base string, gid int) commandResult {
+	return runIncludeBirdCheckWith(parent, "bird", mainPath, generated, bundle, base, gid)
+}
+
 func stageBirdTask(parent context.Context, params map[string]any, r result) result {
 	mode, main, generated, socket, base, err := birdPaths(params)
 	if err != nil {
@@ -556,33 +799,17 @@ func stageBirdTask(parent context.Context, params map[string]any, r result) resu
 	if err = stageResources(bundle, base, gid); err == nil {
 		_, err = stageMain(bundle, generated, mode, gid)
 	}
-	if err != nil {
-		r.Stderr, r.Code = err.Error(), "STAGE_FAILED"
-		return r
+	if mode == "include" {
+		// Keep active/candidate/rollback targets, but remove stale content after
+		// every stage so repeated previews cannot fill small OpenWrt overlays.
+		gcBirdVersions(generated, base)
 	}
-	resourceSnapshot, err := switchResourceCandidates(bundle, base)
-	if err != nil {
-		r.Stderr, r.Code = err.Error(), "STAGE_FAILED"
-		return r
-	}
-	defer restoreSnapshot(resourceSnapshot, gid)
-	state, err := capturePath(generated)
 	if err != nil {
 		r.Stderr, r.Code = err.Error(), "STAGE_FAILED"
 		return r
 	}
 	if mode == "include" {
-		candidate, readErr := os.Readlink(generated + ".candidate")
-		if readErr != nil {
-			r.Stderr, r.Code = readErr.Error(), "STAGE_FAILED"
-			return r
-		}
-		if err = replaceSymlink(generated, candidate); err != nil {
-			r.Stderr, r.Code = err.Error(), "STAGE_FAILED"
-			return r
-		}
-		check := runBirdCheck(parent, mode, generated, socket)
-		_ = restorePath(generated, state, gid)
+		check := runIncludeBirdCheck(parent, main, generated, bundle, base, gid)
 		r.Stdout, r.Stderr, r.OK, r.Code = check.stdout, check.stderr, check.ok, check.code
 		return r
 	} else {
@@ -629,9 +856,6 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 		}
 		snapshot[active] = state
 	}
-	defer func() {
-		_ = snapshot
-	}()
 	if mode == "include" {
 		candidate, readErr := os.Readlink(generated + ".candidate")
 		if readErr != nil {
@@ -639,14 +863,24 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 			return r
 		}
 		rollbackPath := generated + ".rollback"
-		_ = removePath(rollbackPath)
+		if err = removePath(rollbackPath); err != nil {
+			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+			return r
+		}
 		switch genState.kind {
 		case "symlink":
-			_ = replaceSymlink(rollbackPath, genState.target)
+			err = replaceSymlink(rollbackPath, genState.target)
 		case "file":
-			_ = atomicWrite(rollbackPath, genState.data, genState.mode, gid)
+			err = atomicWrite(rollbackPath, genState.data, genState.mode, gid)
+		default:
+			err = nil
+		}
+		if err != nil {
+			r.Stderr, r.Code = "save generated rollback: "+err.Error(), "APPLY_FAILED"
+			return r
 		}
 		if err = replaceSymlink(generated, candidate); err != nil {
+			_ = restoreSnapshot(snapshot, gid)
 			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
 			return r
 		}
@@ -657,9 +891,17 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 			return r
 		}
 		if genState.kind == "file" {
-			_ = atomicWrite(generated+".rollback", genState.data, genState.mode, gid)
+			if err = atomicWrite(generated+".rollback", genState.data, genState.mode, gid); err != nil {
+				r.Stderr, r.Code = "save generated rollback: "+err.Error(), "APPLY_FAILED"
+				return r
+			}
 		}
 		if err = os.Rename(candidate, generated); err != nil {
+			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+			return r
+		}
+		if err = syncDirectory(filepath.Dir(generated)); err != nil {
+			_ = restoreSnapshot(snapshot, gid)
 			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
 			return r
 		}
@@ -667,8 +909,24 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 	for _, active := range resourcePaths {
 		candidate, readErr := os.Readlink(active + ".candidate")
 		if readErr == nil {
+			rollback := active + ".rollback"
+			if err = removePath(rollback); err != nil {
+				_ = restoreSnapshot(snapshot, gid)
+				r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+				return r
+			}
 			if state := snapshot[active]; state.kind == "symlink" {
-				_ = replaceSymlink(active+".rollback", state.target)
+				if err = replaceSymlink(rollback, state.target); err != nil {
+					_ = restoreSnapshot(snapshot, gid)
+					r.Stderr, r.Code = "save resource rollback: "+err.Error(), "APPLY_FAILED"
+					return r
+				}
+			} else if state := snapshot[active]; state.kind == "file" {
+				if err = atomicWrite(rollback, state.data, state.mode, gid); err != nil {
+					_ = restoreSnapshot(snapshot, gid)
+					r.Stderr, r.Code = "save resource rollback: "+err.Error(), "APPLY_FAILED"
+					return r
+				}
 			}
 			if err = replaceSymlink(active, candidate); err != nil {
 				_ = restoreSnapshot(snapshot, gid)
@@ -682,7 +940,31 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 		}
 	}
 	for _, removed := range bundle.RemovedResources {
-		_ = removePath(filepath.Join(base, "resources", removed))
+		active := filepath.Join(base, "resources", removed)
+		rollback := active + ".rollback"
+		if err = removePath(rollback); err != nil {
+			_ = restoreSnapshot(snapshot, gid)
+			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+			return r
+		}
+		if state := snapshot[active]; state.kind == "symlink" {
+			if err = replaceSymlink(rollback, state.target); err != nil {
+				_ = restoreSnapshot(snapshot, gid)
+				r.Stderr, r.Code = "save removed resource rollback: "+err.Error(), "APPLY_FAILED"
+				return r
+			}
+		} else if state := snapshot[active]; state.kind == "file" {
+			if err = atomicWrite(rollback, state.data, state.mode, gid); err != nil {
+				_ = restoreSnapshot(snapshot, gid)
+				r.Stderr, r.Code = "save removed resource rollback: "+err.Error(), "APPLY_FAILED"
+				return r
+			}
+		}
+		if err = removePath(active); err != nil {
+			_ = restoreSnapshot(snapshot, gid)
+			r.Stderr, r.Code = err.Error(), "APPLY_FAILED"
+			return r
+		}
 	}
 	check := runBirdCheck(parent, mode, generated, socket)
 	if check.ok {
@@ -700,7 +982,15 @@ func applyBirdTask(parent context.Context, params map[string]any, r result) resu
 			_ = runBirdc(parent, socket, "configure")
 		}
 	}
+	if mode == "include" {
+		// A failed configure must not leave a candidate pointer that a later
+		// recovery could mistake for the active configuration.
+		_ = removePath(generated + ".candidate")
+	}
 	r.Stdout, r.Stderr, r.OK, r.Code = check.stdout, check.stderr, check.ok, check.code
+	if check.ok && mode == "include" {
+		gcBirdVersions(generated, base)
+	}
 	return r
 }
 
@@ -780,6 +1070,9 @@ func rollbackBirdTask(parent context.Context, params map[string]any, r result) r
 		}
 	}
 	r.Stdout, r.Stderr, r.OK, r.Code = check.stdout, check.stderr, check.ok, check.code
+	if check.ok && mode == "include" {
+		gcBirdVersions(generated, base)
+	}
 	return r
 }
 

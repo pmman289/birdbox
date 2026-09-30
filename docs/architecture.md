@@ -37,6 +37,7 @@ src/store.ts               库存升级、CAS 和旧文件导入
 src/database.ts            MySQL 与内存数据库实现
 src/auth.ts                密码和多登录会话领域逻辑
 src/server.ts              环境解析、依赖组装、初始化、监听和关闭
+src/observability.ts       有界 Prometheus 指标与异步持久审计写入
 test/                      领域、API、数据库、历史升级和浏览器回归
 ```
 
@@ -57,6 +58,24 @@ Fastify routes -> application use cases -> DeploymentService / domain -> databas
 - BIRD 规范化与渲染模块不得导入 Fastify、Vue 或 DOM。
 - `DeploymentService` 是远端变更事务的唯一实现，不得在路由中复制预检、日志或回滚流程。
 - MySQL 与远端 BIRD 都不是 Vue 状态的附属缓存；成功写入后必须重新读取权威状态。
+
+### 可观测性与审计
+
+- `GET /metrics` 返回进程内 HTTP 请求计数和耗时指标；设置 `BIRDBOX_METRICS_TOKEN` 后必须使用
+  `Authorization: Bearer <token>` 抓取，Prometheus 端点不返回库存、配置或凭据。
+- 所有非 GET 的 `/api/` 人工变更请求写入 `birdbox_audit_events`（内存测试库同样有 50,000 条上限），
+  登录管理员可通过 `GET /api/audit/events?limit=100` 查看最近记录。记录只包含请求元数据和有限错误摘要，
+  不写入密码、Token、SSH 命令或完整 BIRD 配置。
+- `/api/agent/*` 的注册、心跳、长轮询和结果回传属于高频机器流量，不写入持久审计表；这些请求仍计入
+  Prometheus 指标，并通过结构化运行日志和 Agent 状态追踪。后续若需要审计 Agent 操作，应增加按任务
+  的低频事件而不是直接记录每次轮询。
+
+### 部署副本约束
+
+Agent Broker 的连接状态、任务队列、长轮询 waiter、部署锁、一次性脚本分发令牌和变更
+事件目前都在单个 Node.js 进程内存中。生产环境必须运行单个 Birdbox 控制器副本，不能
+在负载均衡器后配置多个 `birdbox` 实例；MySQL 锁不能替代共享任务队列。多副本需要先
+完成共享 Broker、会话粘性和持久化脚本令牌的独立架构改造。
 
 ## 前端状态
 

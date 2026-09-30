@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -10,8 +11,12 @@ import { fail, isPublicError, safeErrorMessage, type PublicError } from "../erro
 import type { InventoryStore } from "../store.js";
 import { logger } from "../logger.js";
 import { authRoutes } from "./auth-routes.js";
+import { requestSessionToken } from "./auth-routes.js";
 import type { AgentBroker } from "../agent-broker.js";
+import { MemoryDatabase, type StateDatabase } from "../database.js";
+import { AuditWriter, MetricsRegistry } from "../observability.js";
 import { agentRoutes } from "./agent-routes.js";
+import { auditRoutes } from "./audit-routes.js";
 import { dashboardRoutes } from "./dashboard-routes.js";
 import { mutationRoutes } from "./mutation-routes.js";
 import { sessionRuntimeRoutes } from "./session-runtime-routes.js";
@@ -25,6 +30,7 @@ interface HttpApplicationOptions {
   secureCookieSetting: boolean | null;
   ping(): Promise<unknown>;
   isDeploymentLocked(): boolean;
+  recoveryState?: () => "idle" | "pending" | "failed";
   loadDashboard(nodeId: string | null, peerId: string | null): Promise<DashboardResponse>;
   withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
   withNodeOperationLock<Result>(nodeId: string, operation: () => Promise<Result> | Result): Promise<Result>;
@@ -33,6 +39,10 @@ interface HttpApplicationOptions {
   getEvents(): ChangeEvent[];
   agentBroker: AgentBroker;
   agentBinaryPath?: string;
+  agentPublicUrl?: string;
+  database?: StateDatabase;
+  metricsToken?: string | null;
+  trustProxy?: boolean | string | number;
   inspectOspfRuntime?: typeof inspectOspfRuntime;
   ospfRuntimeTimeoutMs?: number;
 }
@@ -64,7 +74,12 @@ function assertSameOrigin(request: FastifyRequest): void {
   const origin = request.headers.origin;
   if (!origin) return;
   try {
-    if (new URL(origin).host.toLowerCase() !== String(request.headers.host ?? "").toLowerCase()) {
+    const originHost = new URL(origin).host.toLowerCase();
+    // Fastify's request.hostname intentionally strips the port. Compare the
+    // Origin with the raw Host header first so normal non-default dev ports
+    // (and an HTTPS reverse proxy) are not rejected as cross-site requests.
+    const requestHost = String(request.headers.host || request.hostname || "").toLowerCase();
+    if (originHost !== requestHost) {
       fail(403, "请求来源不受信任");
     }
   } catch {
@@ -92,17 +107,38 @@ async function serveStatic(
   pathname: string,
   appVersion: string,
 ): Promise<FastifyReply> {
-  const requested = pathname === "/" ? "index.html" : pathname.slice(1);
-  const normalized = path.normalize(requested);
-  if (normalized.startsWith("..") || path.isAbsolute(normalized)) return reply.code(403).send();
+  let requested: string;
   try {
-    let content = await fs.readFile(path.join(publicDirectory, normalized));
+    requested = decodeURIComponent(pathname === "/" ? "index.html" : pathname.slice(1));
+  } catch {
+    return reply.code(404).send();
+  }
+  const normalized = path.normalize(requested);
+  const root = path.resolve(publicDirectory);
+  const fullPath = path.resolve(root, normalized);
+  if (fullPath !== root && !fullPath.startsWith(`${root}${path.sep}`)) return reply.code(403).send();
+  try {
+    const stat = await fs.stat(fullPath);
+    if (!stat.isFile()) return reply.code(404).send();
+    let content = await fs.readFile(fullPath);
     if (normalized === "index.html") {
       content = Buffer.from(content.toString("utf8").replaceAll("__BIRDBOX_VERSION__", encodeURIComponent(appVersion)));
     }
-    return reply.type(MIME_TYPES[path.extname(normalized)] ?? "application/octet-stream").send(content);
+    const etag = `"${createHash("sha256").update(content).digest("hex").slice(0, 32)}"`;
+    const immutable = normalized !== "index.html"
+      && (normalized === "styles.css" || normalized.startsWith("migrated/") || normalized.startsWith("vendor/"));
+    const cacheControl = immutable ? "public, max-age=31536000, immutable" : "no-cache";
+    if (String(reply.request.headers["if-none-match"] ?? "") === etag) {
+      return reply.code(304).header("etag", etag).header("cache-control", cacheControl).send();
+    }
+    return reply
+      .type(MIME_TYPES[path.extname(normalized)] ?? "application/octet-stream")
+      .header("etag", etag)
+      .header("cache-control", cacheControl)
+      .send(content);
   } catch (error) {
-    return reply.code((error as NodeJS.ErrnoException).code === "ENOENT" ? 404 : 500).send();
+    const code = (error as NodeJS.ErrnoException).code;
+    return reply.code(code === "ENOENT" || code === "EISDIR" ? 404 : 500).send();
   }
 }
 
@@ -111,14 +147,21 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     bodyLimit: 128 * 1024,
     // Agent task polling may wait up to 30 seconds. Keep both timers above
     // that window so idle outbound agents are not disconnected by the server.
-    requestTimeout: 60000,
-    connectionTimeout: 60000,
+    // Deployments may legitimately take several minutes across multiple
+    // nodes. Route-level timeouts and Agent task deadlines remain authoritative.
+    requestTimeout: 0,
+    connectionTimeout: 0,
     keepAliveTimeout: 5000,
     maxRequestsPerSocket: 0,
     logger: false,
+    trustProxy: options.trustProxy ?? false,
   });
 
   app.server.maxHeadersCount = 100;
+  const metrics = new MetricsRegistry();
+  const auditDatabase = options.database ?? new MemoryDatabase();
+  const audit = new AuditWriter(auditDatabase);
+  const requestStartedAt = new WeakMap<FastifyRequest, number>();
   app.decorateRequest("loginReservation", null);
   app.removeContentTypeParser("application/json");
   app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => {
@@ -133,8 +176,37 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     }
   });
   app.addHook("onRequest", async (request, reply) => {
+    requestStartedAt.set(request, Date.now());
     applySecurityHeaders(reply);
     if (request.url.startsWith("/api/")) assertSameOrigin(request);
+  });
+  app.addHook("onResponse", async (request, reply) => {
+    const startedAt = requestStartedAt.get(request) ?? Date.now();
+    const pathname = new URL(request.raw.url ?? "/", "http://localhost").pathname;
+    // Route templates keep metric cardinality bounded even for resource IDs.
+    const route = request.routeOptions?.url ?? pathname.replace(/\/[A-Za-z0-9_-]{12,}(?=\/|$)/g, "/:id");
+    metrics.observeRequest(request.method, route, reply.statusCode, Date.now() - startedAt);
+    // Agent poll/heartbeat/result traffic is machine-generated and can be
+    // very frequent. Keep it in request metrics, but do not turn it into a
+    // high-volume human audit stream; registration and failed controller
+    // operations remain visible through structured logs and metrics.
+    const auditableApiRequest = pathname.startsWith("/api/")
+      && !pathname.startsWith("/api/agent/")
+      && !["GET", "HEAD", "OPTIONS"].includes(request.method);
+    if (auditableApiRequest) {
+      const authenticated = await options.authStore.isAuthenticated(requestSessionToken(request)).catch(() => false);
+      audit.record({
+        requestId: request.id,
+        actor: authenticated ? "admin" : "anonymous",
+        method: request.method,
+        path: pathname,
+        status: reply.statusCode,
+        outcome: reply.statusCode >= 400 ? "error" : "success",
+        remoteAddress: request.ip ?? request.socket.remoteAddress ?? null,
+        userAgent: String(request.headers["user-agent"] ?? "") || null,
+        detail: reply.statusCode >= 400 ? `HTTP ${reply.statusCode}` : null,
+      });
+    }
   });
   app.route({
     method: ["GET", "HEAD"],
@@ -144,7 +216,7 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
       return serveStatic(reply, options.publicDirectory, url.pathname, options.appVersion);
     },
   });
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler(async (error, request, reply) => {
     const publicError = error as PublicError;
     const pathname = new URL(request.raw.url ?? "/", "http://localhost").pathname;
     const authPath = pathname.startsWith("/api/auth/");
@@ -160,7 +232,14 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
       publicError.message = "JSON 请求体必须是合法对象";
     }
     const unexpected = !isPublicError(publicError);
-    if (!authPath && !healthPath) options.addEvent("error", safeErrorMessage(publicError));
+    const unauthenticatedPrefix = pathname.startsWith("/api/agent/")
+      || pathname.startsWith("/api/nodes/setup-script/")
+      || pathname.startsWith("/api/auth/")
+      || healthPath;
+    const authenticated = !unauthenticatedPrefix && publicError.code !== "AUTH_REQUIRED"
+      ? await options.authStore.isAuthenticated(requestSessionToken(request)).catch(() => false)
+      : false;
+    if (authenticated) options.addEvent("error", safeErrorMessage(publicError));
     if (healthPath) return sendJson(reply, 503, { status: "error" });
     if (unexpected || (publicError.status ?? publicError.statusCode ?? 500) >= 500) {
       logger.error("HTTP 请求处理失败", {
@@ -173,7 +252,7 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     }
     const payload: ApiErrorResponse = { error: unexpected ? "服务器内部错误" : publicError.message };
     if (!unexpected && publicError.code) payload.code = publicError.code;
-    if (!authPath && publicError.code !== "AUTH_REQUIRED") payload.events = options.getEvents();
+    if (authenticated) payload.events = options.getEvents();
     if (!reply.sent) {
       return sendJson(reply, publicError.status ?? publicError.statusCode ?? 500, payload);
     }
@@ -185,11 +264,13 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     secureCookieSetting: options.secureCookieSetting,
   });
   await app.register(agentRoutes, { broker: options.agentBroker, binaryPath: options.agentBinaryPath });
+  await app.register(auditRoutes, { authStore: options.authStore, secureCookieSetting: options.secureCookieSetting, database: auditDatabase });
   await app.register(dashboardRoutes, {
     authStore: options.authStore,
     secureCookieSetting: options.secureCookieSetting,
     ping: options.ping,
     isDeploymentLocked: options.isDeploymentLocked,
+    recoveryState: options.recoveryState,
     loadDashboard: options.loadDashboard,
   });
   await app.register(sessionRuntimeRoutes, {
@@ -208,6 +289,18 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     secureCookieSetting: options.secureCookieSetting,
     service: options.mutationService,
     agentBroker: options.agentBroker,
+    agentPublicUrl: options.agentPublicUrl,
+    agentBinaryPath: options.agentBinaryPath,
+    appVersion: options.appVersion,
+  });
+
+  app.get("/metrics", async (request, reply) => {
+    const expected = options.metricsToken?.trim() || null;
+    if (expected) {
+      const authorization = String(request.headers.authorization ?? "");
+      if (authorization !== `Bearer ${expected}`) return reply.code(401).type("text/plain; version=0.0.4").send("unauthorized\n");
+    }
+    return reply.type("text/plain; version=0.0.4").header("cache-control", "no-store").send(metrics.render());
   });
 
   return app;

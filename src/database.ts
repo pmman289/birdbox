@@ -15,6 +15,21 @@ export interface StateRecord<Value> {
   value: Value;
 }
 
+/** A bounded, non-sensitive record of an HTTP mutation for operational audit. */
+export interface AuditEventRecord {
+  id?: number;
+  occurredAt: string;
+  requestId: string;
+  actor: "admin" | "anonymous" | "system";
+  method: string;
+  path: string;
+  status: number;
+  outcome: "success" | "error";
+  remoteAddress: string | null;
+  userAgent: string | null;
+  detail: string | null;
+}
+
 export interface StateMutationOutcome<Value, Result = unknown> {
   value?: Value;
   result?: Result;
@@ -37,6 +52,8 @@ export interface StateDatabase {
     mutator: (value: Value) => Promise<StateMutationOutcome<Value, Result>> | StateMutationOutcome<Value, Result>,
   ): Promise<StateMutationResult<Value, Result>>;
   replaceState<Value>(key: string, expectedRevision: number, value: Value): Promise<StateRecord<Value>>;
+  appendAuditEvent(event: AuditEventRecord): Promise<void>;
+  listAuditEvents(limit?: number): Promise<AuditEventRecord[]>;
 }
 
 interface LockOptions {
@@ -96,6 +113,20 @@ interface StateRow extends RowDataPacket {
   document: unknown;
 }
 
+interface AuditEventRow extends RowDataPacket {
+  id: unknown;
+  occurred_at: unknown;
+  request_id: unknown;
+  actor: unknown;
+  method: unknown;
+  path: unknown;
+  status: unknown;
+  outcome: unknown;
+  remote_address: unknown;
+  user_agent: unknown;
+  detail: unknown;
+}
+
 interface LockRow extends RowDataPacket {
   acquired: unknown;
 }
@@ -126,7 +157,7 @@ interface SchemaTableContract {
 const DEFAULT_CONNECT_RETRIES = 30;
 const DEFAULT_CONNECT_RETRY_MS = 1000;
 const MIN_CONNECTION_LIMIT = 2;
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 const SCHEMA_MIGRATIONS = [
   {
@@ -141,6 +172,30 @@ const SCHEMA_MIGRATIONS = [
           document JSON NOT NULL,
           created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
           updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `,
+    ],
+  },
+  {
+    version: 2,
+    name: "persistent_audit_events",
+    tables: ["birdbox_audit_events"],
+    statements: [
+      `
+        CREATE TABLE IF NOT EXISTS birdbox_audit_events (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          occurred_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+          request_id VARCHAR(64) NOT NULL,
+          actor VARCHAR(16) NOT NULL,
+          method VARCHAR(16) NOT NULL,
+          path VARCHAR(255) NOT NULL,
+          status SMALLINT UNSIGNED NOT NULL,
+          outcome VARCHAR(16) NOT NULL,
+          remote_address VARCHAR(128) NULL,
+          user_agent VARCHAR(512) NULL,
+          detail JSON NULL,
+          INDEX idx_birdbox_audit_events_occurred_at (occurred_at),
+          INDEX idx_birdbox_audit_events_path (path)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `,
     ],
@@ -172,6 +227,26 @@ const MYSQL_TABLE_CONTRACTS: Record<string, SchemaTableContract> = {
     ],
     uniqueIndexes: [
       { name: "PRIMARY", type: "btree", columns: ["state_key"] },
+    ],
+  },
+  birdbox_audit_events: {
+    engine: "innodb",
+    collation: "utf8mb4_unicode_ci",
+    columns: [
+      { name: "id", type: "bigint unsigned", nullable: false, defaultValue: null, extra: "auto_increment", characterSet: null, collation: null },
+      { name: "occurred_at", type: "timestamp(3)", nullable: false, defaultValue: "current_timestamp(3)", extra: "", characterSet: null, collation: null },
+      { name: "request_id", type: "varchar(64)", nullable: false, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "actor", type: "varchar(16)", nullable: false, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "method", type: "varchar(16)", nullable: false, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "path", type: "varchar(255)", nullable: false, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "status", type: "smallint unsigned", nullable: false, defaultValue: null, extra: "", characterSet: null, collation: null },
+      { name: "outcome", type: "varchar(16)", nullable: false, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "remote_address", type: "varchar(128)", nullable: true, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "user_agent", type: "varchar(512)", nullable: true, defaultValue: null, extra: "", characterSet: "utf8mb4", collation: "utf8mb4_unicode_ci" },
+      { name: "detail", type: "json", nullable: true, defaultValue: null, extra: "", characterSet: null, collation: null },
+    ],
+    uniqueIndexes: [
+      { name: "PRIMARY", type: "btree", columns: ["id"] },
     ],
   },
 };
@@ -325,6 +400,7 @@ export class MySqlDatabase implements StateDatabase {
   private readonly connectionLimit: number;
   private initialization: Promise<void> | null;
   private readonly pool: Pool;
+  private auditWriteCount = 0;
 
   constructor(configuration: PoolOptions, options: DatabaseOptions = {}) {
     this.connectRetries = positiveInteger(options.connectRetries ?? DEFAULT_CONNECT_RETRIES, "MySQL 连接重试次数", { maximum: 300 });
@@ -558,6 +634,75 @@ export class MySqlDatabase implements StateDatabase {
     return { value, revision: expectedRevision + 1 };
   }
 
+  async appendAuditEvent(event: AuditEventRecord): Promise<void> {
+    await this.pool.execute(
+      `INSERT INTO birdbox_audit_events
+        (occurred_at, request_id, actor, method, path, status, outcome, remote_address, user_agent, detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        new Date(event.occurredAt),
+        event.requestId,
+        event.actor,
+        event.method,
+        event.path,
+        event.status,
+        event.outcome,
+        event.remoteAddress,
+        event.userAgent,
+        event.detail === null ? null : JSON.stringify({ message: event.detail }),
+      ],
+    );
+    // Keep the table bounded without adding a purge worker. The derived table
+    // avoids MySQL's restriction on selecting from the table being deleted.
+    this.auditWriteCount += 1;
+    if (this.auditWriteCount % 100 === 0) {
+      await this.pool.query(`
+        DELETE FROM birdbox_audit_events
+        WHERE id < (
+          SELECT cutoff FROM (
+            SELECT id AS cutoff FROM birdbox_audit_events ORDER BY id DESC LIMIT 1 OFFSET 49999
+          ) AS retained
+        )
+      `);
+    }
+  }
+
+  async listAuditEvents(limit = 100): Promise<AuditEventRecord[]> {
+    const bounded = Math.max(1, Math.min(1000, Number(limit) || 100));
+    const [rows] = await this.pool.execute<AuditEventRow[]>(
+      `SELECT id, occurred_at, request_id, actor, method, path, status, outcome,
+              remote_address, user_agent, detail
+         FROM birdbox_audit_events ORDER BY id DESC LIMIT ?`,
+      [bounded],
+    );
+    return rows.map((row) => {
+      let detail: string | null = null;
+      if (row.detail !== null && row.detail !== undefined) {
+        try {
+          const parsed = typeof row.detail === "string" ? JSON.parse(row.detail) : row.detail;
+          detail = parsed && typeof parsed === "object" && "message" in parsed
+            ? String((parsed as { message?: unknown }).message ?? "")
+            : String(parsed ?? "");
+        } catch {
+          detail = String(row.detail);
+        }
+      }
+      return {
+        id: Number(row.id),
+        occurredAt: new Date(row.occurred_at as string | number | Date).toISOString(),
+        requestId: String(row.request_id),
+        actor: String(row.actor) as AuditEventRecord["actor"],
+        method: String(row.method),
+        path: String(row.path),
+        status: Number(row.status),
+        outcome: String(row.outcome) as AuditEventRecord["outcome"],
+        remoteAddress: row.remote_address == null ? null : String(row.remote_address),
+        userAgent: row.user_agent == null ? null : String(row.user_agent),
+        detail,
+      };
+    });
+  }
+
   async #waitForConnection(): Promise<void> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.connectRetries; attempt += 1) {
@@ -581,11 +726,14 @@ export class MemoryDatabase implements StateDatabase {
   private readonly states: Map<string, StateRecord<unknown>>;
   private readonly stateQueues: Map<string, Promise<unknown>>;
   private readonly locks: Set<string>;
+  private readonly auditEvents: AuditEventRecord[];
+  private nextAuditId = 1;
 
   constructor() {
     this.states = new Map();
     this.stateQueues = new Map();
     this.locks = new Set();
+    this.auditEvents = [];
   }
 
   async initialize(): Promise<void> {}
@@ -642,6 +790,16 @@ export class MemoryDatabase implements StateDatabase {
       state.revision += 1;
       return { value: structuredClone(value), revision: state.revision };
     });
+  }
+
+  async appendAuditEvent(event: AuditEventRecord): Promise<void> {
+    this.auditEvents.push({ ...structuredClone(event), id: this.nextAuditId++ });
+    if (this.auditEvents.length > 50_000) this.auditEvents.splice(0, this.auditEvents.length - 50_000);
+  }
+
+  async listAuditEvents(limit = 100): Promise<AuditEventRecord[]> {
+    const bounded = Math.max(1, Math.min(1000, Number(limit) || 100));
+    return structuredClone(this.auditEvents.slice(-bounded).reverse());
   }
 
   #queueState<Result>(key: string, operation: () => Promise<Result> | Result): Promise<Result> {

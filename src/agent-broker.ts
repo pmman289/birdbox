@@ -24,6 +24,7 @@ interface AgentState {
   hostname: string | null;
 }
 interface PendingTask { task: AgentTask; resolve: (result: AgentTaskResult) => void; timer: NodeJS.Timeout; }
+type PollWaiter = (task: AgentTask | null) => void;
 
 export interface AgentBatchUpgradeInput {
   nodeId: string;
@@ -91,7 +92,7 @@ export class AgentBroker {
   readonly #credentials = new Map<string, CredentialRecord>();
   readonly #agents = new Map<string, AgentState>();
   readonly #queues = new Map<string, AgentTask[]>();
-  readonly #waiters = new Map<string, Array<(task: AgentTask | null) => void>>();
+  readonly #waiters = new Map<string, PollWaiter[]>();
   readonly #pending = new Map<string, PendingTask>();
   #batchUpgradeJob: AgentBatchUpgradeJob | null = null;
   #singleUpgradeRunning = false;
@@ -336,24 +337,45 @@ export class AgentBroker {
     return dropped;
   }
 
-  async poll(nodeId: string, token: string, waitMs = 25_000): Promise<AgentTask | null> {
+  async poll(nodeId: string, token: string, waitMs = 25_000, signal?: AbortSignal): Promise<AgentTask | null> {
     if (!this.authenticate(nodeId, token)) throw new Error("Agent 凭据无效或已撤销");
     this.heartbeat(nodeId, token);
     const immediate = this.#takeTask(nodeId);
     if (immediate) return immediate;
+    if (signal?.aborted) return null;
     return new Promise((resolve) => {
       const waiters = this.#waiters.get(nodeId) ?? [];
-      waiters.push(resolve);
-      this.#waiters.set(nodeId, waiters);
-      const timer = setTimeout(() => {
+      let settled = false;
+      const waiter: PollWaiter = (task) => finish(task);
+      const remove = (): void => {
         const current = this.#waiters.get(nodeId) ?? [];
-        const index = current.indexOf(resolve);
+        const index = current.indexOf(waiter);
         if (index >= 0) current.splice(index, 1);
         if (current.length) this.#waiters.set(nodeId, current); else this.#waiters.delete(nodeId);
-        resolve(null);
+      };
+      const finish = (task: AgentTask | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(task);
+      };
+      const onAbort = (): void => { remove(); finish(null); };
+      waiters.push(waiter);
+      this.#waiters.set(nodeId, waiters);
+      const timer = setTimeout(() => {
+        remove(); finish(null);
       }, Math.max(1000, Math.min(waitMs, 30_000)));
       timer.unref();
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  requeue(task: AgentTask): void {
+    if (!this.#pending.has(task.taskId)) return;
+    const queue = this.#queues.get(task.nodeId) ?? [];
+    this.#queues.set(task.nodeId, [task, ...queue].sort((left, right) => taskPriority(left.method) - taskPriority(right.method)));
+    logger.warn("Agent 任务投递失败，已重新入队", { nodeId: task.nodeId, taskId: task.taskId, method: task.method });
   }
 
   dispatch(nodeId: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 120_000): Promise<AgentTaskResult> {
@@ -361,11 +383,18 @@ export class AgentBroker {
       logger.warn("拒绝未知 Agent 方法", { nodeId, method });
       return Promise.resolve({ taskId: "", nodeId, ok: false, stdout: "", stderr: `不支持的 Agent 方法：${method}`, code: "METHOD_NOT_ALLOWED" });
     }
+    if (isBackgroundMethod(method) && !this.status(nodeId)?.connected) {
+      return Promise.resolve({ taskId: "", nodeId, ok: false, stdout: "", stderr: "Agent 当前未连接", code: "AGENT_OFFLINE" });
+    }
     let serializedParams: string;
     try { serializedParams = JSON.stringify(params); } catch { return Promise.resolve({ taskId: "", nodeId, ok: false, stdout: "", stderr: "Agent 任务参数不可序列化", code: "INVALID_TASK" }); }
     if (Buffer.byteLength(serializedParams, "utf8") > MAX_TASK_PARAMETER_BYTES) {
       logger.warn("拒绝过大的 Agent 任务参数", { nodeId, method });
       return Promise.resolve({ taskId: "", nodeId, ok: false, stdout: "", stderr: "Agent 任务参数过大", code: "TASK_TOO_LARGE" });
+    }
+    const agent = this.#agents.get(nodeId);
+    if (Buffer.byteLength(serializedParams, "utf8") > 1_900_000 && agent && !agent.capabilities.includes("task.large_payload")) {
+      return Promise.resolve({ taskId: "", nodeId, ok: false, stdout: "", stderr: `当前 Agent 版本（${agent.agentVersion}）无法接收超过 2 MiB 的配置，请先升级 Agent`, code: "AGENT_UPGRADE_REQUIRED" });
     }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 250 || timeoutMs > 10 * 60 * 1000) {
       logger.warn("拒绝不合法的 Agent 任务超时设置", { nodeId, method, timeoutMs });

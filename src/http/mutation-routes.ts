@@ -5,12 +5,17 @@ import type { MutationResult, MutationService } from "../application-contracts.j
 import type { AuthStore } from "../auth.js";
 import { requestSessionToken, sessionCookie } from "./auth-routes.js";
 import type { AgentBatchUpgradeInput, AgentBroker } from "../agent-broker.js";
+import { buildAgentUpgradeParams } from "../agent-release.js";
+import { redactPayload } from "../inventory-redaction.js";
 
 interface MutationRoutesOptions {
   authStore: AuthStore;
   secureCookieSetting: boolean | null;
   service: MutationService;
   agentBroker: AgentBroker;
+  agentPublicUrl?: string;
+  agentBinaryPath?: string;
+  appVersion?: string;
 }
 
 interface RouteError extends Error {
@@ -40,7 +45,7 @@ function jsonReply(reply: FastifyReply, result: MutationResult): FastifyReply {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
-  }).send(result.payload);
+  }).send(redactPayload(result.payload));
 }
 
 function validId(value: string): string {
@@ -59,6 +64,12 @@ function policyCollection(value: string): PolicyCollection {
 }
 
 export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (app, options) => {
+  const upgradeParams = async (nodeId: string): Promise<Record<string, unknown>> => {
+    if (!options.agentPublicUrl || !options.agentBinaryPath || !options.appVersion) throw routeError(503, "Agent 发布包尚未配置", "AGENT_RELEASE_MISSING");
+    const status = options.agentBroker.status(nodeId);
+    if (!status?.connected) throw routeError(409, "Agent 当前未连接，无法下发升级任务", "AGENT_OFFLINE");
+    return buildAgentUpgradeParams({ architecture: status.architecture, publicUrl: options.agentPublicUrl, binaryBase: options.agentBinaryPath, version: options.appVersion });
+  };
   app.addHook("onRequest", async (request, reply) => {
     if (request.method === "GET" && request.url.startsWith("/api/nodes/setup-script/")) return;
     if (await options.authStore.isAuthenticated(requestSessionToken(request))) return;
@@ -101,9 +112,9 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
       const nodeId = validId(String(record.nodeId ?? ""));
       if (seen.has(nodeId)) continue;
       seen.add(nodeId);
-      const params = record.params;
-      if (!params || typeof params !== "object" || Array.isArray(params)) throw routeError(400, "批量升级参数不合法", "INVALID_BATCH_UPGRADE_PARAMS");
-      inputs.push({ nodeId, params: params as Record<string, unknown> });
+      if (record.params !== undefined && (typeof record.params !== "object" || record.params === null || Array.isArray(record.params))) throw routeError(400, "批量升级参数不合法", "INVALID_BATCH_UPGRADE_PARAMS");
+      const status = options.agentBroker.status(nodeId);
+      inputs.push({ nodeId, params: status?.connected ? await upgradeParams(nodeId) : {} });
     }
     if (!inputs.length) throw routeError(400, "请选择至少一个不同的 Agent 节点", "INVALID_BATCH_UPGRADE_NODES");
     try {
@@ -119,12 +130,12 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
     if (!options.agentBroker.status(nodeId)?.connected) {
       throw routeError(409, "Agent 当前未连接，无法下发升级任务", "AGENT_OFFLINE");
     }
-    const body = jsonBody(request);
+    jsonBody(request);
     if (!options.agentBroker.beginSingleUpgrade()) {
       throw routeError(409, "已有 Agent 升级任务正在执行，请等待完成", "AGENT_UPGRADE_RUNNING");
     }
     try {
-      const result = await options.agentBroker.dispatch(nodeId, "agent.self_upgrade", body, 10 * 60 * 1000);
+      const result = await options.agentBroker.dispatch(nodeId, "agent.self_upgrade", await upgradeParams(nodeId), 10 * 60 * 1000);
       return reply.code(result.ok ? 200 : 502).send(result);
     } finally {
       options.agentBroker.endSingleUpgrade();
