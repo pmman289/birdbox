@@ -351,8 +351,27 @@ exit 0
   assert.match(enabledSession.body.sessionConfig, /protocol bgp preview_bgp/);
   assert.ok(Date.now() - enabledApplyStarted < 5000, "会话应用接口不应等待 BGP 状态建立");
 
+  await fs.writeFile(holdValidation, "1\n");
+  const previewBeforeDelete = authenticatedRequest("/api/sessions/preview", {
+    method: "POST",
+    body: JSON.stringify({
+      nodeId,
+      peerId: peer.body.peer.id,
+      protocolName: "preview_bgp",
+      localAddress: "192.0.2.1",
+      localAsn: 65001,
+      localPort: 179,
+      enabled: false,
+    }),
+  });
+  await waitForFile(validationEntered);
+  const forgottenPromise = authenticatedRequest(`/api/nodes/${nodeId}?force=true`, { method: "DELETE" });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal((await authenticatedRequest("/api/health")).body.deploymentLocked, true);
+  await fs.writeFile(releaseValidation, "1\n");
+  assert.equal((await previewBeforeDelete).status, 200);
   const sshLogBeforeForce = await fs.readFile(fakeLog, "utf8");
-  const forgotten = await authenticatedRequest(`/api/nodes/${nodeId}?force=true`, { method: "DELETE" });
+  const forgotten = await forgottenPromise;
   assert.equal(forgotten.status, 200);
   assert.equal(forgotten.body.cleanupRequired, true);
   assert.equal(forgotten.body.deployment.applied, false);
@@ -366,6 +385,9 @@ exit 0
   assert.deepEqual(forgotten.body.inventory.staticProtocols, []);
   assert.equal(forgotten.body.events.at(-1).level, "warning");
   assert.equal(await fs.readFile(fakeLog, "utf8"), sshLogBeforeForce, "force forget must not contact the offline node");
+  await fs.rm(holdValidation, { force: true });
+  await fs.rm(validationEntered, { force: true });
+  await fs.rm(releaseValidation, { force: true });
 
   const recreated = await authenticatedRequest("/api/nodes", {
     method: "POST",

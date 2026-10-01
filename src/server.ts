@@ -124,13 +124,31 @@ let recoveryState: "idle" | "pending" | "failed" = "idle";
 
 async function withDeploymentLock<Result>(
   operation: () => Promise<Result> | Result,
-  { allowPendingJournal = false }: { allowPendingJournal?: boolean } = {},
+  {
+    allowPendingJournal = false,
+    waitForActive = false,
+  }: { allowPendingJournal?: boolean; waitForActive?: boolean } = {},
 ): Promise<Result> {
   if (shuttingDown) fail(503, "服务正在关闭，暂不接受新的部署");
   if (!allowPendingJournal && recoveryState !== "idle") {
     fail(503, recoveryState === "failed"
       ? "未完成部署恢复失败，系统正在重试；恢复完成前暂不接受变更"
       : "存在尚未完成的部署恢复任务，恢复完成前暂不接受变更");
+  }
+  if (waitForActive) {
+    let waited = false;
+    while (deploymentLocked) {
+      const active = activeDeployment;
+      // The promise is assigned synchronously below the lock flag. If a
+      // future implementation ever loses that reference, retain the normal
+      // conflict behavior instead of waiting forever.
+      if (!active) break;
+      if (!waited) {
+        waited = true;
+        logger.info("等待当前部署完成后继续节点操作");
+      }
+      await Promise.allSettled([active]);
+    }
   }
   if (deploymentLocked) fail(409, "另一个部署正在进行");
   deploymentLocked = true;

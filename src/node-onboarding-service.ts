@@ -55,7 +55,10 @@ function removeNodeFromMultiScope<Resource extends { nodeIds: string[] | null }>
 interface NodeOnboardingServiceOptions {
   store: InventoryStore;
   deploymentService: DeploymentService;
-  withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+  withDeploymentLock<Result>(
+    operation: () => Promise<Result> | Result,
+    options?: { allowPendingJournal?: boolean; waitForActive?: boolean },
+  ): Promise<Result>;
   controllerPublicKey(): string;
   makeId(prefix: string): string;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
@@ -858,6 +861,9 @@ export class NodeOnboardingService {
     nodeId: string,
     force = false,
   ): Promise<{ state: Inventory; node: ManagedNode; forced: boolean }> {
+    // Deletion is destructive and is commonly triggered while the editor's
+    // background preflight is still running. Wait for that in-process
+    // deployment to finish instead of returning a misleading conflict.
     return this.#options.withDeploymentLock(async () => {
       let applied = false;
       let committed = false;
@@ -954,6 +960,6 @@ export class NodeOnboardingService {
         }
         throw error;
       }
-    });
+    }, { waitForActive: true });
   }
 }
