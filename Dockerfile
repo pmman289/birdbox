@@ -67,7 +67,9 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=web-build /app/dist ./dist
 COPY --from=web-build /app/public ./public
-COPY --from=agent-build /out /usr/local/lib/
+# Keep architecture-specific binaries under the directory used by the
+# controller's production default: /usr/local/lib/birdbox-agent/<binary>.
+COPY --from=agent-build /out /usr/local/lib/birdbox-agent/
 COPY README.md ./README.md
 
 RUN chown -R birdbox:birdbox /app /var/lib/birdbox

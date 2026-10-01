@@ -167,16 +167,20 @@ docker buildx imagetools create \
 ## Agent 构建与发布
 
 Agent 使用仓库根目录 `Dockerfile` 的 `agent-build` 阶段交叉编译，最终复制到镜像的
-`/usr/local/lib/birdbox-agent` 目录。当前发布的架构和下载参数如下：
+`/usr/local/lib/birdbox-agent` 目录下。服务端默认通过
+`/usr/local/lib/birdbox-agent/birdbox-agent-*` 查找对应架构的文件；当前发布的架构和下载参数如下：
 
 | 目标平台 | `arch` 参数 | Go 架构 | 镜像内文件 |
 | --- | --- | --- | --- |
 | x86_64 | `amd64` | `GOARCH=amd64` | `birdbox-agent-amd64` |
 | AArch64 | `arm64` | `GOARCH=arm64` | `birdbox-agent-arm64` |
 | ARMv7 | `arm` | `GOARCH=arm GOARM=7` | `birdbox-agent-arm` |
+| ARMv6 | `armv6` | `GOARCH=arm GOARM=6` | `birdbox-agent-armv6` |
+| ARMv5 | `armv5` | `GOARCH=arm GOARM=5` | `birdbox-agent-armv5` |
 | MIPS | `mips` | `GOARCH=mips` | `birdbox-agent-mips` |
 | MIPS little-endian | `mipsle` | `GOARCH=mipsle` | `birdbox-agent-mipsle` |
 | MIPS64 | `mips64` | `GOARCH=mips64` | `birdbox-agent-mips64` |
+| MIPS64 little-endian | `mips64le` | `GOARCH=mips64le` | `birdbox-agent-mips64le` |
 | RISC-V 64 | `riscv64` | `GOARCH=riscv64` | `birdbox-agent-riscv64` |
 
 ### 构建参数
@@ -205,7 +209,7 @@ docker buildx build \
   --push .
 ```
 
-`agent-build` 本身会生成上表中的七种 Linux Agent；`--platform` 控制的是最终
+`agent-build` 本身会生成上表中的十种 Linux Agent；`--platform` 控制的是最终
 Birdbox 控制器镜像的运行平台，不会减少 Agent 二进制的数量。构建后应检查镜像内
 文件：
 

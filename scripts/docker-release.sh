@@ -167,11 +167,11 @@ docker run --rm --platform linux/amd64 --user 0:0 --entrypoint /bin/sh "$VERSION
   directory=/usr/local/lib/birdbox-agent
   expected="amd64 arm64 arm armv6 armv5 mips mipsle mips64 mips64le riscv64"
   for arch in $expected; do
-    path="/usr/local/lib/birdbox-agent-$arch"
+    path="$directory/birdbox-agent-$arch"
     test -f "$path"
     test -x "$path"
   done
-  test "$(find /usr/local/lib -maxdepth 1 -type f -name "birdbox-agent-*" | wc -l)" -eq 10
+  test "$(find "$directory" -maxdepth 1 -type f -name "birdbox-agent-*" | wc -l)" -eq 10
 '
 
 SMOKE_PROJECT=${RELEASE_SMOKE_PROJECT:-}
