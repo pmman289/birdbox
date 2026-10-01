@@ -145,6 +145,10 @@ async function serveStatic(
 export async function createHttpApplication(options: HttpApplicationOptions) {
   const app = Fastify({
     bodyLimit: 128 * 1024,
+    // Make the intended HTTP/1 server overload explicit. Without this flag,
+    // Fastify's conditional typings can infer the HTTP/2 overload when the
+    // trust-proxy compatibility value is supplied by the environment.
+    http2: false,
     // Agent task polling may wait up to 30 seconds. Keep both timers above
     // that window so idle outbound agents are not disconnected by the server.
     // Deployments may legitimately take several minutes across multiple
@@ -154,7 +158,10 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     keepAliveTimeout: 5000,
     maxRequestsPerSocket: 0,
     logger: false,
-    trustProxy: options.trustProxy ?? false,
+    // Fastify supports a numeric hop count at runtime, but its v5 declaration
+    // omits that legacy-compatible form. Keep the public environment contract
+    // while constraining the compile-time option to the accepted union.
+    trustProxy: options.trustProxy as boolean | string | string[] | undefined ?? false,
   });
 
   app.server.maxHeadersCount = 100;
