@@ -874,15 +874,37 @@ export class NodeOnboardingService {
         node = findNode(current, nodeId);
         const targetNode = node;
         logger.info(force ? "开始强制删除受管节点" : "开始删除受管节点", { nodeId: targetNode.id, transport: targetNode.transport });
-        if (current.ibgpDomains.some((domain) => domain.members.some((member) => member.nodeId === targetNode.id))) {
+        // A normal deletion must be explicit about domain membership because it
+        // also cleans the remote configuration. Forced deletion is the recovery
+        // path for offline nodes: detach every local reference first and never
+        // wait for the unreachable node's Agent.
+        if (!force && current.ibgpDomains.some((domain) => domain.members.some((member) => member.nodeId === targetNode.id))) {
           fail(409, "请先从 iBGP 域中移除该节点或删除对应域");
         }
         if (force) {
+          const ibgpDomains = current.ibgpDomains.map((domain) => {
+            const members = domain.members.filter((member) => member.nodeId !== targetNode.id);
+            const adjacencies = domain.adjacencies.filter((adjacency) =>
+              adjacency.leftNodeId !== targetNode.id && adjacency.rightNodeId !== targetNode.id,
+            );
+            return {
+              ...domain,
+              members,
+              adjacencies,
+              layout: Object.fromEntries(Object.entries(domain.layout).filter(([id]) => id !== targetNode.id)),
+            };
+          });
+          const validManagedAdjacencies = new Set(
+            ibgpDomains.flatMap((domain) => domain.adjacencies.map((adjacency) => `${domain.id}:${adjacency.id}`)),
+          );
+          const isDetachedManagedResource = (resource: { nodeId?: string; managedBy?: { domainId: string; adjacencyId: string } }) =>
+            resource.nodeId === targetNode.id
+            || (resource.managedBy !== undefined && !validManagedAdjacencies.has(`${resource.managedBy.domainId}:${resource.managedBy.adjacencyId}`));
           const inventory = validateInventory({
             ...current,
             nodes: current.nodes.filter((item) => item.id !== targetNode.id),
-            peers: current.peers.filter((item) => item.nodeId !== targetNode.id),
-            sessions: current.sessions.filter((item) => item.nodeId !== targetNode.id),
+            peers: current.peers.filter((item) => !isDetachedManagedResource(item)),
+            sessions: current.sessions.filter((item) => !isDetachedManagedResource(item)),
             defines: removeNodeFromMultiScope(current.defines, targetNode.id),
             functions: removeNodeFromMultiScope(current.functions, targetNode.id),
             filters: removeNodeFromMultiScope(current.filters, targetNode.id),
@@ -891,6 +913,14 @@ export class NodeOnboardingService {
             staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== targetNode.id),
             directProtocols: current.directProtocols.filter((item) => item.nodeId !== targetNode.id),
             kernelProtocols: removeNodeFromMultiScope(current.kernelProtocols, targetNode.id),
+            ibgpDomains,
+            ospfDomains: current.ospfDomains.map((domain) => ({
+              ...domain,
+              nodeConfigs: domain.nodeConfigs.filter((config) => config.nodeId !== targetNode.id),
+              links: domain.links.filter((link) => link.fromNodeId !== targetNode.id && link.toNodeId !== targetNode.id),
+              layout: Object.fromEntries(Object.entries(domain.layout).filter(([id]) => id !== targetNode.id)),
+            })),
+            ospfLayout: Object.fromEntries(Object.entries(current.ospfLayout).filter(([id]) => id !== targetNode.id)),
           });
           const state = await this.#options.store.replace(current, inventory);
           committed = true;

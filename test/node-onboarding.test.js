@@ -8,6 +8,7 @@ import {
   onboardingValidationError,
 } from "../src/node-onboarding-service.js";
 import { validateInventory } from "../src/bird.js";
+import { expandIbgpDomain, normalizeIbgpDomain } from "../src/ibgp-domain.js";
 import { AgentBroker } from "../src/agent-broker.js";
 import { MemoryDatabase } from "../src/database.js";
 
@@ -310,4 +311,44 @@ test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async 
     ["rpki_shared", ["right"]],
     ["rpki_global", null],
   ]);
+});
+
+test("force-forgetting an offline iBGP member detaches its domain resources atomically", async () => {
+  const nodes = [
+    { id: "left", name: "Left", transport: "ssh", sshHost: "left.example", routerId: "192.0.2.1" },
+    { id: "offline", name: "Offline", transport: "agent", routerId: "192.0.2.2" },
+  ];
+  const domain = normalizeIbgpDomain({
+    id: "domain", name: "Core", asn: 65000,
+    members: [{ nodeId: "left", address: "192.0.2.1" }, { nodeId: "offline", address: "192.0.2.2" }],
+    adjacencies: [{ id: "adj", leftNodeId: "left", rightNodeId: "offline", leftSessionId: "left_session", rightSessionId: "offline_session" }],
+    layout: { left: { x: 0, y: 0, locked: false }, offline: { x: 100, y: 0, locked: false } },
+  });
+  const expanded = expandIbgpDomain(domain, nodes);
+  let inventory = validateInventory({
+    version: 28, nodes, peers: expanded.peers, defines: [], functions: [], filters: [], rpki: [],
+    staticProtocols: [], directProtocols: [], kernelProtocols: [], sourcePolicies: [], sessions: expanded.sessions,
+    ibgpDomains: [domain], ospfDomains: [], ospfLayout: {},
+  });
+  const service = new NodeOnboardingService({
+    store: {
+      read: async () => inventory,
+      replace: async (_current, replacement) => { inventory = replacement; return replacement; },
+    },
+    deploymentService: {},
+    withDeploymentLock: async (operation) => operation(),
+    controllerPublicKey: () => "",
+    makeId: () => "unused",
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId: null }),
+    getEvents: () => [],
+  });
+
+  const result = await service.decommission("offline", true);
+
+  assert.equal(result.forced, true);
+  assert.deepEqual(result.state.nodes.map((node) => node.id), ["left"]);
+  assert.deepEqual(result.state.ibgpDomains[0]?.members.map((member) => member.nodeId), ["left"]);
+  assert.deepEqual(result.state.ibgpDomains[0]?.adjacencies, []);
+  assert.deepEqual(result.state.peers, []);
+  assert.deepEqual(result.state.sessions, []);
 });
