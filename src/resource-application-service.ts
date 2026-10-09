@@ -59,7 +59,7 @@ interface ResourceApplicationServiceOptions {
   deploymentService: DeploymentService;
   nodeOnboarding: NodeOnboardingService;
   sessions: SessionApplicationService;
-  withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+  withDeploymentLock<Result>(operation: () => Promise<Result> | Result, options?: { allowPendingJournal?: boolean; waitForActive?: boolean }): Promise<Result>;
   makeId(prefix: string): string;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
   getEvents(): ChangeEvent[];
@@ -229,6 +229,22 @@ export function createResourceApplicationService(
       Object.entries(domain.layout).filter(([nodeId]) => nodeIds.has(nodeId)),
     );
     return domain;
+  }
+
+  async function ospfCandidate(body: Record<string, unknown>) {
+    const current = await store.read();
+    const id = body.id === undefined || body.id === "" ? makeId("ospf") : String(body.id);
+    const previous = current.ospfDomains.find((item) => item.id === id) ?? null;
+    const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id }, previous));
+    const candidate = structuredClone(current);
+    const index = candidate.ospfDomains.findIndex((item) => item.id === id);
+    if (index >= 0) candidate.ospfDomains[index] = domain;
+    else candidate.ospfDomains.push(domain);
+    const inventory = validateInventory(candidate);
+    // Removing a member also deploys a configuration to that former member.
+    // Include it in preview/preflight so the preview covers the entire write.
+    const affected = uniqueNodeIds(previous ? ospfDomainNodeIds(previous) : [], ospfDomainNodeIds(domain));
+    return { domain, inventory, affected };
   }
 
   function bgpProtocolBlock(config: string, protocolName: string): string {
@@ -905,11 +921,20 @@ export function createResourceApplicationService(
             : false;
       });
       if (referencedByKernel) fail(409, `请先从 Kernel 资源中移除该 ${kind}`);
-      const referencedByOspf = draft.ospfDomains.some((domain) => domain.nodeConfigs.some((config) =>
-        Object.values(config.importPolicies).concat(Object.values(config.exportPolicies)).some((policy) =>
-          collection === "filters" ? policy.filterId === target.id : collection === "functions" ? policy.steps.some((step) => step.type === "function" && step.functionId === target.id) : Object.values(config.exportDefineIds).includes(target.id),
-        ),
-      ));
+      const referencedByOspf = draft.ospfDomains.some((domain) => domain.nodeConfigs.some((config) => {
+        if (!config.enabled) return false;
+        if (collection === "defines") {
+          return (["ospfv2", "ospfv3"] as const).some((version) => {
+            const policy = config.exportPolicies[version];
+            return policy.mode !== "custom" && policy.formAction === "cidr" && config.exportDefineIds[version] === target.id;
+          });
+        }
+        return Object.values(config.importPolicies).concat(Object.values(config.exportPolicies)).some((policy) =>
+          collection === "filters"
+            ? policy.mode === "custom" && policy.filterId === target.id
+            : policy.mode === "combined" && policy.steps.some((step) => step.type === "function" && step.functionId === target.id),
+        );
+      }));
       if (referencedByOspf) fail(409, `请先从 OSPF 域中移除该 ${kind}`);
       if (collection === "defines" && draft.staticProtocols.some((item) => item.defineId === target.id)) {
         fail(409, "请先从 Static 资源中移除该 Define");
@@ -1139,29 +1164,27 @@ export function createResourceApplicationService(
       const nodeIds = new Set(draft.nodes.map((node) => node.id));
       const updates = Object.fromEntries(Object.entries(body.layout).filter(([nodeId]) => nodeIds.has(nodeId)));
       draft.ospfLayout = { ...draft.ospfLayout, ...updates };
-    }));
+    }), { waitForActive: true });
     return { status: 200, payload: { layout: state.ospfLayout, inventory: state } };
   },
 
   async previewOspfDomain(body) {
     return withDeploymentLock(async () => {
-      const current = await store.read();
-      const id = body.id === undefined || body.id === "" ? makeId("ospf") : String(body.id);
-      const previous = current.ospfDomains.find((item) => item.id === id) ?? null;
-      const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id }, previous));
-      const candidate = structuredClone(current);
-      const index = candidate.ospfDomains.findIndex((item) => item.id === id);
-      if (index >= 0) candidate.ospfDomains[index] = domain;
-      else candidate.ospfDomains.push(domain);
-      const inventory = validateInventory(candidate);
+      const { domain, inventory, affected } = await ospfCandidate(body);
       const configs = [] as Array<{ nodeId: string; config: string; validation: Awaited<ReturnType<typeof stageAndValidate>> }>;
-      for (const nodeId of ospfDomainNodeIds(domain)) {
+      for (const nodeId of affected) {
         const node = findNode(inventory, nodeId);
         const config = configForNode(inventory, node);
         configs.push({ nodeId, config, validation: await stageAndValidate(node, config) });
       }
       return { status: 200, payload: { valid: configs.every((item) => item.validation.ok), domain, configs } };
     });
+  },
+
+  async renderOspfDomain(body) {
+    const { domain, inventory, affected } = await ospfCandidate(body);
+    const configs = affected.map((nodeId) => ({ nodeId, config: configForNode(inventory, findNode(inventory, nodeId)) }));
+    return { status: 200, payload: { domain, configs } };
   },
 
   async createOspfDomain(body) {
@@ -1222,7 +1245,7 @@ export function createResourceApplicationService(
         layout: { ...target.layout, ...layout },
       }).layout;
       return target;
-    }));
+    }), { waitForActive: true });
     return { status: 200, payload: { domain, inventory: state } };
   },
 

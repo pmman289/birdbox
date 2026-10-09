@@ -538,7 +538,9 @@ if ! grep -Fx -- "$KEY_LINE" "$HOME_DIR/.ssh/authorized_keys" >/dev/null 2>&1; t
   KEY_TEMP=$(mktemp "$HOME_DIR/.ssh/authorized_keys.birdbox.XXXXXX")
   trap 'rm -f "$KEY_TEMP"' 0
   trap 'rm -f "$KEY_TEMP"; exit 1' 1 2 15
-  grep -Fv -- "$CONTROLLER_KEY_ID" "$HOME_DIR/.ssh/authorized_keys" > "$KEY_TEMP" || true
+  GREP_STATUS=0
+  grep -Fv -- "$CONTROLLER_KEY_ID" "$HOME_DIR/.ssh/authorized_keys" > "$KEY_TEMP" || GREP_STATUS=$?
+  [ "$GREP_STATUS" -le 1 ] || { rm -f "$KEY_TEMP"; echo "无法读取现有 authorized_keys" >&2; exit "$GREP_STATUS"; }
   printf '%s\n' "$KEY_LINE" >> "$KEY_TEMP"
   chown "$BIRDBOX_USER:$PRIMARY_GROUP" "$KEY_TEMP"
   chmod 0600 "$KEY_TEMP"
@@ -881,7 +883,19 @@ export class NodeOnboardingService {
         if (!force && current.ibgpDomains.some((domain) => domain.members.some((member) => member.nodeId === targetNode.id))) {
           fail(409, "请先从 iBGP 域中移除该节点或删除对应域");
         }
+        if (!force && current.ospfDomains.some((domain) =>
+          domain.nodeConfigs.some((config) => config.nodeId === targetNode.id)
+          || domain.links.some((link) => link.fromNodeId === targetNode.id || link.toNodeId === targetNode.id),
+        )) {
+          fail(409, "请先从 OSPF 域中移除该节点或删除对应域");
+        }
         if (force) {
+          const removedOspfRouterIds = new Set([
+            targetNode.routerId,
+            ...current.ospfDomains.flatMap((domain) => domain.nodeConfigs
+              .filter((config) => config.nodeId === targetNode.id && config.routerId)
+              .map((config) => config.routerId as string)),
+          ]);
           const ibgpDomains = current.ibgpDomains.map((domain) => {
             const members = domain.members.filter((member) => member.nodeId !== targetNode.id);
             const adjacencies = domain.adjacencies.filter((adjacency) =>
@@ -916,7 +930,12 @@ export class NodeOnboardingService {
             ibgpDomains,
             ospfDomains: current.ospfDomains.map((domain) => ({
               ...domain,
-              nodeConfigs: domain.nodeConfigs.filter((config) => config.nodeId !== targetNode.id),
+              nodeConfigs: domain.nodeConfigs
+                .filter((config) => config.nodeId !== targetNode.id)
+                .map((config) => ({
+                  ...config,
+                  virtualLinks: (config.virtualLinks ?? []).filter((link) => !removedOspfRouterIds.has(link.id)),
+                })),
               links: domain.links.filter((link) => link.fromNodeId !== targetNode.id && link.toNodeId !== targetNode.id),
               layout: Object.fromEntries(Object.entries(domain.layout).filter(([id]) => id !== targetNode.id)),
             })),

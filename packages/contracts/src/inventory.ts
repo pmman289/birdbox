@@ -508,7 +508,10 @@ export interface OspfLink {
   dead: number;
   passive: boolean;
   authentication: "none" | "simple" | "md5" | "ipsec";
+  /** Legacy shared endpoint options. New records use localOptions/remoteOptions. */
   options?: OspfInterfaceOptions;
+  localOptions?: OspfInterfaceOptions;
+  remoteOptions?: OspfInterfaceOptions;
 }
 
 export interface OspfNodeConfig {

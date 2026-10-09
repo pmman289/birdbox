@@ -12,6 +12,8 @@ const statuses = ref<AgentStatusResponse["agents"]>([]);
 const job = ref<AgentBatchUpgradeResponse["job"]>(null);
 const pending = ref(false);
 let pollTimer: number | null = null;
+let pollSequence = 0;
+let openSequence = 0;
 const { dashboard } = useDashboardStore();
 
 const selectedNodes = computed(() => (dashboard.value?.inventory.nodes ?? []).filter((node) => nodeIds.value.includes(node.id)));
@@ -33,18 +35,21 @@ function arch(value: string | null): string {
 }
 
 function stopPolling(): void {
+  pollSequence += 1;
   if (pollTimer !== null) window.clearTimeout(pollTimer);
   pollTimer = null;
 }
 
-async function poll(): Promise<void> {
+async function poll(sequence = pollSequence): Promise<void> {
+  if (sequence !== pollSequence) return;
   try {
     const response = await api<AgentBatchUpgradeResponse>("/api/agent/upgrades/batch", { mutationWait: false });
+    if (sequence !== pollSequence) return;
     if (response.job) job.value = response.job;
-    if (job.value?.status === "running") pollTimer = window.setTimeout(() => void poll(), 2000);
+    if (job.value?.status === "running") pollTimer = window.setTimeout(() => void poll(sequence), 2000);
     else if (job.value) dispatchToast("Agent 批量升级任务已完成", counts.value.failed ? "error" : "success");
   } catch {
-    pollTimer = window.setTimeout(() => void poll(), 3000);
+    if (sequence === pollSequence) pollTimer = window.setTimeout(() => void poll(sequence), 3000);
   }
 }
 
@@ -73,7 +78,7 @@ async function start(): Promise<void> {
     }
     const response = await api<AgentBatchUpgradeResponse>("/api/agent/upgrades/batch", { method: "POST", timeoutMs: 30_000, body: JSON.stringify({ nodes }) });
     job.value = response.job;
-    void poll();
+    void poll(pollSequence);
   } catch (error) {
     dispatchToast(error instanceof Error ? error.message : "批量升级启动失败", "error");
   } finally {
@@ -82,6 +87,7 @@ async function start(): Promise<void> {
 }
 
 async function open(ids: string[]): Promise<void> {
+  const requestSequence = ++openSequence;
   stopPolling();
   nodeIds.value = [...new Set(ids)];
   job.value = null;
@@ -91,13 +97,14 @@ async function open(ids: string[]): Promise<void> {
       api<AgentStatusResponse>("/api/agent/status", { mutationWait: false }),
       api<AgentBatchUpgradeResponse>("/api/agent/upgrades/batch", { mutationWait: false }),
     ]);
+    if (requestSequence !== openSequence) return;
     statuses.value = statusResponse.agents;
     if (jobResponse.job?.status === "running") {
       job.value = jobResponse.job;
-      void poll();
+      void poll(pollSequence);
     }
   } catch {
-    statuses.value = [];
+    if (requestSequence === openSequence) statuses.value = [];
   }
 }
 
@@ -118,7 +125,7 @@ function stateLabel(state: string): string {
 function handleOpen(event: CustomEvent<{ nodeIds: string[] }>): void { void open(event.detail.nodeIds); }
 const onBatchUpgrade = (event: Event): void => { handleOpen(event as CustomEvent<{ nodeIds: string[] }>); };
 onMounted(() => window.addEventListener("birdbox:agent-batch-upgrade", onBatchUpgrade));
-onBeforeUnmount(() => { stopPolling(); window.removeEventListener("birdbox:agent-batch-upgrade", onBatchUpgrade); });
+onBeforeUnmount(() => { openSequence += 1; stopPolling(); window.removeEventListener("birdbox:agent-batch-upgrade", onBatchUpgrade); });
 </script>
 
 <template>

@@ -60,6 +60,7 @@ export interface MutationService {
   listOspfDomains(): Promise<MutationResult>;
   updateOspfLayout(body: Record<string, unknown>): Promise<MutationResult>;
   previewOspfDomain(body: Record<string, unknown>): Promise<MutationResult>;
+  renderOspfDomain(body: Record<string, unknown>): Promise<MutationResult>;
   createOspfDomain(body: Record<string, unknown>): Promise<MutationResult>;
   updateOspfDomain(domainId: string, body: Record<string, unknown>): Promise<MutationResult>;
   deleteOspfDomain(domainId: string): Promise<MutationResult>;

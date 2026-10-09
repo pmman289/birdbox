@@ -25,6 +25,7 @@ const maxBirdConfig = 16 * 1024 * 1024
 
 var safeResourceName = regexp.MustCompile(`^define_[A-Za-z_][A-Za-z0-9_]*\.conf$`)
 var safeBirdName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var safeInterfaceName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
 var activeDeviceProtocol = regexp.MustCompile(`(?m)^\s*protocol\s+device(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{`)
 
 func interfaceNames(raw string) string {
@@ -41,13 +42,10 @@ func interfaceNames(raw string) string {
 			continue
 		}
 		name := strings.TrimSpace(rest[:secondColon])
-		if dot := strings.IndexByte(name, '.'); dot >= 0 {
-			name = name[dot+1:]
-		}
 		if at := strings.IndexByte(name, '@'); at >= 0 {
 			name = name[:at]
 		}
-		if regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`).MatchString(name) {
+		if safeInterfaceName.MatchString(name) {
 			names = append(names, name)
 		}
 	}
@@ -1194,15 +1192,27 @@ func birdOspfTask(parent context.Context, params map[string]any, r result) resul
 	v2routes := runBirdc(parent, socket, "show route table master4 protocol "+v2+" all")
 	v3routes := runBirdc(parent, socket, "show route table master6 protocol "+v3+" all")
 	interfaces := runCommand(parent, "ip", []string{"-o", "link", "show"}, 15*time.Second, 512*1024)
-	r.Stdout = neighbors.stdout + "\n---BIRDBOX-OSPF-V2-COUNT---\n" + v2count.stdout + "\n---BIRDBOX-OSPF-V2-ROUTES---\n" + v2routes.stdout + "\n---BIRDBOX-OSPF-V3-COUNT---\n" + v3count.stdout + "\n---BIRDBOX-OSPF-V3-ROUTES---\n" + v3routes.stdout + "\n---BIRDBOX-OSPF-INTERFACES---\n" + interfaceNames(interfaces.stdout)
+	r.Stdout = neighbors.stdout + "\n---BIRDBOX-OSPF-V2-COUNT---\n" + v2count.stdout + "\n---BIRDBOX-OSPF-V2-ROUTES---\n" + v2routes.stdout + "\n---BIRDBOX-OSPF-V3-COUNT---\n" + v3count.stdout + "\n---BIRDBOX-OSPF-V3-ROUTES---\n" + v3routes.stdout + "\n---BIRDBOX-OSPF-INTERFACES---\n" + interfaceNames(interfaces.stdout) + "\n---BIRDBOX-OSPF-STATUS---\n" + fmt.Sprintf("neighbors=%d\nv2count=%d\nv2routes=%d\nv3count=%d\nv3routes=%d\ninterfaces=%d\n", commandStatus(neighbors), commandStatus(v2count), commandStatus(v2routes), commandStatus(v3count), commandStatus(v3routes), commandStatus(interfaces))
 	r.Stderr = strings.TrimSpace(strings.Join([]string{neighbors.stderr, v2count.stderr, v3count.stderr, v2routes.stderr, v3routes.stderr, interfaces.stderr}, "\n"))
-	// Missing OSPF protocols are valid on a node.  The operation is healthy if
-	// the controller could execute the queries and retrieve interface data.
-	r.OK = interfaces.ok
-	if !interfaces.ok {
+	// Missing OSPF protocols are reported per version. A failed neighbor query
+	// means the control socket itself is unavailable and makes the node down.
+	r.OK = neighbors.ok && interfaces.ok
+	if !neighbors.ok {
+		r.Code = neighbors.code
+	} else if !interfaces.ok {
 		r.Code = interfaces.code
 	}
 	return r
+}
+
+func commandStatus(out commandResult) int {
+	if out.ok {
+		return 0
+	}
+	if code, ok := out.code.(int); ok {
+		return code
+	}
+	return 1
 }
 
 func birdAccessTask(parent context.Context, params map[string]any, r result) result {

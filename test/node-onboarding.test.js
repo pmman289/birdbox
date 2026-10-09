@@ -9,6 +9,7 @@ import {
 } from "../src/node-onboarding-service.js";
 import { validateInventory } from "../src/bird.js";
 import { expandIbgpDomain, normalizeIbgpDomain } from "../src/ibgp-domain.js";
+import { normalizeOspfDomain } from "../src/ospf.js";
 import { AgentBroker } from "../src/agent-broker.js";
 import { MemoryDatabase } from "../src/database.js";
 
@@ -311,6 +312,67 @@ test("force-forgetting a node narrows multi-node Filter and RPKI scopes", async 
     ["rpki_shared", ["right"]],
     ["rpki_global", null],
   ]);
+});
+
+test("normal node deletion explains OSPF membership before remote cleanup", async () => {
+  const nodes = [
+    { id: "left", name: "Left", transport: "ssh", sshHost: "left.example", routerId: "192.0.2.1" },
+    { id: "right", name: "Right", transport: "ssh", sshHost: "right.example", routerId: "192.0.2.2" },
+  ];
+  const ospf = normalizeOspfDomain({
+    id: "ospf", name: "Core OSPF",
+    nodeConfigs: nodes.map((node) => ({ nodeId: node.id, enabled: true, versions: ["ospfv2"], routerId: node.routerId })),
+    links: [{ id: "link", fromNodeId: "left", toNodeId: "right", area: "0.0.0.0", localInterface: "eth0", remoteInterface: "eth0" }],
+  });
+  let inventory = validateInventory({
+    version: 28, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [],
+    staticProtocols: [], directProtocols: [], kernelProtocols: [], sourcePolicies: [], sessions: [],
+    ibgpDomains: [], ospfDomains: [ospf], ospfLayout: {},
+  });
+  const service = new NodeOnboardingService({
+    store: { read: async () => inventory, replace: async (_current, replacement) => { inventory = replacement; return replacement; } },
+    deploymentService: {},
+    withDeploymentLock: async (operation) => operation(),
+    controllerPublicKey: () => "",
+    makeId: () => "unused",
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId: null }),
+    getEvents: () => [],
+  });
+
+  await assert.rejects(() => service.decommission("left", false), /请先从 OSPF 域中移除该节点或删除对应域/);
+  assert.deepEqual(inventory.nodes.map((node) => node.id), ["left", "right"]);
+});
+
+test("force-forgetting an OSPF node removes virtual links targeting it", async () => {
+  const nodes = [
+    { id: "left", name: "Left", transport: "ssh", sshHost: "left.example", routerId: "192.0.2.1" },
+    { id: "offline", name: "Offline", transport: "agent", routerId: "192.0.2.2" },
+  ];
+  const ospf = normalizeOspfDomain({
+    id: "ospf", name: "Core OSPF",
+    nodeConfigs: [
+      { nodeId: "left", enabled: true, versions: ["ospfv2"], routerId: "192.0.2.1", areaOptions: { "0.0.0.0": {} }, virtualLinks: [{ id: "192.0.2.2", area: "1.1.1.1" }] },
+      { nodeId: "offline", enabled: true, versions: ["ospfv2"], routerId: "192.0.2.2", areaOptions: { "0.0.0.0": {} } },
+    ],
+    links: [],
+  });
+  let inventory = validateInventory({
+    version: 28, nodes, peers: [], defines: [], functions: [], filters: [], rpki: [],
+    staticProtocols: [], directProtocols: [], kernelProtocols: [], sourcePolicies: [], sessions: [],
+    ibgpDomains: [], ospfDomains: [ospf], ospfLayout: {},
+  });
+  const service = new NodeOnboardingService({
+    store: { read: async () => inventory, replace: async (_current, replacement) => { inventory = replacement; return replacement; } },
+    deploymentService: {},
+    withDeploymentLock: async (operation) => operation(),
+    controllerPublicKey: () => "",
+    makeId: () => "unused",
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId: null }),
+    getEvents: () => [],
+  });
+
+  const result = await service.decommission("offline", true);
+  assert.equal(result.state.ospfDomains[0]?.nodeConfigs[0]?.virtualLinks?.length, 0);
 });
 
 test("force-forgetting an offline iBGP member detaches its domain resources atomically", async () => {

@@ -102,6 +102,7 @@ exit 0
       id: "session_test", nodeId: "local", peerId: "peer", protocolName: "test_bgp",
       localAddress: "192.0.2.1", localAsn: 65001, localPort: 11790,
       exportDefineId: "define_test", enabled: true,
+      bgp: { password: 'test-secret"suffix' },
     }],
   });
   await fs.writeFile(path.join(dataDir, "inventory.json"), `${JSON.stringify(state)}\n`);
@@ -140,6 +141,12 @@ exit 0
     headers: { cookie, ...(options.headers ?? {}) },
   });
 
+  const runtimeResponse = await authenticatedRequest("/api/nodes/local/runtime");
+  assert.equal(runtimeResponse.status, 200);
+  assert.equal(runtimeResponse.body.sessions[0].bgp.password, "********");
+  assert.doesNotMatch(runtimeResponse.body.config, /test-secret|suffix/);
+  assert.match(runtimeResponse.body.config, /password "\*{8}";/);
+
   const savedOspfLayout = await authenticatedRequest("/api/ospf/layout", {
     method: "PATCH",
     body: JSON.stringify({ layout: { local: { x: 321, y: 654 } } }),
@@ -160,10 +167,30 @@ exit 0
       ospfv3: { mode: "form", formAction: "none", steps: [], filterId: null },
     },
     exportDefineIds: { ospfv2: null, ospfv3: null }, bfd: false, gracefulRestart: false, redistributeStatic: false,
+    areaOptions: { "0.0.0.0": {} },
   };
   const ospfDomainPayload = (id, name) => ({ id, name, nodeConfigs: [ospfNodeConfig], links: [], layout: { local: { x: 10, y: 20 } } });
   const createdOspfA = await authenticatedRequest("/api/ospf", { method: "POST", body: JSON.stringify(ospfDomainPayload("ospf_a", "OSPF A")) });
   assert.equal(createdOspfA.status, 201);
+  assert.equal(createdOspfA.body.domain.nodeConfigs[0].exportPolicies.ospfv2.formAction, "none");
+  const previewPayload = ospfDomainPayload("ospf_preview", "OSPF Preview");
+  previewPayload.nodeConfigs[0].exportPolicies.ospfv2.formAction = "all";
+  const beforeRenderCommands = await fs.readFile(fakeLog, "utf8");
+  const renderedOspf = await authenticatedRequest("/api/ospf/render", { method: "POST", body: JSON.stringify(previewPayload) });
+  assert.equal(renderedOspf.status, 200);
+  assert.match(renderedOspf.body.configs[0].config, /protocol ospf v2 birdbox_ospf_ospf_preview_ospfv2/);
+  assert.match(renderedOspf.body.configs[0].config, /export all;/);
+  assert.equal(await fs.readFile(fakeLog, "utf8"), beforeRenderCommands);
+  assert.deepEqual((await authenticatedRequest("/api/ospf")).body.domains.map((domain) => domain.id), ["ospf_a"]);
+  const ospfPreview = await authenticatedRequest("/api/ospf/preview", { method: "POST", body: JSON.stringify(previewPayload) });
+  assert.equal(ospfPreview.status, 200);
+  assert.equal(ospfPreview.body.valid, true);
+  assert.match(ospfPreview.body.configs[0].config, /export all;/);
+  assert.equal(ospfPreview.body.configs[0].config, renderedOspf.body.configs[0].config);
+  const removedMemberPreview = await authenticatedRequest("/api/ospf/preview", { method: "POST", body: JSON.stringify({ id: "ospf_a", name: "OSPF A", nodeConfigs: [], links: [] }) });
+  assert.equal(removedMemberPreview.status, 200);
+  assert.equal(removedMemberPreview.body.configs[0].nodeId, "local");
+  assert.doesNotMatch(removedMemberPreview.body.configs[0].config, /birdbox_ospf_ospf_a_ospfv2/);
   const createdOspfB = await authenticatedRequest("/api/ospf", { method: "POST", body: JSON.stringify(ospfDomainPayload("ospf_b", "OSPF B")) });
   assert.equal(createdOspfB.status, 201);
   const renamedOspfA = await authenticatedRequest("/api/ospf/ospf_a", { method: "PUT", body: JSON.stringify({ ...ospfDomainPayload("ospf_a", "OSPF A renamed"), layout: {} }) });

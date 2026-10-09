@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,32 @@ func TestLegacyExecIsDisabledUnlessExplicitlyEnabled(t *testing.T) {
 func TestReadOnlyTaskDeadlinePolicy(t *testing.T) {
 	if !readOnlyTask("bird.inspect") || !readOnlyTask("system.interfaces") || readOnlyTask("bird.apply") || readOnlyTask("bird.protocol_state") {
 		t.Fatal("unexpected read-only task classification")
+	}
+}
+
+func TestMutatingTaskHonorsParentCancellation(t *testing.T) {
+	t.Setenv("BIRDBOX_AGENT_LEGACY_EXEC", "enabled")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := executeTask(ctx, task{TaskID: "cancelled", NodeID: "n", Method: "legacy.exec", Params: map[string]any{"command": "sleep 1"}})
+	if result.OK || result.Code != "TIMEOUT" {
+		t.Fatalf("expected cancelled task timeout, got %#v", result)
+	}
+}
+
+func TestSelfUpgradeHonorsParentCancellation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	target := filepath.Join(t.TempDir(), "birdbox-agent")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := executeTask(ctx, task{TaskID: "upgrade-cancelled", NodeID: "n", Method: "agent.self_upgrade", Params: map[string]any{
+		"url": server.URL, "targetPath": target, "sha256": strings.Repeat("0", 64),
+	}})
+	if result.OK || result.Code != "DOWNLOAD_FAILED" {
+		t.Fatalf("expected cancelled upgrade download, got %#v", result)
 	}
 }
 

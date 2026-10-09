@@ -114,7 +114,15 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
   await expect(page.locator("#ibgpWorkspace")).toBeVisible();
   await expect(page.locator(".ibgp-side-editor")).toHaveCount(2);
   await expect(page.locator('.ibgp-side-editor input[type="number"]').first()).toHaveValue("1179");
-  await expect(page.locator('.ibgp-side-editor input[pattern="[A-Za-z_][A-Za-z0-9_]*"]').first()).toHaveValue("preserved_left");
+  const existingProtocolInput = page.locator('.ibgp-side-editor input[pattern="[A-Za-z_][A-Za-z0-9_]*"]').first();
+  await expect(existingProtocolInput).toHaveValue("preserved_left");
+  await existingProtocolInput.fill("preserved_left_dirty");
+  await expect(page.getByRole("button", { name: /保存域 · 有未保存修改/ })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "新建域" }).click();
+  await expect(page.locator("#ibgpName")).toHaveValue("Existing Core");
+  await expect(existingProtocolInput).toHaveValue("preserved_left_dirty");
+  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "新建域" }).click();
   await expect(page.locator("#ibgpName")).toHaveValue("新 iBGP 域");
   await expect(page.locator("#ibgpAsn")).toHaveValue("64512");
@@ -131,6 +139,9 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
   await expect(page.locator(".quick-node")).toHaveCount(1);
   await page.locator(".quick-node").click();
   await expect(page.locator(".ibgp-session-grid .ibgp-side-editor")).toHaveCount(2);
+  await expect(page.locator(".ibgp-side-label")).toHaveText(["左端", "右端"]);
+  await expect(page.getByRole("button", { name: /编辑 E2E Router/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /编辑 E2E Edge/ })).toBeVisible();
   await expect(
     page.locator(".ibgp-side-editor").first().getByLabel("本端 RR Cluster ID"),
   ).toBeEnabled();
@@ -156,9 +167,13 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
     "protocol bgp",
   );
   await protocolInputs.fill("ibgp_left_custom");
+  await expect(page.getByRole("button", { name: /保存域 · 有未保存修改/ })).toBeVisible();
   await expect(page.locator(".ibgp-preview-panels pre").first()).toContainText(
     "protocol bgp ibgp_left_custom",
   );
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "新建域" }).click();
+  await expect(protocolInputs).toHaveValue("ibgp_left_custom");
   const overflow = await page.evaluate(
     () =>
       document.documentElement.scrollWidth >

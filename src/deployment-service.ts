@@ -48,7 +48,7 @@ interface DeploymentServiceOptions {
   store: InventoryStore;
   withDeploymentLock<Result>(
     operation: () => Promise<Result> | Result,
-    options?: { allowPendingJournal?: boolean },
+    options?: { allowPendingJournal?: boolean; waitForActive?: boolean },
   ): Promise<Result>;
   configForNode(inventory: Inventory, node: ManagedNode): NodeConfigBundle;
   emptyConfigForNode(node: ManagedNode): NodeConfigBundle;

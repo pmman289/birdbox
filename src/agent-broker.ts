@@ -96,6 +96,7 @@ export class AgentBroker {
   readonly #pending = new Map<string, PendingTask>();
   #batchUpgradeJob: AgentBatchUpgradeJob | null = null;
   #singleUpgradeRunning = false;
+  #credentialWrites: Promise<unknown> = Promise.resolve();
 
   constructor(options: AgentBrokerOptions) {
     this.#database = options.database;
@@ -112,18 +113,35 @@ export class AgentBroker {
     if (!state) await this.#database.createState(CREDENTIALS_KEY, []);
   }
 
-  async #persistCredentials(): Promise<void> {
-    await this.#database.mutateState<CredentialRecord[], null>(CREDENTIALS_KEY, [], (current) => ({
-      value: [...this.#credentials.values()].map((item) => ({ ...item })),
-      result: null,
-    }));
+  #writeCredential(operation: () => Promise<void>): Promise<void> {
+    const write = this.#credentialWrites.catch(() => undefined).then(operation);
+    this.#credentialWrites = write;
+    return write;
+  }
+
+  #disconnect(nodeId: string): void {
+    this.#agents.delete(nodeId);
+    this.#queues.delete(nodeId);
+    const waiters = this.#waiters.get(nodeId) ?? [];
+    this.#waiters.delete(nodeId);
+    for (const waiter of waiters) waiter(null);
+    for (const pending of [...this.#pending.values()]) {
+      if (pending.task.nodeId === nodeId) {
+        this.#resolveDroppedTask(pending.task, "AGENT_CREDENTIAL_CHANGED", "Agent 凭据已变更，请重新注册");
+      }
+    }
   }
 
   async issueToken(nodeId: string): Promise<string> {
     const token = randomBytes(32).toString("base64url");
     const record: CredentialRecord = { nodeId, tokenHash: hashToken(token), createdAt: new Date().toISOString(), revokedAt: null };
-    this.#credentials.set(nodeId, record);
-    await this.#persistCredentials();
+    await this.#writeCredential(async () => {
+      await this.#database.mutateState<CredentialRecord[], void>(CREDENTIALS_KEY, [], (current) => ({
+        value: [...current.filter((item) => item.nodeId !== nodeId), record],
+      }));
+      this.#credentials.set(nodeId, record);
+      this.#disconnect(nodeId);
+    });
     return token;
   }
 
@@ -132,11 +150,16 @@ export class AgentBroker {
   async rotateToken(nodeId: string): Promise<string> { return this.issueToken(nodeId); }
 
   async revoke(nodeId: string): Promise<void> {
-    const record = this.#credentials.get(nodeId);
-    if (!record) return;
-    record.revokedAt = new Date().toISOString();
-    await this.#persistCredentials();
-    this.#agents.delete(nodeId);
+    await this.#writeCredential(async () => {
+      const record = this.#credentials.get(nodeId);
+      if (!record) return;
+      const revoked = { ...record, revokedAt: new Date().toISOString() };
+      await this.#database.mutateState<CredentialRecord[], void>(CREDENTIALS_KEY, [], (current) => ({
+        value: [...current.filter((item) => item.nodeId !== nodeId), revoked],
+      }));
+      this.#credentials.set(nodeId, revoked);
+      this.#disconnect(nodeId);
+    });
     logger.info("已撤销 Agent 凭据", { nodeId });
   }
 
@@ -339,10 +362,10 @@ export class AgentBroker {
 
   async poll(nodeId: string, token: string, waitMs = 25_000, signal?: AbortSignal): Promise<AgentTask | null> {
     if (!this.authenticate(nodeId, token)) throw new Error("Agent 凭据无效或已撤销");
+    if (signal?.aborted) return null;
     this.heartbeat(nodeId, token);
     const immediate = this.#takeTask(nodeId);
     if (immediate) return immediate;
-    if (signal?.aborted) return null;
     return new Promise((resolve) => {
       const waiters = this.#waiters.get(nodeId) ?? [];
       let settled = false;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import PolicyEditor from "../sessions/PolicyEditor.vue";
 import type {
   ChannelPolicy,
@@ -12,6 +12,7 @@ import type {
   OspfVirtualLink,
   OspfPasswordOptions,
 } from "@birdbox/contracts/inventory";
+import { resourceAppliesToNode, type NodeScopedResource } from "@birdbox/contracts/resource-scope";
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
 import { api } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
@@ -22,6 +23,7 @@ interface OspfNode {
   id: string;
   name: string;
   routerId: string;
+  igpAddress?: string | null;
   v2: string;
   v3: string;
   neighbors: number;
@@ -40,6 +42,8 @@ interface OspfLink {
   mode: "active" | "passive";
   auth: "none" | "simple" | "md5" | "ipsec";
   options?: OspfInterfaceOptions;
+  localOptions?: OspfInterfaceOptions;
+  remoteOptions?: OspfInterfaceOptions;
 }
 interface OspfRuntimeSummary {
   error: string | null;
@@ -69,26 +73,40 @@ interface OspfRouteRuntime {
 interface OspfRuntimeNode {
   nodeId: string;
   name: string;
-    runtime: {
-      v2: { state: string | null; neighbors: number; routes: number | null };
-      v3: { state: string | null; neighbors: number; routes: number | null };
-      neighbors: OspfNeighborRuntime[];
-      routes: OspfRouteRuntime[];
-      routesTruncated: boolean;
-      error?: string | null;
-    };
+  runtime: {
+    v2: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
+    v3: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
+    neighbors: OspfNeighborRuntime[];
+    routes: OspfRouteRuntime[];
+    routesTruncated: boolean;
+    error?: string | null;
+  };
 }
 
 const { dashboard } = useDashboardStore();
 const runtimeByNode = ref<Record<string, OspfRuntimeSummary>>({});
+const runtimeLoadError = ref("");
 const runtimeDialog = ref<HTMLDialogElement | null>(null);
 const runtimeDetailKind = ref<"neighbors" | "routes" | "areas" | null>(null);
 const routePathDialog = ref<HTMLDialogElement | null>(null);
 const previewDialog = ref<HTMLDialogElement | null>(null);
+const serverPreviewByNode = ref<Record<string, string>>({});
+const previewError = ref("");
+const previewLoading = ref(false);
+const previewValidated = ref(false);
+function makeDraftDomainId(): string {
+  return `ospf_${Array.from(crypto.getRandomValues(new Uint32Array(4)), (value) => value.toString(16).padStart(8, "0")).join("")}`;
+}
+const draftDomainId = ref(makeDraftDomainId());
+let previewTimer: number | null = null;
+let previewGeneration = 0;
+let previewAbortController: AbortController | null = null;
 const routePathTarget = ref("");
 const routePathStartNodeId = ref("");
 const routePathPending = ref(false);
 const routePathError = ref("");
+let routePathGeneration = 0;
+let routePathAbortController: AbortController | null = null;
 const ospfActionPending = ref<"preview" | "save" | null>(null);
 interface OspfPathStep {
   nodeId: string;
@@ -108,12 +126,19 @@ const nodes = computed<OspfNode[]>(
       id: node.id,
       name: node.name,
       routerId: node.routerId,
+      igpAddress: node.igpAddress,
       v2: runtimeByNode.value[node.id]?.v2 ?? "未检查",
       v3: runtimeByNode.value[node.id]?.v3 ?? "未检查",
       neighbors: runtimeByNode.value[node.id]?.neighbors ?? 0,
       routes: runtimeByNode.value[node.id]?.routes ?? 0,
     })) ?? [],
 );
+function runtimeStateClass(state: string): "up" | "warn" | "" {
+  const normalized = state.trim().toLowerCase();
+  if (normalized.startsWith("full") || normalized === "established" || normalized === "up") return "up";
+  if (normalized === "idle" || normalized === "down" || normalized === "init" || normalized === "loading") return "warn";
+  return "";
+}
 const selectedNodeId = ref("");
 const enabledVersions = ref<OspfVersion[]>(["ospfv2"]);
 const enabled = ref(true);
@@ -137,14 +162,25 @@ const defaultProtocolOptions = (): OspfProtocolOptions => ({
 const protocolOptions = ref<OspfProtocolOptions>(defaultProtocolOptions());
 const areaOptions = ref<Record<string, OspfAreaOptions>>({});
 const virtualLinks = ref<OspfVirtualLink[]>([]);
-const configuredAreas = computed(() => [...new Set([...links.value.map((link) => link.area), ...Object.keys(areaOptions.value)])].sort());
+const configuredAreas = computed(() => [...new Set([
+  ...selectedNodeLinks.value.map((link) => link.area),
+  ...Object.keys(areaOptions.value),
+  ...virtualLinks.value.map((link) => link.area),
+])].sort());
 function ensureAreaOptions(area: string): OspfAreaOptions {
   if (!areaOptions.value[area]) areaOptions.value = { ...areaOptions.value, [area]: {} };
   return areaOptions.value[area]!;
 }
 function addVirtualLink(): void {
-  const area = configuredAreas.value[0] ?? "0.0.0.0";
-  virtualLinks.value = [...virtualLinks.value, { id: "0.0.0.0", area, authentication: "none", passwordOptions: {} }];
+  // A virtual link must use a non-Backbone transit area. Prefer an area
+  // already present in the topology and keep a valid editable placeholder
+  // when the domain has not acquired one yet.
+  const area = configuredAreas.value.find((item) => item !== "0.0.0.0") ?? "1.1.1.1";
+  if (!areaOptions.value["0.0.0.0"]) areaOptions.value = { ...areaOptions.value, "0.0.0.0": {} };
+  const used = new Set(virtualLinks.value.map((link) => `${link.id}:${link.area}`));
+  const candidates = Array.from({ length: 254 }, (_, index) => `198.51.100.${index + 1}`);
+  const id = candidates.find((candidate) => !used.has(`${candidate}:${area}`)) ?? `203.0.113.${virtualLinks.value.length + 1}`;
+  virtualLinks.value = [...virtualLinks.value, { id, area, authentication: "none", passwordOptions: {} }];
 }
 function ensurePasswordOptions(options: OspfInterfaceOptions): OspfPasswordOptions {
   if (!options.passwordOptions) options.passwordOptions = {};
@@ -153,6 +189,11 @@ function ensurePasswordOptions(options: OspfInterfaceOptions): OspfPasswordOptio
 function ensureVirtualPasswordOptions(link: OspfVirtualLink): OspfPasswordOptions {
   if (!link.passwordOptions) link.passwordOptions = {};
   return link.passwordOptions;
+}
+function stabilizeDraftForSerialization(): void {
+  for (const link of links.value) ensureLinkEndpointOptions(link);
+  for (const area of configuredAreas.value) if (!areaOptions.value[area]) areaOptions.value = { ...areaOptions.value, [area]: {} };
+  for (const link of virtualLinks.value) if (!link.passwordOptions) link.passwordOptions = {};
 }
 function areaListText(area: string, key: "networks" | "external" | "stubnets"): string {
   const items = ensureAreaOptions(area)[key] as Array<{ prefix: string }> | undefined;
@@ -175,11 +216,12 @@ function removeAreaEntry(area: string, key: "networks" | "external" | "stubnets"
   areaOptions.value = { ...areaOptions.value, [area]: { ...current, [key]: items } };
 }
 function neighborText(link: OspfLink): string {
-  return link.options?.neighbors?.map((item) => `${item.address}${item.eligible ? " eligible" : ""}`).join(", ") ?? "";
+  const options = link === selectedLink.value ? selectedLinkOptions.value : (link.options ?? {});
+  return options.neighbors?.map((item) => `${item.address}${item.eligible ? " eligible" : ""}`).join(", ") ?? "";
 }
 function setNeighborText(link: OspfLink, value: string): void {
-  if (!link.options) link.options = { type: "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} };
-  link.options.neighbors = value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => ({ address: item.replace(/\s+eligible$/i, "").trim(), eligible: /\s+eligible$/i.test(item) }));
+  const options = link === selectedLink.value ? selectedLinkOptions.value : (link.options ?? {});
+  options.neighbors = value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => ({ address: item.replace(/\s+eligible$/i, "").trim(), eligible: /\s+eligible$/i.test(item) }));
 }
 const search = ref("");
 const links = ref<OspfLink[]>([]);
@@ -244,12 +286,42 @@ const nodeConfigs = ref<Record<string, OspfNodeConfig>>({});
 const ospfDomainId = ref<string | null>(null);
 const ospfDomainName = ref("默认 OSPF 域");
 const ospfDomains = ref<Array<{ id: string; name: string; nodeConfigs: OspfNodeConfig[]; links: OspfLink[]; layout?: Record<string, OspfNodePosition> }>>([]);
+const savedDomainSignature = ref("");
+const ospfDomainsState = ref<"loading" | "ready" | "error">("loading");
+const ospfLoadError = ref("");
+const ospfDomainsReady = computed(() => ospfDomainsState.value === "ready");
+
 const selectedLink = computed(
   () =>
     topologyLinks.value.find((link) => link.id === selectedLinkId.value) ??
     null,
 );
+type OspfEndpoint = "from" | "to";
+const selectedLinkEndpoint = ref<OspfEndpoint>("from");
+function emptyInterfaceOptions(): OspfInterfaceOptions {
+  return { type: "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} };
+}
+function cloneInterfaceOptions(value: OspfInterfaceOptions | undefined): OspfInterfaceOptions {
+  return JSON.parse(JSON.stringify(value ?? emptyInterfaceOptions())) as OspfInterfaceOptions;
+}
+function cloneDraft<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+function ensureLinkEndpointOptions(link: OspfLink): void {
+  const legacy = link.options ?? emptyInterfaceOptions();
+  link.localOptions ??= cloneInterfaceOptions(legacy);
+  link.remoteOptions ??= cloneInterfaceOptions(legacy);
+  link.options ??= link.localOptions;
+}
+const selectedLinkOptions = computed<OspfInterfaceOptions>(() => {
+  const link = selectedLink.value;
+  if (!link) return emptyInterfaceOptions();
+  ensureLinkEndpointOptions(link);
+  return selectedLinkEndpoint.value === "from" ? link.localOptions! : link.remoteOptions!;
+});
 const nodePosition = ref<Record<string, OspfNodePosition>>({});
+const globalNodePosition = ref<Record<string, OspfNodePosition>>({});
+
 const dragging = ref<{ id: string; dx: number; dy: number; moved: boolean; pointerId: number; target: HTMLElement } | null>(null);
 const suppressNodeClickId = ref<string | null>(null);
 let suppressNodeClickTimer: number | null = null;
@@ -261,6 +333,12 @@ const layoutSaving = ref(false);
 const layoutSaveError = ref("");
 let layoutSaveQueue: Promise<void> = Promise.resolve();
 let runtimeTimer: number | null = null;
+let runtimeRequestGeneration = 0;
+let runtimeAbortController: AbortController | null = null;
+let interfaceRequestGeneration = 0;
+let interfaceAbortController: AbortController | null = null;
+let domainRequestGeneration = 0;
+let domainAbortController: AbortController | null = null;
 const selectedNode = computed(
   () =>
     nodes.value.find((node) => node.id === selectedNodeId.value) ??
@@ -326,12 +404,27 @@ const routePathLinkDirections = computed(() => {
   }
   return directions;
 });
-function pathLinkForHop(nodeId: string, interfaceName: string | null): OspfLink | null {
+function pathLinkForHop(nodeId: string, interfaceName: string | null, nextHopAddress: string | null): OspfLink | null {
   if (!interfaceName) return null;
-  return topologyLinks.value.find((link) =>
+  const candidates = topologyLinks.value.filter((link) =>
     (link.from === nodeId && link.localInterface === interfaceName)
       || (link.to === nodeId && link.remoteInterface === interfaceName),
-  ) ?? null;
+  );
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0] ?? null;
+  if (!nextHopAddress) return null;
+  const normalizedAddress = nextHopAddress.split("%", 1)[0];
+  const matching = candidates.filter((link) => {
+    const remoteNodeId = link.from === nodeId ? link.to : link.from;
+    const remoteNode = nodes.value.find((node) => node.id === remoteNodeId);
+    const endpointOptions = link.from === nodeId ? link.localOptions : link.remoteOptions;
+    return remoteNode?.igpAddress?.split("%", 1)[0] === normalizedAddress
+      || (endpointOptions?.neighbors ?? []).some((neighbor) => neighbor.address.split("%", 1)[0] === normalizedAddress);
+  });
+  // A shared interface can legitimately have several OSPF neighbors. If the
+  // route output does not identify one of them, stop the visual path instead
+  // of drawing an arbitrary edge to the first matching link.
+  return matching.length === 1 ? matching[0] ?? null : null;
 }
 function clampRoutePathScale(value: number): number {
   return Math.max(0.65, Math.min(2.5, Number(value.toFixed(2))));
@@ -391,10 +484,25 @@ function pathArrowPoints(link: OspfLink, direction: "forward" | "reverse"): stri
   const baseY = midY - uy * 6;
   return `${tipX},${tipY} ${baseX + px * 5},${baseY + py * 5} ${baseX - px * 5},${baseY - py * 5}`;
 }
+function invalidateRoutePathQuery(clear = false): void {
+  routePathGeneration += 1;
+  routePathAbortController?.abort();
+  routePathAbortController = null;
+  routePathPending.value = false;
+  if (clear) {
+    routePathError.value = "";
+    routePathSteps.value = [];
+  }
+}
 async function queryRoutePath(): Promise<void> {
   const target = routePathTarget.value.trim();
   const startNodeId = routePathStartNodeId.value;
   if (!target || !startNodeId || routePathPending.value) return;
+  const requestGeneration = ++routePathGeneration;
+  routePathAbortController?.abort();
+  const controller = new AbortController();
+  routePathAbortController = controller;
+  const domainId = ospfDomainId.value;
   routePathPending.value = true;
   routePathError.value = "";
   routePathSteps.value = [];
@@ -402,38 +510,74 @@ async function queryRoutePath(): Promise<void> {
     const steps: OspfPathStep[] = [];
     const visited = new Set<string>();
     let currentNodeId: string | null = startNodeId;
+    let terminationError = "";
     for (let depth = 0; depth < 16 && currentNodeId; depth += 1) {
-      if (visited.has(currentNodeId)) break;
+      if (visited.has(currentNodeId)) {
+        terminationError = "路径包含环路，已停止继续查询";
+        break;
+      }
       visited.add(currentNodeId);
       const response: RoutePathResponse = await api<RoutePathResponse>(
         `/api/nodes/${encodeURIComponent(currentNodeId)}/route-path?target=${encodeURIComponent(target)}`,
-        { timeoutMs: 30_000 },
+        { timeoutMs: 30_000, signal: controller.signal },
       );
+      if (
+        requestGeneration !== routePathGeneration
+        || controller.signal.aborted
+        || domainId !== ospfDomainId.value
+        || startNodeId !== routePathStartNodeId.value
+      ) return;
       const route: RoutePathResponse["routes"][number] | undefined = response.routes[0];
       if (!route) {
         if (!steps.length && response.error) routePathError.value = response.error;
         break;
       }
+      if (route.nextHops.length > 1) {
+        steps.push({ nodeId: currentNodeId, route, nextNodeId: null, linkId: null });
+        terminationError = "路径存在多个下一跳，无法唯一绘制拓扑路径";
+        break;
+      }
       const hop: RoutePathResponse["routes"][number]["nextHops"][number] | undefined = route.nextHops[0];
-      const link: OspfLink | null = hop ? pathLinkForHop(currentNodeId, hop.interface) : null;
+      const link: OspfLink | null = hop ? pathLinkForHop(currentNodeId, hop.interface, hop.address) : null;
       const nextNodeId: string | null = hop?.address && link
         ? (link.from === currentNodeId ? link.to : link.from)
         : null;
       steps.push({ nodeId: currentNodeId, route, nextNodeId, linkId: link?.id ?? null });
+      if (hop?.address && !link) {
+        terminationError = "下一跳不在当前 OSPF 拓扑中，已停止绘制";
+        break;
+      }
       if (!nextNodeId || !hop?.address) break;
       currentNodeId = nextNodeId;
     }
+    if (currentNodeId && steps.length >= 16 && !terminationError) terminationError = "路径超过 16 跳，已停止继续查询";
+    if (
+      requestGeneration !== routePathGeneration
+      || controller.signal.aborted
+      || domainId !== ospfDomainId.value
+      || startNodeId !== routePathStartNodeId.value
+    ) return;
     routePathSteps.value = steps;
+    if (terminationError) routePathError.value = terminationError;
     if (!steps.length && !routePathError.value) routePathError.value = "没有找到到达该目标 IP 的路径";
   } catch (error) {
-    routePathError.value = error instanceof Error ? error.message : "路径查询失败";
+    if (
+      requestGeneration === routePathGeneration
+      && !controller.signal.aborted
+      && domainId === ospfDomainId.value
+      && startNodeId === routePathStartNodeId.value
+    ) routePathError.value = error instanceof Error ? error.message : "路径查询失败";
   } finally {
-    routePathPending.value = false;
+    if (requestGeneration === routePathGeneration) {
+      routePathPending.value = false;
+      routePathAbortController = null;
+    }
   }
 }
 function openRoutePath(): void {
   const startNodeId = selectedNodeId.value || nodes.value[0]?.id || "";
   if (!startNodeId) return;
+  invalidateRoutePathQuery(true);
   routePathStartNodeId.value = startNodeId;
   routePathTarget.value = "";
   routePathError.value = "";
@@ -442,8 +586,8 @@ function openRoutePath(): void {
   routePathDialog.value?.showModal();
 }
 function closeRoutePath(): void {
+  invalidateRoutePathQuery();
   routePathDialog.value?.close();
-  routePathPending.value = false;
   routePathDragging.value = null;
 }
 function openOspfPreview(): void {
@@ -459,15 +603,22 @@ const filteredNodes = computed(() =>
       .includes(search.value.toLowerCase()),
   ),
 );
-const availableDefines = computed(
-  () => dashboard.value?.inventory.defines ?? policyDefines.value,
+function resourceAvailableForSelectedNode(resource: NodeScopedResource): boolean {
+  return !selectedNodeId.value || resourceAppliesToNode(resource, selectedNodeId.value);
+}
+const availableDefines = computed(() =>
+  (dashboard.value?.inventory.defines ?? policyDefines.value).filter(resourceAvailableForSelectedNode),
 );
-const availableFunctions = computed(
-  () => dashboard.value?.inventory.functions ?? policyFunctions.value,
+const availableFunctions = computed(() =>
+  (dashboard.value?.inventory.functions ?? policyFunctions.value).filter(resourceAvailableForSelectedNode),
 );
-const availableFilters = computed(
-  () => dashboard.value?.inventory.filters ?? policyFilters.value,
+const availableFilters = computed(() =>
+  (dashboard.value?.inventory.filters ?? policyFilters.value).filter(resourceAvailableForSelectedNode),
 );
+function availableDefinesForVersion(version: OspfVersion): PolicyDefine[] {
+  const expectedType = version === "ospfv2" ? "cidr4" : "cidr6";
+  return availableDefines.value.filter((define) => define.type === expectedType);
+}
 function interfacesForNode(nodeId: string, current = ""): string[] {
   const discovered = interfaceOptionsByNode.value[nodeId] ?? [];
   // Interface names are node-scoped. Never mix the catalogue of another
@@ -518,6 +669,7 @@ function ensureNodePositions(nextNodes: OspfNode[] = nodes.value): void {
   centerTopologyView(next);
 }
 function resetTopologyLayout(): void {
+  if (ospfActionPending.value) return;
   const next: Record<string, OspfNodePosition> = {};
   nodes.value.forEach((node, index) => {
     next[node.id] = defaultTopologyPosition(index, nodes.value.length);
@@ -547,6 +699,9 @@ watch(
     if (nodeId) loadNodeConfig(nodeId);
   },
 );
+watch(routePathStartNodeId, (next, previous) => {
+  if (next !== previous && routePathPending.value) invalidateRoutePathQuery(true);
+});
 function nodePairKey(left: string, right: string): string {
   return [left, right].sort().join("::");
 }
@@ -595,53 +750,6 @@ function interfaceInUse(
   // already prevent selecting an interface from the opposite node.
   return false;
 }
-function policyText(
-  policy: ChannelPolicy,
-  direction: "import" | "export",
-  defineId: string | null,
-  redistributeStatic = false,
-): string {
-  if (policy.mode === "custom") {
-    const filter = availableFilters.value.find((item) => item.id === policy.filterId);
-    return `${direction} filter ${filter?.name ?? policy.filterId ?? "<未选择 Filter>"}`;
-  }
-  const define = defineId ? availableDefines.value.find((item) => item.id === defineId) : null;
-  const hasFunctionStep = policy.mode === "combined" && policy.steps.some((step) => step.type === "function");
-  if (!hasFunctionStep) {
-    if (direction === "import") return policy.formAction === "all" ? "import all" : "import none";
-    if (redistributeStatic) {
-      const lines: string[] = [];
-      if (policy.formAction === "cidr") {
-        lines.push(`    if net ~ ${define?.name ?? defineId ?? "<未选择 CIDR>"} then accept;`);
-      }
-      // Keep static redistribution immediately before the terminal action so
-      // any Function steps above it still run first.
-      lines.push("    if source = RTS_STATIC then accept;");
-      lines.push(`    ${policy.formAction === "all" ? "accept" : "reject"};`);
-      return `export filter {\n${lines.join("\n")}\n  }`;
-    }
-    return policy.formAction === "all"
-      ? "export all"
-      : policy.formAction === "cidr"
-        ? `export filter { if net ~ ${define?.name ?? defineId ?? "<未选择 CIDR>"} then accept; reject; }`
-        : "export none";
-  }
-  const lines = policy.steps.map((step) => {
-    if (step.type === "form") {
-      if (direction === "import") return policy.formAction === "all" ? "    accept;" : "    reject;";
-      if (policy.formAction === "all") return "    accept;";
-      if (policy.formAction === "cidr") return `    if net ~ ${define?.name ?? defineId ?? "<未选择 CIDR>"} then accept;`;
-      return "";
-    }
-    const fn = availableFunctions.value.find((item) => item.id === step.functionId);
-    const name = fn?.name ?? step.functionId;
-    if (step.action === "execute") return `    ${name}();`;
-    return `    if ${name}() then ${step.action};`;
-  }).filter(Boolean);
-  if (direction === "export" && redistributeStatic) lines.push("    if source = RTS_STATIC then accept;");
-  if (direction === "export") lines.push("    reject;");
-  return `${direction} filter {\n${lines.join("\n")}\n  }`;
-}
 function updateImportPolicy(version: OspfVersion, policy: ChannelPolicy): void {
   ospfImportPolicies.value = { ...ospfImportPolicies.value, [version]: policy };
   // Persist the active editor draft immediately. This keeps each node's
@@ -666,11 +774,8 @@ function updateExportDefine(
 function copyPolicy(policy: ChannelPolicy): ChannelPolicy {
   return { ...policy, steps: policy.steps.map((step) => ({ ...step })) };
 }
-function saveSelectedNodeConfig(): void {
-  if (!selectedNodeId.value) return;
-  nodeConfigs.value = {
-    ...nodeConfigs.value,
-    [selectedNodeId.value]: {
+function selectedNodeConfigDraft(): OspfNodeConfig {
+  return {
       nodeId: selectedNodeId.value,
       enabled: enabled.value,
       versions: [...enabledVersions.value],
@@ -690,46 +795,78 @@ function saveSelectedNodeConfig(): void {
       protocolOptions: { ...protocolOptions.value },
       areaOptions: JSON.parse(JSON.stringify(areaOptions.value)) as Record<string, OspfAreaOptions>,
       virtualLinks: JSON.parse(JSON.stringify(virtualLinks.value)) as OspfVirtualLink[],
-    },
   };
 }
+function saveSelectedNodeConfig(): void {
+  if (!selectedNodeId.value) return;
+  if (!nodeConfigs.value[selectedNodeId.value] && !enabled.value) return;
+  nodeConfigs.value = { ...nodeConfigs.value, [selectedNodeId.value]: selectedNodeConfigDraft() };
+}
+function domainSignature(value: Record<string, unknown>): string {
+  // Ignore independently persisted coordinates and canonicalize editor defaults.
+  // Rendering an advanced field may materialize an empty object; that alone
+  // must not turn an unchanged domain into an unsaved routing change.
+  const payload = cloneDraft(value);
+  delete payload.layout;
+  const links = (payload.links as Array<Record<string, unknown>> ?? []).map((link) => {
+    const legacy = link.options as OspfInterfaceOptions | undefined;
+    const endpoint = (options: unknown) => ({ ...emptyInterfaceOptions(), ...(options as OspfInterfaceOptions ?? legacy), passwordOptions: (options as OspfInterfaceOptions)?.passwordOptions ?? legacy?.passwordOptions ?? {} });
+    const result: Record<string, unknown> = { ...link, localOptions: endpoint(link.localOptions), remoteOptions: endpoint(link.remoteOptions) };
+    delete (result as Record<string, unknown>).options;
+    return result;
+  }).sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  const configs = (payload.nodeConfigs as OspfNodeConfig[] ?? []).map((config) => {
+    const areas = { ...(config.areaOptions ?? {}) };
+    for (const link of links) {
+      if (link.fromNodeId === config.nodeId || link.toNodeId === config.nodeId) areas[String(link.area)] ??= {};
+    }
+    return {
+      ...config,
+      bfd: config.bfd === true,
+      gracefulRestart: config.gracefulRestart === true,
+      redistributeStatic: config.redistributeStatic === true,
+      protocolOptions: { ...defaultProtocolOptions(), ...(config.protocolOptions ?? {}) },
+      areaOptions: areas,
+      virtualLinks: (config.virtualLinks ?? []).map((link) => ({ ...link, passwordOptions: link.passwordOptions ?? {} })),
+    };
+  }).sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+  const canonical = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(canonical);
+    if (input && typeof input === "object") return Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonical(item)]));
+    return input;
+  };
+  return JSON.stringify(canonical({ id: payload.id, name: payload.name, nodeConfigs: configs, links }));
+}
+function currentDomainSignature(): string {
+  return domainSignature(domainPayload());
+}
+const hasUnsavedDomainChanges = computed(() => savedDomainSignature.value !== currentDomainSignature());
+function confirmDiscardDomainDraft(): boolean {
+  if (!hasUnsavedDomainChanges.value) return true;
+  return window.confirm("当前 OSPF 域有未保存修改，继续操作会丢弃这些修改。是否继续？");
+}
+function handleDomainSelection(select: HTMLSelectElement): void {
+  const nextDomainId = select.value;
+  if (!confirmDiscardDomainDraft()) {
+    select.value = ospfDomainId.value ?? "";
+    return;
+  }
+  void selectOspfDomain(nextDomainId, true);
+}
+
 function domainPayload(): Record<string, unknown> {
-  saveSelectedNodeConfig();
-  // A link is an explicit request to run OSPF on both endpoints. Keep this
-  // invariant at payload construction as well, so a stale/legacy draft cannot
-  // disable one side after the link has been created.
-  const linkedNodeIds = new Set(links.value.flatMap((link) => [link.from, link.to]));
-  const configs = nodes.value.map(
-    (node) => {
-      const existing = nodeConfigs.value[node.id];
-      if (existing) return linkedNodeIds.has(node.id) && !existing.enabled
-        ? { ...existing, enabled: true }
-        : existing;
-      return {
-        nodeId: node.id,
-        enabled: linkedNodeIds.has(node.id),
-        versions: ["ospfv2"],
-        routerId: node.routerId || null,
-        importPolicies: {
-          ospfv2: defaultImportPolicy(),
-          ospfv3: defaultImportPolicy(),
-        },
-        exportPolicies: {
-          ospfv2: defaultExportPolicy(),
-          ospfv3: defaultExportPolicy(),
-        },
-        exportDefineIds: { ospfv2: null, ospfv3: null },
-        bfd: false,
-        gracefulRestart: false,
-        redistributeStatic: false,
-        protocolOptions: {},
-        areaOptions: {},
-        virtualLinks: [],
-      };
-    },
-  );
+  // New endpoint drafts are enabled when they are first materialized. Existing
+  // endpoint settings remain authoritative, including an intentional disable.
+  // Domain membership is explicit. Sending a disabled config for every
+  // managed node makes deployment, runtime polling, and topology state scale
+  // with the whole inventory and silently turns every node into a member.
+  // Enabling a node or creating a link materializes its config in nodeConfigs;
+  // untouched nodes stay outside this domain.
+  const drafts = { ...nodeConfigs.value };
+  if (selectedNodeId.value && (drafts[selectedNodeId.value] || enabled.value)) drafts[selectedNodeId.value] = selectedNodeConfigDraft();
+  const configs = Object.values(drafts).filter((config) => nodes.value.some((node) => node.id === config.nodeId));
   return {
-    id: ospfDomainId.value ?? undefined,
+    id: ospfDomainId.value ?? draftDomainId.value,
     name: ospfDomainName.value.trim() || "默认 OSPF 域",
     nodeConfigs: configs,
     links: links.value.map((link) => ({
@@ -745,46 +882,70 @@ function domainPayload(): Record<string, unknown> {
       passive: link.mode === "passive",
       authentication: link.auth,
       options: link.options,
+      localOptions: link.localOptions,
+      remoteOptions: link.remoteOptions,
     })),
     layout: nodePosition.value,
   };
 }
 function clearOspfDraft(): void {
+  invalidateRoutePathQuery(true);
   ospfDomainId.value = null;
+  draftDomainId.value = makeDraftDomainId();
   ospfDomainName.value = "新 OSPF 域";
   links.value = [];
+  selectedLinkId.value = null;
+  selectedLinkEndpoint.value = "from";
   nodeConfigs.value = {};
-  nodePosition.value = {};
+  nodePosition.value = cloneDraft(globalNodePosition.value);
+  serverPreviewByNode.value = {};
   ensureNodePositions();
-  if (nodes.value[0]) selectedNodeId.value = nodes.value[0].id;
+  if (nodes.value[0]) {
+    selectedNodeId.value = nodes.value[0].id;
+    loadNodeConfig(selectedNodeId.value);
+  }
+  savedDomainSignature.value = currentDomainSignature();
 }
-async function selectOspfDomain(domainId: string): Promise<void> {
+async function selectOspfDomain(domainId: string, skipDirtyCheck = false): Promise<void> {
+  if (!skipDirtyCheck && !confirmDiscardDomainDraft()) return;
+
   const domain = ospfDomains.value.find((item) => item.id === domainId);
   if (!domain) return;
+  invalidateRoutePathQuery(true);
   ospfDomainId.value = domain.id;
   ospfDomainName.value = domain.name;
-  links.value = domain.links.map((link) => ({ ...link, from: (link as unknown as { from?: string }).from ?? (link as unknown as { fromNodeId: string }).fromNodeId, to: (link as unknown as { to?: string }).to ?? (link as unknown as { toNodeId: string }).toNodeId, mode: (link as unknown as { passive?: boolean }).passive ? "passive" : "active", auth: ((value: string) => value === "simple" || value === "md5" || value === "ipsec" ? value : "none")((link as unknown as { authentication?: string }).authentication ?? "none") } as OspfLink));
-  nodeConfigs.value = Object.fromEntries(domain.nodeConfigs.map((config) => [config.nodeId, config]));
-  nodePosition.value = { ...(domain.layout ?? {}) };
+  selectedLinkId.value = null;
+  selectedLinkEndpoint.value = "from";
+  links.value = cloneDraft(domain.links).map((link) => ({ ...link, from: (link as unknown as { from?: string }).from ?? (link as unknown as { fromNodeId: string }).fromNodeId, to: (link as unknown as { to?: string }).to ?? (link as unknown as { toNodeId: string }).toNodeId, mode: (link as unknown as { passive?: boolean }).passive ? "passive" : "active", auth: ((value: string) => value === "simple" || value === "md5" || value === "ipsec" ? value : "none")((link as unknown as { authentication?: string }).authentication ?? "none") } as OspfLink));
+  nodeConfigs.value = Object.fromEntries(cloneDraft(domain.nodeConfigs).map((config) => [config.nodeId, config]));
+  nodePosition.value = cloneDraft({ ...(domain.layout ?? {}), ...globalNodePosition.value });
+  serverPreviewByNode.value = {};
+  runtimeByNode.value = {};
+  runtimeLoadError.value = "";
   ensureNodePositions();
   selectedNodeId.value = nodes.value.find((node) => nodeConfigs.value[node.id])?.id ?? nodes.value[0]?.id ?? "";
   if (selectedNodeId.value) loadNodeConfig(selectedNodeId.value);
+  savedDomainSignature.value = currentDomainSignature();
   await refreshOspfRuntime();
 }
-function newOspfDomain(): void { clearOspfDraft(); }
+function newOspfDomain(): void {
+  if (!confirmDiscardDomainDraft()) return;
+  clearOspfDraft();
+}
 async function deleteOspfDomain(): Promise<void> {
-  if (!ospfDomainId.value || !window.confirm(`确认删除 OSPF 域“${ospfDomainName.value}”？两端邻接将被撤销。`)) return;
+  if (!ospfDomainsReady.value || !ospfDomainId.value || !window.confirm(`确认删除 OSPF 域“${ospfDomainName.value}”？两端邻接将被撤销。`)) return;
   ospfActionPending.value = "save";
   try {
     await api(`/api/ospf/${encodeURIComponent(ospfDomainId.value)}`, { method: "DELETE" });
     ospfDomains.value = ospfDomains.value.filter((domain) => domain.id !== ospfDomainId.value);
-    if (ospfDomains.value[0]) await selectOspfDomain(ospfDomains.value[0].id); else clearOspfDraft();
+    if (ospfDomains.value[0]) await selectOspfDomain(ospfDomains.value[0].id, true); else clearOspfDraft();
     await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
     dispatchToast("OSPF 域已删除", "success");
   } catch (error) { dispatchToast(error instanceof Error ? error.message : "删除 OSPF 域失败", "error"); }
   finally { ospfActionPending.value = null; }
 }
 function removeSelectedLink(): void {
+  if (ospfActionPending.value) return;
   if (!selectedLinkId.value) return;
   const link = links.value.find((item) => item.id === selectedLinkId.value);
   if (!link || !window.confirm(`确认删除链路 ${link.from} ↔ ${link.to}？`)) return;
@@ -792,8 +953,9 @@ function removeSelectedLink(): void {
   selectedLinkId.value = null;
 }
 async function saveOspf(): Promise<void> {
-  if (ospfActionPending.value || !nodes.value.length) return;
+  if (ospfActionPending.value || !ospfDomainsReady.value || !nodes.value.length) return;
   ospfActionPending.value = "save";
+  serverPreviewByNode.value = {};
   try {
     const payload = domainPayload();
     const response = await api<{ domain: { id: string; name?: string } }>(
@@ -818,15 +980,24 @@ async function saveOspf(): Promise<void> {
   }
 }
 async function previewOspf(): Promise<void> {
-  if (ospfActionPending.value || !nodes.value.length) return;
+  if (ospfActionPending.value || !ospfDomainsReady.value || !nodes.value.length) return;
   ospfActionPending.value = "preview";
+  cancelDraftPreview();
+  previewValidated.value = false;
+  previewError.value = "";
+  serverPreviewByNode.value = {};
+  stabilizeDraftForSerialization();
+  domainPayload();
+  await nextTick();
+  const payload = domainPayload();
+  const submittedDraft = JSON.stringify(payload);
   try {
     const result = await api<{
       valid: boolean;
-      configs?: Array<{ nodeId: string; validation?: { ok?: boolean; stderr?: string } }>;
+      configs?: Array<{ nodeId: string; config?: string; validation?: { ok?: boolean; stderr?: string } }>;
     }>("/api/ospf/preview", {
       method: "POST",
-      body: JSON.stringify(domainPayload()),
+      body: JSON.stringify(payload),
       headers: { "content-type": "application/json" },
     });
     if (!result.valid) {
@@ -835,12 +1006,23 @@ async function previewOspf(): Promise<void> {
       dispatchToast(detail ? `OSPF 配置预检失败：${detail}` : "OSPF 配置预检失败，请检查节点返回的错误", "error");
       return;
     }
+    const currentDraft = JSON.stringify(domainPayload());
+    if (currentDraft !== submittedDraft) {
+      dispatchToast("预检期间草稿已变化，已保留当前草稿预览");
+      return;
+    }
+    serverPreviewByNode.value = Object.fromEntries(
+      (result.configs ?? []).filter((item): item is { nodeId: string; config: string } => typeof item.config === "string")
+        .map((item) => [item.nodeId, item.config]),
+    );
+    previewValidated.value = true;
     previewDialog.value?.showModal();
     dispatchToast("OSPF 配置预检通过", "success");
   } catch (error) {
     dispatchToast(error instanceof Error ? error.message : "OSPF 配置预检失败", "error");
   } finally {
     ospfActionPending.value = null;
+    if (!previewValidated.value) scheduleDraftPreview();
   }
 }
 function loadNodeConfig(nodeId: string): void {
@@ -899,117 +1081,82 @@ function toggleVersion(version: OspfVersion, checked: boolean): void {
       : [...current, version]
     : current.filter((item) => item !== version);
 }
-function interfacePreviewClause(link: OspfLink, peerName: string, version: OspfVersion): string {
-  const options = link.options ?? {};
-  const directives: string[] = [];
-  const birdString = (value: string): string => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-  if (options.instanceId != null) directives.push(`instance ${options.instanceId};`);
-  directives.push(`cost ${linkCostInput(link)};`, `hello ${link.hello};`);
-  if (options.poll != null) directives.push(`poll ${options.poll};`);
-  if (options.retransmit != null) directives.push(`retransmit ${options.retransmit};`);
-  if (options.transmitDelay != null) directives.push(`transmit delay ${options.transmitDelay};`);
-  if (options.priority != null) directives.push(`priority ${options.priority};`);
-  if (options.wait != null) directives.push(`wait ${options.wait};`);
-  directives.push(options.deadMode === "seconds"
-    ? `dead ${link.dead};`
-    : `dead count ${Math.max(1, Math.floor(link.dead / Math.max(1, link.hello)))};`);
-  if (link.mode === "passive" || options.stub) directives.push("stub yes;");
-  if (options.rxBuffer != null) directives.push(`rx buffer ${options.rxBuffer};`);
-  if (options.txLength != null) directives.push(`tx length ${options.txLength};`);
-  directives.push(`type ${options.type ?? "ptp"};`);
-  if (version === "ospfv3" && options.linkLsaSuppression) directives.push("link lsa suppression yes;");
-  if (options.strictNonbroadcast) directives.push("strict nonbroadcast yes;");
-  if (version === "ospfv2") {
-    if (options.realBroadcast) directives.push("real broadcast yes;");
-    if (options.ptpNetmask) directives.push("ptp netmask yes;");
-    if (options.ptpAddress) directives.push("ptp address yes;");
-  }
-  if (options.checkLink === false) directives.push("check link no;");
-  if (options.bfd ?? bfd.value) directives.push("bfd yes;");
-  if (options.ecmpWeight != null) directives.push(`ecmp weight ${options.ecmpWeight};`);
-  if (options.ttlSecurity === "on") directives.push("ttl security yes;");
-  else if (options.ttlSecurity === "tx-only") directives.push("ttl security tx only;");
-  if (options.txClass != null) directives.push(`tx class ${options.txClass};`);
-  if (options.txDscp != null) directives.push(`tx dscp ${options.txDscp};`);
-  if (options.txPriority != null) directives.push(`tx priority ${options.txPriority};`);
-  if (link.auth !== "none") {
-    directives.push(`authentication ${link.auth === "simple" ? "simple" : "cryptographic"};`);
-  }
-  if (options.password) {
-    let password = `password ${birdString(options.password)}`;
-    const passwordOptions = options.passwordOptions ?? {};
-    const passwordEntries: string[] = [];
-    if (passwordOptions.id != null) passwordEntries.push(`id ${passwordOptions.id};`);
-    for (const [key, directive] of [["generateFrom", "generate from"], ["generateTo", "generate to"], ["acceptFrom", "accept from"], ["acceptTo", "accept to"], ["from", "from"], ["to", "to"]] as const) {
-      if (passwordOptions[key]) passwordEntries.push(`${directive} ${birdString(String(passwordOptions[key]))};`);
-    }
-    if (passwordOptions.algorithm) passwordEntries.push(`algorithm ${passwordOptions.algorithm.replace("-", " ")};`);
-    password += passwordEntries.length ? ` { ${passwordEntries.join(" ")} }` : "";
-    directives.push(`${password};`);
-  }
-  const neighbors = options.neighbors?.filter((item) => item.address).map((item) => `${item.address}${item.eligible ? " eligible" : ""};`) ?? [];
-  if (neighbors.length) directives.push(`neighbors { ${neighbors.join(" ")} };`);
-  return `    interface "${link.localInterface || "<未选择>"}" { ${directives.join(" ")} }; # ${peerName}`;
+const serializedDraft = computed(() => JSON.stringify(domainPayload()));
+const displayedConfigPreview = computed(() => serverPreviewByNode.value[selectedNodeId.value] ?? "");
+function cancelDraftPreview(): void {
+  previewGeneration += 1;
+  previewAbortController?.abort();
+  previewAbortController = null;
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  previewTimer = null;
+  previewLoading.value = false;
 }
-const configPreview = computed(() =>
-  enabledVersions.value
-    .map((ospfVersion) => {
-      const importPolicy = policyText(
-        ospfImportPolicies.value[ospfVersion],
-        "import",
-        null,
-      );
-      const exportPolicy = policyText(
-        ospfExportPolicies.value[ospfVersion],
-        "export",
-        ospfExportDefineIds.value[ospfVersion],
-        redistributeStatic.value,
-      );
-      const nodeLinks = selectedNodeLinks.value;
-      const areas = new Map<string, string[]>();
-      for (const link of nodeLinks) {
-        const interfaceName =
-          link.from === selectedNodeId.value
-            ? link.localInterface
-            : link.remoteInterface;
-        const peerId = link.from === selectedNodeId.value ? link.to : link.from;
-        const peerName =
-          nodes.value.find((node) => node.id === peerId)?.name ?? peerId;
-        const clause = interfacePreviewClause({ ...link, localInterface: interfaceName }, peerName, ospfVersion);
-        areas.set(link.area, [...(areas.get(link.area) ?? []), clause]);
-      }
-      const areaConfig = [...areas.entries()]
-        .map(
-          ([area, clauses]) => `  area ${area} {\n${clauses.join("\n")}\n  };`,
-        )
-        .join("\n");
-      const channel = ospfVersion === "ospfv2" ? "ipv4" : "ipv6";
-      const p = protocolOptions.value;
-      const advanced = [
-        p.rfc1583compat ? "  rfc1583compat yes;" : "",
-        ospfVersion === "ospfv3" && p.rfc5838 === false ? "  rfc5838 no;" : "",
-        p.instanceId != null ? `  instance id ${p.instanceId};` : "",
-        p.stubRouter ? "  stub router yes;" : "",
-        p.tick != null ? `  tick ${p.tick};` : "",
-        p.ecmp != null ? `  ecmp ${p.ecmp ? "yes" : "no"}${p.ecmpLimit != null ? ` limit ${p.ecmpLimit}` : ""};` : "",
-        p.mergeExternal ? "  merge external yes;" : "",
-        p.gracefulRestartMode && p.gracefulRestartMode !== "aware" ? `  graceful restart ${p.gracefulRestartMode};` : "",
-        p.gracefulRestartTime != null ? `  graceful restart time ${p.gracefulRestartTime};` : "",
-      ].filter(Boolean).join("\n");
-      return `protocol ospf ${ospfVersion === "ospfv2" ? "v2 birdbox_ospf_v2" : "v3 birdbox_ospf_v3"} {\n  router id ${routerId.value || "<自动>"};\n${advanced ? `${advanced}\n` : ""}  ${channel} {\n    ${importPolicy};\n    ${exportPolicy};\n  };\n${areaConfig}\n${gracefulRestart.value ? "  graceful restart on;\n" : ""}}`;
-    })
-    .join("\n\n"),
-);
+function scheduleDraftPreview(): void {
+  cancelDraftPreview();
+  if (!ospfDomainsReady.value || ospfActionPending.value) return;
+  previewLoading.value = true;
+  previewTimer = window.setTimeout(() => {
+    previewTimer = null;
+    void renderDraftPreview();
+  }, 300);
+}
+async function renderDraftPreview(): Promise<void> {
+  const generation = previewGeneration;
+  const submitted = serializedDraft.value;
+  const controller = new AbortController();
+  previewAbortController = controller;
+  try {
+    const result = await api<{ configs: Array<{ nodeId: string; config: string }> }>("/api/ospf/render", {
+      method: "POST",
+      body: submitted,
+      mutationWait: false,
+      timeoutMs: 20_000,
+      signal: controller.signal,
+    });
+    if (generation !== previewGeneration || controller.signal.aborted || submitted !== serializedDraft.value) return;
+    serverPreviewByNode.value = Object.fromEntries(result.configs.map((item) => [item.nodeId, item.config]));
+    previewError.value = "";
+  } catch (error) {
+    if (generation === previewGeneration && !controller.signal.aborted) {
+      previewError.value = error instanceof Error ? error.message : "配置预览生成失败";
+    }
+  } finally {
+    if (generation === previewGeneration) {
+      previewLoading.value = false;
+      previewAbortController = null;
+    }
+  }
+}
+watch([serializedDraft, ospfDomainsReady], () => {
+  serverPreviewByNode.value = {};
+  previewError.value = "";
+  previewValidated.value = false;
+  scheduleDraftPreview();
+}, { immediate: true });
 
 function selectNode(node: OspfNode): void {
-  if (node.id === selectedNodeId.value) {
-    if (nodeConfigs.value[node.id]) loadNodeConfig(node.id);
-    return;
-  }
+  if (ospfActionPending.value) return;
+  if (node.id === selectedNodeId.value) return;
+  invalidateRoutePathQuery(true);
   saveSelectedNodeConfig();
   selectedNodeId.value = node.id;
+  if (selectedLink.value) selectedLinkEndpoint.value = selectedLink.value.to === node.id ? "to" : "from";
   routerId.value = node.routerId;
   loadNodeConfig(node.id);
+}
+function removeSelectedNodeFromDomain(): void {
+  const nodeId = selectedNodeId.value;
+  if (!nodeId || !nodeConfigs.value[nodeId]) return;
+  if (selectedNodeLinks.value.length) {
+    dispatchToast("请先删除该节点的 OSPF 链路，再从域中移除节点", "error");
+    return;
+  }
+  const node = nodes.value.find((item) => item.id === nodeId);
+  if (!window.confirm(`确认将“${node?.name ?? nodeId}”从当前 OSPF 域移除？`)) return;
+  const next = { ...nodeConfigs.value };
+  delete next[nodeId];
+  nodeConfigs.value = next;
+  loadNodeConfig(nodeId);
 }
 function linkPosition(id: string): { x: number; y: number } {
   return nodePosition.value[id] ?? { x: 0, y: 0 };
@@ -1077,8 +1224,9 @@ function topologyCanvasPoint(clientX: number, clientY: number): { x: number; y: 
   };
 }
 function selectLink(link: OspfLink): void {
-  if (!link.options) link.options = { type: "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [] };
-  else if (!link.options.type) link.options.type = "ptp";
+  if (ospfActionPending.value) return;
+  ensureLinkEndpointOptions(link);
+  selectedLinkEndpoint.value = selectedNodeId.value === link.to ? "to" : "from";
   selectedLinkId.value = link.id;
 }
 const linkDraftLocalOptions = computed(() =>
@@ -1119,6 +1267,7 @@ function closeAddLink(): void {
   linkDraftError.value = "";
 }
 function addLink(): void {
+  if (ospfActionPending.value) return;
   // Preserve edits in the currently selected node before the link operation
   // updates either endpoint's saved config.
   if (selectedNodeId.value) saveSelectedNodeConfig();
@@ -1134,13 +1283,11 @@ function addLink(): void {
     linkDraftError.value = "请选择两端接口";
     return;
   }
-  const sharedInterface = links.value.some(
-    (link) =>
-      (link.from === from && link.localInterface === localInterface) ||
-      (link.to === from && link.remoteInterface === localInterface) ||
-      (link.from === to && link.localInterface === remoteInterface) ||
-      (link.to === to && link.remoteInterface === remoteInterface),
-  );
+  const endpointUsesInterface = (link: OspfLink, nodeId: string, interfaceName: string): boolean =>
+    (link.from === nodeId && link.localInterface === interfaceName)
+    || (link.to === nodeId && link.remoteInterface === interfaceName);
+  const localShared = links.value.some((link) => endpointUsesInterface(link, from, localInterface));
+  const remoteShared = links.value.some((link) => endpointUsesInterface(link, to, remoteInterface));
   const siblings = links.value.filter(
     (link) => nodePairKey(link.from, link.to) === nodePairKey(from, to),
   );
@@ -1158,7 +1305,13 @@ function addLink(): void {
     dead: 40,
     mode: "active",
     auth: "none",
-    options: { type: sharedInterface ? "nbma" : "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} },
+    // Reusing an interface needs a multi-access OSPF type, but a newly added
+    // link has no peer address yet. PtMP discovers peers without requiring a
+    // manually entered neighbors block; NBMA remains an explicit advanced
+    // choice for networks that require static neighbor addresses.
+    options: { type: localShared ? "ptmp" : "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} },
+    localOptions: { type: localShared ? "ptmp" : "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} },
+    remoteOptions: { type: remoteShared ? "ptmp" : "ptp", deadMode: "count", checkLink: true, ttlSecurity: "off", neighbors: [], passwordOptions: {} },
   });
   // A link is an explicit request to run OSPF on both endpoints. Persist an
   // enabled config for each side immediately, while retaining all existing
@@ -1189,20 +1342,33 @@ function addLink(): void {
   if (selectedNodeId.value === from || selectedNodeId.value === to) {
     loadNodeConfig(selectedNodeId.value);
   }
-  if (sharedInterface) {
-    for (const existing of links.value) {
-      if (
-        (existing.from === from && existing.localInterface === localInterface) ||
-        (existing.to === from && existing.remoteInterface === localInterface) ||
-        (existing.from === to && existing.localInterface === remoteInterface) ||
-        (existing.to === to && existing.remoteInterface === remoteInterface)
-      ) existing.options = { ...(existing.options ?? {}), type: "nbma" };
+  for (const existing of links.value) {
+    if (existing.id === id) continue;
+    const localMatches = endpointUsesInterface(existing, from, localInterface);
+    const remoteMatches = endpointUsesInterface(existing, to, remoteInterface);
+    if (!localMatches && !remoteMatches) continue;
+    if (localMatches) {
+      if (existing.from === from && existing.localInterface === localInterface) {
+        existing.localOptions = { ...(existing.localOptions ?? existing.options ?? emptyInterfaceOptions()), type: "ptmp" };
+        existing.options = { ...(existing.options ?? existing.localOptions), type: "ptmp" };
+      } else if (existing.to === from && existing.remoteInterface === localInterface) {
+        existing.remoteOptions = { ...(existing.remoteOptions ?? existing.options ?? emptyInterfaceOptions()), type: "ptmp" };
+      }
+    }
+    if (remoteMatches) {
+      if (existing.from === to && existing.localInterface === remoteInterface) {
+        existing.localOptions = { ...(existing.localOptions ?? existing.options ?? emptyInterfaceOptions()), type: "ptmp" };
+        existing.options = { ...(existing.options ?? existing.localOptions), type: "ptmp" };
+      } else if (existing.to === to && existing.remoteInterface === remoteInterface) {
+        existing.remoteOptions = { ...(existing.remoteOptions ?? existing.options ?? emptyInterfaceOptions()), type: "ptmp" };
+      }
     }
   }
   selectedLinkId.value = id;
   closeAddLink();
 }
 function startNodeDrag(event: PointerEvent, node: OspfNode): void {
+  if (ospfActionPending.value) return;
   const target = event.currentTarget as HTMLElement;
   event.preventDefault();
   const pointAtPointer = topologyCanvasPoint(event.clientX, event.clientY);
@@ -1308,6 +1474,7 @@ async function saveLayout(snapshot: Record<string, OspfNodePosition> = nodePosit
       body: JSON.stringify({ layout }),
       headers: { "content-type": "application/json" },
     });
+    globalNodePosition.value = { ...globalNodePosition.value, ...cloneDraft(layout) };
   } catch (error) {
     layoutSaveError.value = error instanceof Error ? error.message : "布局保存失败";
     dispatchToast(`OSPF 拓扑位置保存失败：${layoutSaveError.value}`, "error");
@@ -1321,12 +1488,17 @@ onMounted(() => {
   window.addEventListener("pointercancel", stopNodeDrag);
 });
 async function loadNodeInterfaces(): Promise<void> {
+  const requestGeneration = ++interfaceRequestGeneration;
+  interfaceAbortController?.abort();
+  const controller = new AbortController();
+  interfaceAbortController = controller;
   const currentNodes = dashboard.value?.inventory.nodes ?? [];
   const entries = await Promise.all(
     currentNodes.map(async (node) => {
       try {
         const response = await api<{ interfaces: string[] }>(
           `/api/nodes/${encodeURIComponent(node.id)}/interfaces`,
+          { signal: controller.signal },
         );
         return [node.id, response.interfaces] as const;
       } catch {
@@ -1334,24 +1506,38 @@ async function loadNodeInterfaces(): Promise<void> {
       }
     }),
   );
-  interfaceOptionsByNode.value = Object.fromEntries(entries);
+  if (requestGeneration === interfaceRequestGeneration && !controller.signal.aborted) {
+    interfaceOptionsByNode.value = Object.fromEntries(entries);
+  }
+  if (requestGeneration === interfaceRequestGeneration) interfaceAbortController = null;
 }
 async function refreshOspfRuntime(): Promise<void> {
-  if (!ospfDomainId.value) {
+  const requestGeneration = ++runtimeRequestGeneration;
+  runtimeAbortController?.abort();
+  const controller = new AbortController();
+  runtimeAbortController = controller;
+  const domainId = ospfDomainId.value;
+  if (!domainId) {
     runtimeByNode.value = {};
+    runtimeLoadError.value = "";
+    runtimeAbortController = null;
     return;
   }
+  runtimeLoadError.value = "";
   try {
     const response = await api<{ nodes: OspfRuntimeNode[] }>(
-      `/api/ospf/${encodeURIComponent(ospfDomainId.value)}/runtime`,
+      `/api/ospf/${encodeURIComponent(domainId)}/runtime`,
+      { signal: controller.signal },
     );
+    if (requestGeneration !== runtimeRequestGeneration || controller.signal.aborted || domainId !== ospfDomainId.value) return;
+    runtimeLoadError.value = "";
     runtimeByNode.value = Object.fromEntries(
       response.nodes.map((item) => [
         item.nodeId,
         {
           v2: item.runtime.v2.state ?? "未配置",
           v3: item.runtime.v3.state ?? "未配置",
-          error: item.runtime.error ?? null,
+          error: item.runtime.error ?? item.runtime.v2.error ?? item.runtime.v3.error ?? null,
           neighbors: Math.max(
             item.runtime.v2.neighbors,
             item.runtime.v3.neighbors,
@@ -1363,11 +1549,21 @@ async function refreshOspfRuntime(): Promise<void> {
         },
       ]),
     );
-  } catch {
-    runtimeByNode.value = {};
+  } catch (error) {
+    if (requestGeneration === runtimeRequestGeneration && !controller.signal.aborted) {
+      runtimeLoadError.value = error instanceof Error ? error.message : "OSPF 运行态加载失败";
+    }
+  } finally {
+    if (requestGeneration === runtimeRequestGeneration) runtimeAbortController = null;
   }
 }
 async function loadOspfDomains(): Promise<void> {
+  const requestGeneration = ++domainRequestGeneration;
+  domainAbortController?.abort();
+  const controller = new AbortController();
+  domainAbortController = controller;
+  ospfDomainsState.value = "loading";
+  ospfLoadError.value = "";
   try {
     const response = await api<{
       domains: Array<{
@@ -1378,12 +1574,21 @@ async function loadOspfDomains(): Promise<void> {
         layout: Record<string, { x: number; y: number }>;
       }>;
       layout: Record<string, { x: number; y: number }>;
-    }>("/api/ospf");
+    }>("/api/ospf", { signal: controller.signal });
+    if (requestGeneration !== domainRequestGeneration || controller.signal.aborted) return;
+    ospfDomainsState.value = "ready";
     ospfDomains.value = response.domains;
     const selectedId = ospfDomainId.value;
     const domain = response.domains.find((item) => item.id === selectedId) ?? response.domains[0];
     if (!domain) {
+      // Keep the persisted global layout available to a newly created draft.
+      // Without this assignment, an initially empty domain list leaves the
+      // in-memory global positions empty and the first new domain silently
+      // falls back to auto-layout instead of the user's saved coordinates.
+      globalNodePosition.value = cloneDraft(response.layout ?? {});
       clearOspfDraft();
+      runtimeByNode.value = {};
+      runtimeLoadError.value = "";
       nodePosition.value = response.layout ?? {};
       ensureNodePositions();
       await loadNodeInterfaces();
@@ -1391,7 +1596,11 @@ async function loadOspfDomains(): Promise<void> {
     }
     ospfDomainId.value = domain.id;
     ospfDomainName.value = domain.name;
-    links.value = domain.links.map(
+    runtimeByNode.value = {};
+    runtimeLoadError.value = "";
+    selectedLinkId.value = null;
+    selectedLinkEndpoint.value = "from";
+    links.value = cloneDraft(domain.links).map(
       (link) =>
         ({
           ...link,
@@ -1411,9 +1620,10 @@ async function loadOspfDomains(): Promise<void> {
         }) as OspfLink,
     );
     nodeConfigs.value = Object.fromEntries(
-      domain.nodeConfigs.map((config) => [config.nodeId, config]),
+      cloneDraft(domain.nodeConfigs).map((config) => [config.nodeId, config]),
     );
-    nodePosition.value = { ...(domain.layout ?? {}), ...(response.layout ?? {}) };
+    nodePosition.value = cloneDraft({ ...(domain.layout ?? {}), ...(response.layout ?? {}) });
+    globalNodePosition.value = cloneDraft(response.layout ?? {});
     ensureNodePositions();
     // Dashboard data and the domain request resolve independently. Select a
     // valid node before loading its saved config, otherwise the editor falls
@@ -1422,9 +1632,14 @@ async function loadOspfDomains(): Promise<void> {
       selectedNodeId.value = nodes.value[0]?.id ?? "";
     }
     if (selectedNodeId.value) loadNodeConfig(selectedNodeId.value);
+    savedDomainSignature.value = currentDomainSignature();
     await Promise.all([loadNodeInterfaces(), refreshOspfRuntime()]);
-  } catch {
-    // Keep the prototype defaults when the API is unavailable during bootstrap.
+  } catch (error) {
+    if (requestGeneration !== domainRequestGeneration || controller.signal.aborted) return;
+    ospfDomainsState.value = "error";
+    ospfLoadError.value = error instanceof Error ? error.message : "OSPF 域加载失败";
+  } finally {
+    if (requestGeneration === domainRequestGeneration) domainAbortController = null;
   }
 }
 function handleAuthenticated(): void {
@@ -1439,6 +1654,11 @@ watch(
         selectedNodeId.value = nodes.value[0]?.id ?? "";
       }
       if (selectedNodeId.value && nodeConfigs.value[selectedNodeId.value]) loadNodeConfig(selectedNodeId.value);
+      // The dashboard and OSPF domain load independently. Once node IDs are
+      // available, hydrate the selected endpoint and establish the saved
+      // baseline; otherwise the initial empty-node snapshot looks dirty and
+      // a harmless first domain switch prompts to discard changes.
+      if (selectedNodeId.value) savedDomainSignature.value = currentDomainSignature();
       return;
     }
     void loadOspfDomains();
@@ -1457,6 +1677,14 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   saveSelectedNodeConfig();
+  cancelDraftPreview();
+  invalidateRoutePathQuery();
+  domainRequestGeneration += 1;
+  domainAbortController?.abort();
+  runtimeRequestGeneration += 1;
+  runtimeAbortController?.abort();
+  interfaceRequestGeneration += 1;
+  interfaceAbortController?.abort();
   if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
   window.removeEventListener("pointermove", dragNode);
   window.removeEventListener("pointerup", stopNodeDrag);
@@ -1475,24 +1703,29 @@ onBeforeUnmount(() => {
           在拓扑中建立链路并配置双方接口，拖动节点布局，拖动空白区域平移画布；按节点管理 OSPFv2/OSPFv3 实例。
         </p>
       </div>
+      <div v-if="ospfDomainsState === 'loading'" class="ospf-load-status" role="status" aria-live="polite">正在加载 OSPF 域…</div>
+      <div v-else-if="ospfDomainsState === 'error'" class="ospf-load-status error" role="alert">
+        <span>OSPF 域加载失败：{{ ospfLoadError }}</span>
+        <button class="secondary-button compact-button" type="button" @click="loadOspfDomains">重试</button>
+      </div>
       <div class="ospf-actions" :aria-busy="ospfActionPending !== null">
         <label class="ospf-domain-picker">OSPF 域
-          <select :value="ospfDomainId ?? ''" @change="selectOspfDomain(($event.currentTarget as HTMLSelectElement).value)">
+          <select :value="ospfDomainId ?? ''" :disabled="ospfActionPending !== null || !ospfDomainsReady" @change="handleDomainSelection($event.currentTarget as HTMLSelectElement)">
             <option value="" disabled>选择域</option>
             <option v-for="domain in ospfDomains" :key="domain.id" :value="domain.id">{{ domain.name }}</option>
           </select>
         </label>
-        <input v-model.trim="ospfDomainName" class="ospf-domain-name" aria-label="OSPF 域名称" placeholder="OSPF 域名称" />
-        <button class="secondary-button compact-button" type="button" :disabled="ospfActionPending !== null" @click="newOspfDomain">新建域</button>
-        <button v-if="ospfDomainId" class="danger-button compact-button" type="button" :disabled="ospfActionPending !== null" @click="deleteOspfDomain">删除域</button>
-        <button class="secondary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="previewOspf">
+        <input v-model.trim="ospfDomainName" class="ospf-domain-name" :disabled="ospfActionPending !== null || !ospfDomainsReady" aria-label="OSPF 域名称" placeholder="OSPF 域名称" />
+        <button class="secondary-button compact-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady" @click="newOspfDomain">新建域</button>
+        <button v-if="ospfDomainId" class="danger-button compact-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady" @click="deleteOspfDomain">删除域</button>
+        <button class="secondary-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady || !nodes.length" @click="previewOspf">
           {{ ospfActionPending === "preview" ? "正在预检" : "预检配置" }}</button
-        ><button class="primary-button" type="button" :disabled="ospfActionPending !== null || !nodes.length" @click="saveOspf">
+        ><button class="primary-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady || !nodes.length" @click="saveOspf">
           {{ ospfActionPending === "save" ? "正在保存并应用" : "保存并应用" }}
         </button>
       </div>
     </div>
-    <section class="ospf-topology-panel">
+    <section class="ospf-topology-panel" :inert="ospfActionPending !== null">
       <div class="panel-head">
         <div>
           <h3>OSPF 拓扑</h3>
@@ -1752,6 +1985,10 @@ onBeforeUnmount(() => {
             </select>
           </div>
         </div>
+        <div class="ospf-endpoint-mode" role="group" aria-label="正在编辑的 OSPF 端点">
+          <button type="button" class="secondary-button compact-button" :class="{ active: selectedLinkEndpoint === 'from' }" @click="selectedLinkEndpoint = 'from'">编辑本端参数</button>
+          <button type="button" class="secondary-button compact-button" :class="{ active: selectedLinkEndpoint === 'to' }" @click="selectedLinkEndpoint = 'to'">编辑对端参数</button>
+        </div>
         <span class="field"
           ><label>Area</label
           ><input
@@ -1791,8 +2028,9 @@ onBeforeUnmount(() => {
             <option value="none">无</option>
             <option value="simple">简单密码</option>
             <option value="md5">MD5</option>
-            <option value="ipsec">IPsec</option>
-          </select></span
+            <option value="ipsec" disabled>IPsec（BIRD 不支持）</option>
+          </select></span>
+        ><p v-if="selectedLink.auth === 'ipsec'" class="field-hint ospf-ipsec-warning" role="alert">此链路保留了旧的 IPsec 认证配置。BIRD 不支持 OSPF IPsec，预检和保存会拒绝；请改用 Simple 或 MD5。</p
         ><label class="checkbox-inline ospf-checkbox"
           ><input
             v-model="selectedLink.mode"
@@ -1803,38 +2041,38 @@ onBeforeUnmount(() => {
         ><details class="ospf-link-advanced">
           <summary>接口高级选项</summary>
           <div class="ospf-advanced-grid">
-            <label class="field">网络类型<select v-model="selectedLink.options!.type"><option :value="undefined">自动</option><option value="broadcast">Broadcast</option><option value="ptp">Point-to-point</option><option value="nbma">NBMA</option><option value="ptmp">Point-to-multipoint</option></select></label>
-            <label class="field">Instance ID<input v-model.number="selectedLink.options!.instanceId" type="number" min="0" max="255" /></label>
-            <label class="field">Poll（秒）<input v-model.number="selectedLink.options!.poll" type="number" min="1" /></label>
-            <label class="field">Retransmit（秒）<input v-model.number="selectedLink.options!.retransmit" type="number" min="1" /></label>
-            <label class="field">Transmit Delay（秒）<input v-model.number="selectedLink.options!.transmitDelay" type="number" min="1" /></label>
-            <label class="field">Priority<input v-model.number="selectedLink.options!.priority" type="number" min="0" max="255" /></label>
-            <label class="field">Wait（秒）<input v-model.number="selectedLink.options!.wait" type="number" min="1" /></label>
-            <label class="field">Dead 计时方式<select v-model="selectedLink.options!.deadMode"><option value="count">倍数（默认）</option><option value="seconds">固定秒数</option></select></label>
-            <label class="field">接收缓冲<select v-model="selectedLink.options!.rxBuffer"><option :value="null">动态</option><option value="normal">Normal</option><option value="large">Large</option></select></label>
-            <label class="field">发送包长度<input v-model.number="selectedLink.options!.txLength" type="number" min="256" /></label>
-            <label class="field">ECMP 权重<input v-model.number="selectedLink.options!.ecmpWeight" type="number" min="1" max="256" /></label>
-            <label class="field">TTL 安全<select v-model="selectedLink.options!.ttlSecurity"><option value="off">关闭</option><option value="on">收发启用</option><option value="tx-only">仅发送</option></select></label>
-            <label class="field">TX DSCP/Class<input v-model.number="selectedLink.options!.txClass" type="number" min="0" max="255" /></label>
-            <label class="field">TX DSCP<input v-model.number="selectedLink.options!.txDscp" type="number" min="0" max="255" /></label>
-            <label class="field">TX Priority<input v-model.number="selectedLink.options!.txPriority" type="number" min="0" max="255" /></label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.linkLsaSuppression" type="checkbox" /> 抑制 Link-LSA（OSPFv3）</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.strictNonbroadcast" type="checkbox" /> Strict Nonbroadcast</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.realBroadcast" type="checkbox" /> 使用真实广播（OSPFv2）</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpNetmask" type="checkbox" /> PTP Netmask（OSPFv2）</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.ptpAddress" type="checkbox" /> PTP Address（OSPFv2）</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.checkLink" type="checkbox" /> 检查物理链路</label>
-            <label class="checkbox-inline"><input v-model="selectedLink.options!.bfd" type="checkbox" /> 接口 BFD（覆盖节点设置）</label>
-            <label class="field">认证密码<input v-model="selectedLink.options!.password" type="password" autocomplete="new-password" /></label>
-            <label class="field">认证 Key ID<input v-model.number="ensurePasswordOptions(selectedLink.options!).id" type="number" min="0" /></label>
-            <label class="field">认证算法<select v-model="ensurePasswordOptions(selectedLink.options!).algorithm"><option :value="undefined">默认</option><option value="keyed-md5">Keyed MD5</option><option value="keyed-sha1">Keyed SHA1</option><option value="hmac-sha1">HMAC SHA1</option><option value="hmac-sha256">HMAC SHA256</option><option value="hmac-sha384">HMAC SHA384</option><option value="hmac-sha512">HMAC SHA512</option></select></label>
-            <details class="ospf-password-timing area-wide"><summary>认证密钥生效时间</summary><div class="ospf-advanced-grid"><label class="field">Generate From<input v-model="ensurePasswordOptions(selectedLink.options!).generateFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Generate To<input v-model="ensurePasswordOptions(selectedLink.options!).generateTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept From<input v-model="ensurePasswordOptions(selectedLink.options!).acceptFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept To<input v-model="ensurePasswordOptions(selectedLink.options!).acceptTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 From<input v-model="ensurePasswordOptions(selectedLink.options!).from" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 To<input v-model="ensurePasswordOptions(selectedLink.options!).to" placeholder="YYYY-MM-DD HH:mm:ss" /></label></div></details>
+            <label class="field">网络类型<select v-model="selectedLinkOptions!.type"><option :value="undefined">自动</option><option value="broadcast">Broadcast</option><option value="ptp">Point-to-point</option><option value="nbma">NBMA</option><option value="ptmp">Point-to-multipoint</option></select></label>
+            <label class="field">Instance ID<input v-model.number="selectedLinkOptions!.instanceId" type="number" min="0" max="255" /></label>
+            <label class="field">Poll（秒）<input v-model.number="selectedLinkOptions!.poll" type="number" min="1" /></label>
+            <label class="field">Retransmit（秒）<input v-model.number="selectedLinkOptions!.retransmit" type="number" min="2" /></label>
+            <label class="field">Transmit Delay（秒）<input v-model.number="selectedLinkOptions!.transmitDelay" type="number" min="1" /></label>
+            <label class="field">Priority<input v-model.number="selectedLinkOptions!.priority" type="number" min="0" max="255" /></label>
+            <label class="field">Wait（秒）<input v-model.number="selectedLinkOptions!.wait" type="number" min="2" /></label>
+            <label class="field">Dead 计时方式<select v-model="selectedLinkOptions!.deadMode"><option value="count">倍数（默认）</option><option value="seconds">固定秒数</option></select></label>
+            <label class="field">接收缓冲<select v-model="selectedLinkOptions!.rxBuffer"><option :value="null">动态</option><option value="normal">Normal</option><option value="large">Large</option></select></label>
+            <label class="field">发送包长度<input v-model.number="selectedLinkOptions!.txLength" type="number" min="256" /></label>
+            <label class="field">ECMP 权重<input v-model.number="selectedLinkOptions!.ecmpWeight" type="number" min="1" max="256" /></label>
+            <label class="field">TTL 安全<select v-model="selectedLinkOptions!.ttlSecurity"><option value="off">关闭</option><option value="on">收发启用</option><option value="tx-only">仅发送</option></select></label>
+            <label class="field">TX Class<input v-model.number="selectedLinkOptions!.txClass" type="number" min="0" max="255" /></label>
+            <label class="field">TX DSCP<input v-model.number="selectedLinkOptions!.txDscp" type="number" min="0" max="63" /></label>
+            <label class="field">TX Priority<input v-model.number="selectedLinkOptions!.txPriority" type="number" min="0" max="7" /></label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.linkLsaSuppression" type="checkbox" /> 抑制 Link-LSA（OSPFv3）</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.strictNonbroadcast" type="checkbox" /> Strict Nonbroadcast</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.realBroadcast" type="checkbox" /> 使用真实广播（OSPFv2）</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.ptpNetmask" type="checkbox" /> PTP Netmask（OSPFv2）</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.ptpAddress" type="checkbox" /> PTP Address（OSPFv2）</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.checkLink" type="checkbox" /> 检查物理链路</label>
+            <label class="checkbox-inline"><input v-model="selectedLinkOptions!.bfd" type="checkbox" /> 接口 BFD（覆盖节点设置）</label>
+            <label class="field">认证密码<input v-model="selectedLinkOptions!.password" type="password" autocomplete="new-password" /></label>
+            <label class="field">认证 Key ID<input v-model.number="ensurePasswordOptions(selectedLinkOptions!).id" type="number" min="0" /></label>
+            <label class="field">认证算法<select v-model="ensurePasswordOptions(selectedLinkOptions!).algorithm"><option :value="undefined">默认</option><option value="keyed-md5">Keyed MD5</option><option value="keyed-sha1">Keyed SHA1</option><option value="hmac-sha1">HMAC SHA1</option><option value="hmac-sha256">HMAC SHA256</option><option value="hmac-sha384">HMAC SHA384</option><option value="hmac-sha512">HMAC SHA512</option></select></label>
+            <details class="ospf-password-timing area-wide"><summary>认证密钥生效时间</summary><div class="ospf-advanced-grid"><label class="field">Generate From<input v-model="ensurePasswordOptions(selectedLinkOptions!).generateFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Generate To<input v-model="ensurePasswordOptions(selectedLinkOptions!).generateTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept From<input v-model="ensurePasswordOptions(selectedLinkOptions!).acceptFrom" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">Accept To<input v-model="ensurePasswordOptions(selectedLinkOptions!).acceptTo" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 From<input v-model="ensurePasswordOptions(selectedLinkOptions!).from" placeholder="YYYY-MM-DD HH:mm:ss" /></label><label class="field">有效 To<input v-model="ensurePasswordOptions(selectedLinkOptions!).to" placeholder="YYYY-MM-DD HH:mm:ss" /></label></div></details>
             <label class="field area-wide">NBMA/PtMP 邻居（逗号分隔，可加 eligible）<input :value="neighborText(selectedLink)" @input="setNeighborText(selectedLink, ($event.currentTarget as HTMLInputElement).value)" placeholder="192.0.2.2 eligible, 192.0.2.3" /></label>
           </div>
         <p class="field-hint">未填写的项目使用 BIRD 默认值。NBMA/PtMP 邻居地址可在高级配置数据中配置。</p>
         </details>
         <button class="danger-button compact-button" type="button" @click="removeSelectedLink">删除此链路</button>
-          ><button
+          <button
           class="icon-button"
           type="button"
           title="关闭编辑"
@@ -1844,7 +2082,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
     </section>
-    <div class="ospf-layout">
+    <div class="ospf-layout" :inert="ospfActionPending !== null">
       <aside class="ospf-node-panel">
         <div class="panel-head">
           <div>
@@ -1872,16 +2110,8 @@ onBeforeUnmount(() => {
               ><strong>{{ node.name }}</strong
               ><small>{{ node.routerId }}</small></span
             ><span class="ospf-node-stats"
-              ><em
-                :class="
-                  node.v2 === '已建立' ? 'up' : node.v2 === 'Idle' ? 'warn' : ''
-                "
-                >v2 {{ node.v2 }}</em
-              ><em
-                :class="
-                  node.v3 === '已建立' ? 'up' : node.v3 === 'Idle' ? 'warn' : ''
-                "
-                >v3 {{ node.v3 }}</em
+              ><em :class="runtimeStateClass(node.v2)">v2 {{ node.v2 }}</em
+              ><em :class="runtimeStateClass(node.v3)">v3 {{ node.v3 }}</em
               ><small
                 >{{ node.neighbors }} 邻居 · {{ node.routes }} 路由</small
               ></span
@@ -1896,11 +2126,13 @@ onBeforeUnmount(() => {
             <h3>{{ selectedNode?.name }}</h3>
             <span>{{ selectedNode?.routerId }}</span>
           </div>
-          <label class="switch-label"
-            ><input v-model="enabled" type="checkbox" /><span
-              >启用 OSPF</span
-            ></label
-          >
+          <div class="ospf-node-membership-actions">
+            <label class="switch-label"
+              ><input v-model="enabled" type="checkbox" /><span
+                >启用 OSPF</span
+              ></label
+            ><button v-if="nodeConfigs[selectedNodeId]" class="danger-button compact-button" type="button" :disabled="ospfActionPending !== null" @click="removeSelectedNodeFromDomain">从域移除</button>
+          </div>
         </div>
         <div class="ospf-form-grid">
           <div class="field">
@@ -1960,7 +2192,7 @@ onBeforeUnmount(() => {
               :export-define-id="ospfExportDefineIds[ospfVersion]"
               :functions="availableFunctions"
               :filters="availableFilters"
-              :defines="availableDefines"
+              :defines="availableDefinesForVersion(ospfVersion)"
               :disabled="!enabled"
               :show-policy-action="false"
               @update:policy="updateImportPolicy(ospfVersion, $event)"
@@ -1972,7 +2204,7 @@ onBeforeUnmount(() => {
               :export-define-id="ospfExportDefineIds[ospfVersion]"
               :functions="availableFunctions"
               :filters="availableFilters"
-              :defines="availableDefines"
+              :defines="availableDefinesForVersion(ospfVersion)"
               :disabled="!enabled"
               :show-policy-action="false"
               @update:policy="updateExportPolicy(ospfVersion, $event)"
@@ -2039,7 +2271,7 @@ onBeforeUnmount(() => {
               <button class="icon-button" type="button" title="删除" @click="virtualLinks.splice(index, 1)">×</button>
             </div>
           </div>
-          <p class="field-hint">未填写的项目使用 BIRD 默认值。Area 高级属性可通过配置接口扩展。</p>
+          <p class="field-hint">未填写的项目使用 BIRD 默认值。Networks、External 和 Stubnet 支持按 OSPFv2/v3 地址族填写 IPv4 或 IPv6 前缀。</p>
         </details>
       </section>
       <aside class="ospf-runtime">
@@ -2050,6 +2282,10 @@ onBeforeUnmount(() => {
           </div>
           <span class="runtime-refresh">刚刚更新</span>
         </div>
+        <p v-if="runtimeLoadError" class="field-error ospf-runtime-error" role="alert">
+          {{ runtimeLoadError }}
+          <button class="secondary-button compact-button" type="button" @click="refreshOspfRuntime">重试</button>
+        </p>
         <div class="runtime-summary">
           <button type="button" class="runtime-summary-card" @click="openRuntimeDetails('neighbors')">
             <strong>{{ selectedRuntime.neighbors }}</strong
@@ -2063,14 +2299,17 @@ onBeforeUnmount(() => {
         </div>
         <h4>邻居状态</h4>
         <div class="neighbor-row">
-          <span><i :class="selectedRuntime.v2.startsWith('Full') ? 'up-dot' : 'warn-dot'" />OSPFv2</span><em>{{ selectedRuntime.v2 }}</em>
+          <span><i :class="runtimeStateClass(selectedRuntime.v2) === 'up' ? 'up-dot' : 'warn-dot'" />OSPFv2</span><em>{{ selectedRuntime.v2 }}</em>
         </div>
         <div class="neighbor-row">
-          <span><i :class="selectedRuntime.v3.startsWith('Full') ? 'up-dot' : 'warn-dot'" />OSPFv3</span><em>{{ selectedRuntime.v3 }}</em>
+          <span><i :class="runtimeStateClass(selectedRuntime.v3) === 'up' ? 'up-dot' : 'warn-dot'" />OSPFv3</span><em>{{ selectedRuntime.v3 }}</em>
         </div>
         <p v-if="selectedRuntime.error" class="field-error ospf-runtime-error">{{ selectedRuntime.error }}</p>
-        <div class="ospf-preview-heading"><h4>配置预览</h4><button class="secondary-button compact-button" type="button" :disabled="!configPreview" @click="openOspfPreview">全屏查看</button></div>
-        <pre class="ospf-preview">{{ configPreview }}</pre>
+        <div class="ospf-preview-heading"><h4>配置预览 <small>{{ previewValidated ? "· 已预检" : "· 服务端草稿" }}</small></h4><button class="secondary-button compact-button" type="button" :disabled="!displayedConfigPreview" @click="openOspfPreview">全屏查看</button></div>
+        <p v-if="previewError" class="field-error" role="alert">{{ previewError }} <button class="secondary-button compact-button" type="button" @click="scheduleDraftPreview">重试预览</button></p>
+        <p v-else-if="previewLoading" class="field-hint" role="status">正在生成配置预览…</p>
+        <p v-else-if="!displayedConfigPreview" class="field-hint">当前节点尚未加入此 OSPF 域。</p>
+        <pre v-if="displayedConfigPreview" class="ospf-preview">{{ displayedConfigPreview }}</pre>
       </aside>
     </div>
     <dialog ref="runtimeDialog" class="route-dialog ospf-runtime-dialog" aria-labelledby="ospfRuntimeDialogTitle" @cancel.prevent="closeRuntimeDetails">
@@ -2106,10 +2345,10 @@ onBeforeUnmount(() => {
     <dialog ref="previewDialog" class="route-dialog ospf-preview-dialog" aria-labelledby="ospfPreviewDialogTitle" @cancel.prevent="closeOspfPreview">
       <div class="route-dialog-shell">
         <header class="route-dialog-head">
-          <div><p class="eyebrow">GENERATED CONFIGURATION</p><h2 id="ospfPreviewDialogTitle">OSPF 配置预览</h2><span>{{ selectedNode?.name ?? "当前节点" }} · 实时生成配置</span></div>
+          <div><p class="eyebrow">GENERATED CONFIGURATION</p><h2 id="ospfPreviewDialogTitle">OSPF 配置预览</h2><span>{{ selectedNode?.name ?? "当前节点" }} · {{ previewValidated ? "已通过服务端预检" : "服务端生成草稿" }}</span></div>
           <button class="icon-button" type="button" title="关闭" aria-label="关闭 OSPF 配置预览" @click="closeOspfPreview">×</button>
         </header>
-        <pre class="ospf-preview-fullscreen">{{ configPreview }}</pre>
+        <pre class="ospf-preview-fullscreen">{{ displayedConfigPreview }}</pre>
       </div>
     </dialog>
     <dialog ref="routePathDialog" class="route-dialog ospf-path-dialog" aria-labelledby="ospfPathDialogTitle" @cancel.prevent="closeRoutePath">

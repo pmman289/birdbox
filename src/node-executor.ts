@@ -131,8 +131,8 @@ function sshArgs(node: ManagedNode, remoteCommand: string): string[] {
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=8",
     // Host keys are still checked against the controller-managed file below.
-    // accept-new only applies when a caller deliberately uses the legacy
-    // identity mode without a managed known_hosts file.
+    // accept-new also establishes the binding during first-time onboarding;
+    // startup checks refuse missing bindings for existing managed nodes.
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "HashKnownHosts=yes",
     "-o", "UpdateHostKeys=yes",

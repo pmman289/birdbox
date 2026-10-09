@@ -10,6 +10,13 @@ import (
 	"testing"
 )
 
+func TestInterfaceNamesPreservesVlanAndPeerNames(t *testing.T) {
+	raw := "1: lo: <LOOPBACK>\n2: eth0.100@eth0: <BROADCAST>\n3: veth-peer@if4: <BROADCAST>\n4: br-lan: <BROADCAST>\n"
+	if got := interfaceNames(raw); got != "lo\neth0.100\nveth-peer\nbr-lan" {
+		t.Fatalf("incorrect interface names: %q", got)
+	}
+}
+
 func TestRequireActiveDeviceProtocolIgnoresComments(t *testing.T) {
 	directory := t.TempDir()
 	config := filepath.Join(directory, "bird.conf")

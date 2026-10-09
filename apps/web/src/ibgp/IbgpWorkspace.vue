@@ -47,6 +47,9 @@ const previewError = ref("");
 const previewSides = ref<IbgpPreviewSide[]>([]);
 const inventorySnapshot = ref<Inventory | null>(null);
 const runtimeByNodeId = ref<Record<string, NodeRuntime>>({});
+const draftDirty = ref(false);
+const leftSideColumn = ref<HTMLElement | null>(null);
+const rightSideColumn = ref<HTMLElement | null>(null);
 let runtimeTimer: number | null = null;
 const policyActionDialog = ref<InstanceType<typeof PolicyActionDialog> | null>(
   null,
@@ -59,6 +62,10 @@ const policyActionContext = ref<{
 let previewTimer: number | null = null;
 let previewQueued = false;
 let adjacencySequence = 0;
+let domainLoadSequence = 0;
+let runtimeRefreshSequence = 0;
+let mounted = false;
+let suppressDraftDirty = false;
 
 const currentInventory = computed<Inventory | null>(
   // The domain endpoint returns the inventory used for its preview. Prefer it
@@ -176,6 +183,8 @@ function sessionStatusClass(session: BgpSession | null): string {
 async function refreshIbgpRuntimes(): Promise<void> {
   const domain = draft.value;
   if (!domain || !domain.members.length) return;
+  const requestId = ++runtimeRefreshSequence;
+  const domainId = domain.id;
   const nodeIds = domain.members.map((member) => member.nodeId);
   const results = await Promise.allSettled(
     nodeIds.map((nodeId) => api<{ runtime: NodeRuntime }>(`/api/nodes/${encodeURIComponent(nodeId)}/runtime`)),
@@ -187,6 +196,7 @@ async function refreshIbgpRuntimes(): Promise<void> {
       if (nodeId) next[nodeId] = result.value.runtime;
     }
   });
+  if (!mounted || requestId !== runtimeRefreshSequence || draft.value?.id !== domainId) return;
   runtimeByNodeId.value = next;
 }
 
@@ -200,6 +210,26 @@ const leftPreview = computed(() =>
 const rightPreview = computed(() =>
   rightSession.value ? previewForSession(rightSession.value.id) : null,
 );
+
+function markDraftDirty(): void {
+  draftDirty.value = true;
+}
+
+function confirmDiscardDraft(): boolean {
+  if (!draftDirty.value) return true;
+  return window.confirm("当前 iBGP 域有未保存的双端配置，切换后将丢失这些修改。是否继续？");
+}
+
+function handleDomainSelect(event: Event): void {
+  const next = (event.target as HTMLSelectElement).value || null;
+  if (next) selectDomain(next);
+}
+
+function focusPairSide(side: "left" | "right"): void {
+  const target = side === "left" ? leftSideColumn.value : rightSideColumn.value;
+  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  target?.querySelector<HTMLElement>("input, select, button")?.focus({ preventScroll: true });
+}
 
 function clone<T>(value: T): T {
   return cloneReactive(value);
@@ -331,29 +361,35 @@ function domainPayload(value: IbgpDomain): Record<string, unknown> {
 }
 
 async function loadDomains(): Promise<void> {
+  const requestId = ++domainLoadSequence;
   loading.value = true;
   error.value = "";
   try {
     const response = await api<{ domains: IbgpDomain[]; inventory: Inventory }>("/api/ibgp-domains");
+    if (!mounted || requestId !== domainLoadSequence) return;
     inventorySnapshot.value = response.inventory;
     domains.value = response.domains;
     if (
       selectedDomainId.value &&
       response.domains.some((domain) => domain.id === selectedDomainId.value)
     )
-      selectDomain(selectedDomainId.value);
-    else if (response.domains[0]) selectDomain(response.domains[0].id);
+      selectDomain(selectedDomainId.value, true);
+    else if (response.domains[0]) selectDomain(response.domains[0].id, true);
     await refreshIbgpRuntimes();
   } catch (cause) {
+    if (!mounted || requestId !== domainLoadSequence) return;
     error.value = cause instanceof Error ? cause.message : "无法加载 iBGP 域";
   } finally {
-    loading.value = false;
+    if (requestId === domainLoadSequence) loading.value = false;
   }
 }
 
-function selectDomain(domainId: string): void {
+function selectDomain(domainId: string, reload = false): void {
   const domain = domains.value.find((item) => item.id === domainId);
   if (!domain) return;
+  if (domain.id === selectedDomainId.value && !reload) return;
+  if (!confirmDiscardDraft()) return;
+  runtimeRefreshSequence += 1;
   selectedDomainId.value = domainId;
   draft.value = clone(domain);
   selectedNodeId.value = domain.members[0]?.nodeId ?? null;
@@ -361,26 +397,37 @@ function selectDomain(domainId: string): void {
   const authoritativeSessions = inventorySnapshot.value?.sessions
     ?? dashboard.value?.inventory.sessions
     ?? [];
-  sessionDrafts.value = Object.fromEntries(
-    authoritativeSessions
-      .filter((session) => session.managedBy?.domainId === domainId)
-      .map((session) => [session.id, clone(session)]),
-  );
-  for (const adjacency of draft.value.adjacencies)
-    ensureAdjacencySessions(adjacency);
+  suppressDraftDirty = true;
+  try {
+    sessionDrafts.value = Object.fromEntries(
+      authoritativeSessions
+        .filter((session) => session.managedBy?.domainId === domainId)
+        .map((session) => [session.id, clone(session)]),
+    );
+    for (const adjacency of draft.value.adjacencies)
+      ensureAdjacencySessions(adjacency);
+  } finally {
+    suppressDraftDirty = false;
+  }
+  draftDirty.value = false;
   connectionSearch.value = "";
   void refreshIbgpRuntimes();
 }
 
 function newDomain(): void {
+  if (!confirmDiscardDraft()) return;
+  runtimeRefreshSequence += 1;
   selectedDomainId.value = null;
   draft.value = makeDraft();
   selectedNodeId.value = draft.value.members[0]?.nodeId ?? null;
   selectedAdjacencyId.value = null;
+  suppressDraftDirty = true;
   sessionDrafts.value = {};
+  suppressDraftDirty = false;
   connectionSearch.value = "";
   previewSides.value = [];
   previewValid.value = null;
+  draftDirty.value = false;
   runtimeByNodeId.value = {};
 }
 
@@ -404,6 +451,7 @@ async function saveDomain(): Promise<void> {
     selectedDomainId.value = response.domain.id;
     draft.value = clone(response.domain);
     inventorySnapshot.value = response.inventory;
+    draftDirty.value = false;
     window.dispatchEvent(
       new CustomEvent("birdbox:dashboard-selection", {
         detail: { nodeId: selectedNodeId.value, peerId: null },
@@ -430,6 +478,7 @@ async function removeDomain(): Promise<void> {
     domains.value = domains.value.filter(
       (domain) => domain.id !== selectedDomainId.value,
     );
+    draftDirty.value = false;
     if (domains.value[0]) selectDomain(domains.value[0].id);
     else newDomain();
   } catch (cause) {
@@ -517,6 +566,7 @@ function connectNode(nodeId: string): void {
     return;
   }
   const id = makeClientAdjacencyId();
+  markDraftDirty();
   const adjacency: IbgpAdjacency = {
     id,
     leftNodeId: selectedNodeId.value,
@@ -532,6 +582,7 @@ function connectNode(nodeId: string): void {
 
 function removeConnection(adjacency: IbgpAdjacency): void {
   if (!draft.value) return;
+  markDraftDirty();
   draft.value.adjacencies = draft.value.adjacencies.filter(
     (item) => item.id !== adjacency.id,
   );
@@ -546,6 +597,7 @@ function setMember<K extends keyof IbgpMember>(
   value: IbgpMember[K],
 ): void {
   if (!selectedMember.value) return;
+  markDraftDirty();
   selectedMember.value[key] = value;
   if (key !== "address") return;
   for (const session of Object.values(sessionDrafts.value)) {
@@ -611,7 +663,7 @@ function schedulePreview(): void {
 }
 
 async function runPreview(): Promise<void> {
-  if (!draft.value) return;
+  if (!mounted || !draft.value) return;
   if (previewPending.value) {
     previewQueued = true;
     return;
@@ -629,18 +681,25 @@ async function runPreview(): Promise<void> {
         mutationWait: false,
       },
     );
+    if (!mounted) return;
     if (signature !== previewSignature.value) {
       previewQueued = true;
       return;
     }
     if (!draft.value.id) draft.value.id = response.domain.id;
     draft.value.adjacencies = response.domain.adjacencies;
-    sessionDrafts.value = Object.fromEntries(
-      response.sessions.map((session) => [session.id, clone(session)]),
-    );
+    suppressDraftDirty = true;
+    try {
+      sessionDrafts.value = Object.fromEntries(
+        response.sessions.map((session) => [session.id, clone(session)]),
+      );
+    } finally {
+      suppressDraftDirty = false;
+    }
     previewSides.value = response.sides;
     previewValid.value = response.valid;
   } catch (cause) {
+    if (!mounted) return;
     previewValid.value = false;
     previewError.value =
       cause instanceof Error ? cause.message : "iBGP 两端配置预检失败";
@@ -655,6 +714,13 @@ async function runPreview(): Promise<void> {
 
 watch(previewSignature, schedulePreview);
 watch(
+  sessionDrafts,
+  () => {
+    if (!suppressDraftDirty) draftDirty.value = true;
+  },
+  { deep: true, flush: "sync" },
+);
+watch(
   () => dashboard.value?.inventory.nodes,
   () => {
     if (draft.value && !draft.value.id && !draft.value.members.length)
@@ -668,10 +734,14 @@ function handleAppReady(): void {
 }
 
 onMounted(() => {
+  mounted = true;
   window.addEventListener("birdbox:app-ready", handleAppReady);
   runtimeTimer = window.setInterval(() => void refreshIbgpRuntimes(), 10000);
 });
 onBeforeUnmount(() => {
+  mounted = false;
+  domainLoadSequence += 1;
+  runtimeRefreshSequence += 1;
   window.removeEventListener("birdbox:app-ready", handleAppReady);
   if (previewTimer !== null) window.clearTimeout(previewTimer);
   if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
@@ -690,9 +760,9 @@ onBeforeUnmount(() => {
       </div>
       <div class="ibgp-toolbar">
         <select
-          v-model="selectedDomainId"
+          :value="selectedDomainId ?? ''"
           aria-label="选择 iBGP 域"
-          @change="selectedDomainId && selectDomain(selectedDomainId)"
+          @change="handleDomainSelect"
         >
           <option :value="null">选择域</option>
           <option v-for="domain in domains" :key="domain.id" :value="domain.id">
@@ -710,7 +780,7 @@ onBeforeUnmount(() => {
           "
           @click="saveDomain"
         >
-          {{ saving ? "正在保存" : "保存域" }}
+          {{ saving ? "正在保存" : draftDirty ? "保存域 · 有未保存修改" : "保存域" }}
         </button>
         <button
           v-if="selectedDomainId"
@@ -736,7 +806,7 @@ onBeforeUnmount(() => {
         <div class="ibgp-domain-strip">
           <div class="field">
             <label for="ibgpName">域名称</label
-            ><input id="ibgpName" v-model.trim="draft.name" maxlength="80" />
+            ><input id="ibgpName" v-model.trim="draft.name" maxlength="80" @input="markDraftDirty" />
           </div>
           <div class="field">
             <label for="ibgpAsn">内部 ASN</label
@@ -746,6 +816,7 @@ onBeforeUnmount(() => {
               type="number"
               min="1"
               max="4294967295"
+              @input="markDraftDirty"
             />
           </div>
         </div>
@@ -897,6 +968,10 @@ onBeforeUnmount(() => {
             <span :class="['ibgp-status', sessionStatusClass(leftSession)]"><i />{{ leftNode?.name }}：{{ sessionStatus(leftSession) }}</span>
             <span :class="['ibgp-status', sessionStatusClass(rightSession)]"><i />{{ rightNode?.name }}：{{ sessionStatus(rightSession) }}</span>
           </div>
+          <div class="ibgp-pair-jump" aria-label="跳转到双端配置">
+            <button class="compact-button" type="button" @click="focusPairSide('left')">编辑 {{ leftNode?.name }}</button>
+            <button class="compact-button" type="button" @click="focusPairSide('right')">编辑 {{ rightNode?.name }}</button>
+          </div>
           <span
             :class="{
               'preview-valid': previewValid,
@@ -917,15 +992,18 @@ onBeforeUnmount(() => {
           {{ previewError }}
         </p>
         <div class="ibgp-session-grid">
-          <div v-if="leftSession && leftPeer && leftNode" class="ibgp-side-column">
+          <div v-if="leftSession && leftPeer && leftNode" ref="leftSideColumn" class="ibgp-side-column">
             <IbgpSessionSideEditor
               :model-value="leftSession"
+              side="left"
               :node-name="leftNode.name"
               :peer="leftPeer"
               :defines="inventoryDefines"
               :functions="inventoryFunctions"
               :filters="inventoryFilters"
+              @dirty="markDraftDirty"
               @update:model-value="
+                markDraftDirty();
                 sessionDrafts[selectedAdjacency.leftSessionId] = $event
               "
               @open-policy-action="
@@ -952,15 +1030,18 @@ onBeforeUnmount(() => {
             </section>
           </div>
 
-          <div v-if="rightSession && rightPeer && rightNode" class="ibgp-side-column">
+          <div v-if="rightSession && rightPeer && rightNode" ref="rightSideColumn" class="ibgp-side-column">
             <IbgpSessionSideEditor
               :model-value="rightSession"
+              side="right"
               :node-name="rightNode.name"
               :peer="rightPeer"
               :defines="inventoryDefines"
               :functions="inventoryFunctions"
               :filters="inventoryFilters"
+              @dirty="markDraftDirty"
               @update:model-value="
+                markDraftDirty();
                 sessionDrafts[selectedAdjacency.rightSessionId] = $event
               "
               @open-policy-action="

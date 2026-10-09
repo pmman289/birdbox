@@ -40,18 +40,22 @@ export class ApiError extends Error {
 }
 
 function isDeploymentMutation(path: string, method: string): boolean {
+  const query = new URLSearchParams(path.split("?", 2)[1]?.split("#", 1)[0] ?? "");
+  path = path.split(/[?#]/, 1)[0] ?? path;
   if (method === "GET") return false;
-  if (/^\/api\/(defines|functions|filters|rpki|statics|source-policies)(?:\/|$)/.test(path)) return true;
+  if (/^\/api\/(defines|functions|filters|rpki|statics|directs|kernels|source-policies)(?:\/|$)/.test(path)) return true;
   if (/^\/api\/sessions\/(?:preview|apply)$/.test(path)) return true;
   if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
   if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
+  if (method === "POST" && /^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*\/promote-agent$/.test(path)) return true;
   if (/^\/api\/agent\/nodes\/[A-Za-z_][A-Za-z0-9_]*\/upgrade$/.test(path)) return true;
   if (path === "/api/agent/upgrades/batch") return true;
-  if (/^\/api\/ibgp-domains(?:\/|$)/.test(path)) return method !== "PATCH" || /\/layout$/.test(path);
+  if (/^\/api\/ibgp-domains(?:\/|$)/.test(path)) return method !== "PATCH";
   if (path === "/api/ospf/preview") return true;
+  if (path === "/api/ospf/render") return false;
   if (/^\/api\/ospf(?:\/[^/]+)?$/.test(path)) return method !== "PATCH";
   if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT") return true;
-  if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "DELETE" && !path.includes("force=true")) return true;
+  if (/^\/api\/nodes\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "DELETE" && query.get("force") !== "true") return true;
   return /^\/api\/peers\/[A-Za-z_][A-Za-z0-9_]*$/.test(path) && method === "PUT";
 }
 
@@ -69,6 +73,8 @@ function mutationWaitPresentation(path: string, method: string): MutationWaitPre
   else if (/^\/api\/nodes(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除节点" : "正在保存节点";
   else if (/^\/api\/peers(?:\/|$)/.test(pathname) || /\/peers$/.test(pathname)) title = method === "DELETE" ? "正在删除 Peer" : "正在保存 Peer";
   else if (/^\/api\/statics(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Static" : "正在应用 Static 变更";
+  else if (/^\/api\/directs(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Direct" : "正在应用 Direct 变更";
+  else if (/^\/api\/kernels(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Kernel" : "正在应用 Kernel 变更";
   else if (/^\/api\/rpki(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 RPKI" : "正在应用 RPKI 变更";
   else if (/^\/api\/source-policies(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除源地址出口映射" : "正在应用源地址出口映射";
   else if (/^\/api\/(defines|functions|filters)(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除策略资源" : "正在应用策略资源变更";
@@ -123,21 +129,30 @@ export async function api<Response>(path: string, options: ApiRequestOptions = {
   }, timeout);
 
   try {
+    const requestHeaders = new Headers(headers);
+    if (!requestHeaders.has("content-type")) requestHeaders.set("content-type", "application/json");
     const response = await fetch(path, {
       credentials: "same-origin",
       ...fetchOptions,
       signal: controller.signal,
-      headers: { "content-type": "application/json", ...headers },
+      headers: requestHeaders,
     });
     const responseText = await response.text();
     let data: unknown;
     try {
       data = responseText ? JSON.parse(responseText) : {};
     } catch {
-      throw new ApiError(`服务器返回了无效响应 (${response.status})`, { status: response.status });
+      const unknownOutcome = isDeploymentMutation(path, method);
+      if (response.status === 401) dispatchAuthRequired();
+      if (unknownOutcome) dispatchUnknownMutationOutcome(path, method);
+      throw new ApiError(unknownOutcome
+        ? "服务器返回了无效响应，变更可能已经生效；正在自动刷新状态确认结果"
+        : `服务器返回了无效响应 (${response.status})`, {
+        status: response.status, code: "INVALID_RESPONSE", unknownOutcome,
+      });
     }
     if (!response.ok) {
-      const errorBody = data as ApiErrorBody;
+      const errorBody: ApiErrorBody = data && typeof data === "object" && !Array.isArray(data) ? data as ApiErrorBody : {};
       const code = typeof errorBody.code === "string" ? errorBody.code : null;
       const message = typeof errorBody.error === "string" ? errorBody.error : `请求失败 (${response.status})`;
       if (response.status === 401 && code === "AUTH_REQUIRED") dispatchAuthRequired();

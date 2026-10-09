@@ -39,7 +39,7 @@ import { normalizeSession } from "./bird-session.js";
 import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
 import { normalizeSourcePolicyEgress, renderSourcePolicyEgress, sourcePolicyForNode } from "./bird-source-policy.js";
 import { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
-import { normalizeOspfDomain, ospfDomainNodeIds, ospfProtocolName } from "./ospf.js";
+import { normalizeOspfDomain, ospfDomainNodeIds, ospfLinkOptions, ospfNodeHasAreas, ospfProtocolName } from "./ospf.js";
 import type { NodeConfigBundle } from "./config-bundle.js";
 import path from "node:path";
 
@@ -416,19 +416,37 @@ function renderOspfForNode(
   for (const domain of domains) {
     const config = domain.nodeConfigs.find((item) => item.nodeId === node.id);
     if (!config || !config.enabled) continue;
-      for (const version of config.versions) {
+    if (!ospfNodeHasAreas(domain, node.id)) continue;
+    for (const version of config.versions) {
       const family = version === "ospfv2" ? "ipv4" : "ipv6";
       const areas = new Map<string, OspfDomain["links"]>();
       for (const link of domain.links) {
         if (link.fromNodeId !== node.id && link.toNodeId !== node.id) continue;
         const iface = link.fromNodeId === node.id ? link.localInterface : link.remoteInterface;
         const existing = areas.get(link.area) ?? [];
-        areas.set(link.area, [...existing, { ...link, localInterface: iface }]);
+        areas.set(link.area, [...existing, { ...link, localInterface: iface, options: ospfLinkOptions(link, node.id) }]);
       }
       for (const area of Object.keys(config.areaOptions ?? {})) if (!areas.has(area)) areas.set(area, []);
       for (const virtualLink of config.virtualLinks ?? []) if (!areas.has(virtualLink.area)) areas.set(virtualLink.area, []);
-        output += `\nprotocol ospf ${version === "ospfv3" ? "v3" : "v2"} ${ospfProtocolName(domain, version)} {\n`;
-      for (const link of domain.links) if (version === "ospfv3" && link.authentication === "simple") assertValidation(false, `OSPFv3 链路 ${link.id} 不支持 Simple 认证，请使用 Cryptographic`);
+      // BIRD refuses a protocol block without any configured areas. An
+      // enabled node may intentionally have no links or area options while a
+      // topology is being assembled; omit that version until an area exists.
+      if (areas.size === 0) continue;
+      output += `\nprotocol ospf ${version === "ospfv3" ? "v3" : "v2"} ${ospfProtocolName(domain, version)} {\n`;
+      for (const link of domain.links) {
+        if (link.authentication === "ipsec" && (link.fromNodeId === node.id || link.toNodeId === node.id)) {
+          assertValidation(false, `OSPF 链路 ${link.id} 的 IPsec 认证不受 BIRD 配置支持，请改用 Simple 或 Cryptographic`);
+        }
+      }
+      // Authentication is scoped to the endpoint rendered for this node. A
+      // domain may legitimately contain a v2-only Simple-authenticated link
+      // alongside an unrelated v3 node/link; do not reject that unrelated
+      // link while rendering the v3 node.
+      for (const link of domain.links) {
+        if (version === "ospfv3" && link.authentication === "simple" && (link.fromNodeId === node.id || link.toNodeId === node.id)) {
+          assertValidation(false, `OSPFv3 链路 ${link.id} 不支持 Simple 认证，请使用 Cryptographic`);
+        }
+      }
       if (config.routerId) output += `  router id ${config.routerId};\n`;
       const protocolOptions = config.protocolOptions ?? {};
       if (protocolOptions.rfc1583compat === true) output += "  rfc1583compat yes;\n";
@@ -466,6 +484,8 @@ function renderOspfForNode(
       for (const [area, links] of areas) {
         output += `  area ${area} {\n`;
         const areaOptions = config.areaOptions?.[area] ?? {};
+        const areaFamily = version === "ospfv2" ? 4 : 6;
+        const prefixMatchesVersion = (prefix: string): boolean => net.isIP(prefix.split("/", 1)[0] ?? "") === areaFamily;
         if (areaOptions.stub) output += "    stub;\n";
         if (areaOptions.nssa) output += "    nssa;\n";
         if (areaOptions.summary != null) output += `    summary ${areaOptions.summary ? "yes" : "no"};\n`;
@@ -474,17 +494,19 @@ function renderOspfForNode(
         if (areaOptions.defaultCost2 != null) output += `    default cost2 ${areaOptions.defaultCost2};\n`;
         if (areaOptions.translator) output += "    translator yes;\n";
         if (areaOptions.translatorStability != null) output += `    translator stability ${areaOptions.translatorStability};\n`;
-        if (areaOptions.networks?.length) {
+        const networks = (areaOptions.networks ?? []).filter((item) => prefixMatchesVersion(item.prefix));
+        if (networks.length) {
           output += "    networks {\n";
-          for (const network of areaOptions.networks) output += `      ${network.prefix}${network.hidden ? " hidden" : ""};\n`;
+          for (const network of networks) output += `      ${network.prefix}${network.hidden ? " hidden" : ""};\n`;
           output += "    };\n";
         }
-        if (areaOptions.external?.length) {
+        const external = (areaOptions.external ?? []).filter((item) => prefixMatchesVersion(item.prefix));
+        if (external.length) {
           output += "    external {\n";
-          for (const external of areaOptions.external) output += `      ${external.prefix}${external.hidden ? " hidden" : ""}${external.tag != null ? ` tag ${external.tag}` : ""};\n`;
+          for (const item of external) output += `      ${item.prefix}${item.hidden ? " hidden" : ""}${item.tag != null ? ` tag ${item.tag}` : ""};\n`;
           output += "    };\n";
         }
-        for (const stubnet of areaOptions.stubnets ?? []) {
+        for (const stubnet of (areaOptions.stubnets ?? []).filter((item) => prefixMatchesVersion(item.prefix))) {
           const hasOptions = stubnet.hidden || stubnet.summary || stubnet.cost != null;
           output += `    stubnet ${stubnet.prefix}${hasOptions ? " {" : ";"}\n`;
           if (hasOptions) {
@@ -496,27 +518,28 @@ function renderOspfForNode(
         }
         // Multiple NBMA/PtMP adjacencies may share one physical interface.
         // Emit one interface block and list each peer as a BIRD neighbor.
-        const interfaceGroups = new Map<string, { link: OspfDomain["links"][number]; neighbors: Set<string>; shared: boolean }>();
+        const interfaceGroups = new Map<string, { link: OspfDomain["links"][number]; neighbors: Map<string, boolean> }>();
+        const neighborFamily = version === "ospfv2" ? 4 : 6;
         for (const link of links) {
           const key = link.localInterface;
-          const existing = interfaceGroups.get(key);
-          if (!existing) {
-            interfaceGroups.set(key, { link, neighbors: new Set(), shared: false });
-          } else {
-            existing.shared = true;
-            const peerId = link.fromNodeId === node.id ? link.toNodeId : link.fromNodeId;
-            const peerRouterId = domain.nodeConfigs.find((item) => item.nodeId === peerId)?.routerId;
-            if (peerRouterId) existing.neighbors.add(peerRouterId);
+          let group = interfaceGroups.get(key);
+          const linkOptions = link.options ?? {};
+          if (!group) {
+            group = { link, neighbors: new Map() };
+            interfaceGroups.set(key, group);
+          }
+          for (const neighbor of linkOptions.neighbors ?? []) {
+            // OSPFv2 and OSPFv3 use different neighbor address families. A
+            // shared inventory list may contain both; never emit an address
+            // into the protocol block where it cannot form an adjacency.
+            if (net.isIP(neighbor.address) !== neighborFamily) continue;
+            group.neighbors.set(neighbor.address, group.neighbors.get(neighbor.address) === true || neighbor.eligible === true);
           }
         }
         for (const group of interfaceGroups.values()) {
           const link = group.link;
-          const peerId = link.fromNodeId === node.id ? link.toNodeId : link.fromNodeId;
-          const peerRouterId = domain.nodeConfigs.find((item) => item.nodeId === peerId)?.routerId;
-          if (group.shared && (link.options?.type === "nbma" || link.options?.type === "ptmp") && peerRouterId) group.neighbors.add(peerRouterId);
           const options = link.options ?? {};
-          output += `    interface ${birdString(link.localInterface)} {\n`;
-          if (options.instanceId != null) output += `      instance ${options.instanceId};\n`;
+          output += `    interface ${birdString(link.localInterface)}${options.instanceId != null ? ` instance ${options.instanceId}` : ""} {\n`;
           output += `      cost ${link.cost};\n      hello ${link.hello};\n`;
           if (options.poll != null) output += `      poll ${options.poll};\n`;
           if (options.retransmit != null) output += `      retransmit ${options.retransmit};\n`;
@@ -560,11 +583,8 @@ function renderOspfForNode(
             const auth = link.authentication === "simple" ? "simple" : "cryptographic";
             output += `      authentication ${auth};\n`;
           }
-          if (options.password) output += renderPassword("      ", options.password, options.passwordOptions);
-          const neighbors = [
-            ...(options.neighbors ?? []),
-            ...[...group.neighbors].map((address) => ({ address, eligible: false })),
-          ].filter((neighbor, index, all) => all.findIndex((item) => item.address === neighbor.address) === index);
+          if (link.authentication !== "none" && options.password) output += renderPassword("      ", options.password, options.passwordOptions);
+          const neighbors = [...group.neighbors].map(([address, eligible]) => ({ address, eligible }));
           if (neighbors.length) {
             output += "      neighbors {\n";
             for (const neighbor of neighbors) output += `        ${neighbor.address}${neighbor.eligible ? " eligible" : ""};\n`;
@@ -579,7 +599,7 @@ function renderOspfForNode(
           if (virtualLink.wait != null) output += `      wait ${virtualLink.wait};\n`;
           if (virtualLink.dead != null) output += `      dead ${virtualLink.dead};\n`;
           if (virtualLink.authentication && virtualLink.authentication !== "none") output += `      authentication ${virtualLink.authentication};\n`;
-          if (virtualLink.password) output += renderPassword("      ", virtualLink.password, virtualLink.passwordOptions);
+          if (virtualLink.authentication !== "none" && virtualLink.password) output += renderPassword("      ", virtualLink.password, virtualLink.passwordOptions);
           output += "    };\n";
         }
         output += "  };\n";
@@ -754,8 +774,13 @@ export function renderBirdConfig(
   // protocol declarations after policy resources so BIRD can resolve names
   // regardless of the selected export mode.
   config += renderNodeProtocols(node, directResources, kernelResources, functionMap, filterMap);
-  config += renderOspfForNode(node, ospfDomainSet, functionMap, filterMap, cidrDefineMap);
-  if (active.some(({ session }) => session.bgp.bfd !== "off")) config += "\nprotocol bfd birdbox_bfd {\n}\n";
+  const ospfConfig = renderOspfForNode(node, ospfDomainSet, functionMap, filterMap, cidrDefineMap);
+  config += ospfConfig;
+  // OSPF requests BFD sessions from the global BFD protocol. BIRD accepts an
+  // interface-level `bfd yes` without that protocol during syntax checking,
+  // but no BFD sessions can run at runtime unless an instance exists.
+  const needsBfd = active.some(({ session }) => session.bgp.bfd !== "off") || /\bbfd yes;/.test(ospfConfig);
+  if (needsBfd) config += "\nprotocol bfd birdbox_bfd {\n}\n";
 
   for (const staticProtocol of renderedStaticProtocols) {
     config += `\nprotocol static ${staticProtocol.name} {\n` +

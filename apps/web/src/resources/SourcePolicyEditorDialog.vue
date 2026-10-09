@@ -43,6 +43,7 @@ const previewError = ref("");
 const { dashboard } = useDashboardStore();
 let previewTimer: number | null = null;
 let previewGeneration = 0;
+let previewController: AbortController | null = null;
 
 const draft = reactive<Draft>({
   nodeIds: null,
@@ -83,14 +84,17 @@ function emptyGroup(): DraftGroup {
   return { id: "", egressAddress: "", kernelTable: null, sources: [""] };
 }
 
-function open(resource: SourcePolicyEgress | null): void {
-  editingId.value = resource?.id ?? null;
-  deleted.value = false;
-  scopeError.value = false;
-  plans.value = [];
-  selectedPlanIndex.value = 0;
+function invalidatePreview(): void {
+  previewGeneration += 1;
+  previewController?.abort();
+  previewController = null;
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  previewTimer = null;
   previewPending.value = false;
-  previewError.value = "";
+}
+
+function setDraft(resource: SourcePolicyEgress | null): void {
+  editingId.value = resource?.id ?? null;
   Object.assign(draft, {
     nodeIds: resource?.nodeIds === null
       ? null
@@ -103,6 +107,17 @@ function open(resource: SourcePolicyEgress | null): void {
     internalDefineIds: resource?.internalDefineIds ? [...resource.internalDefineIds] : [],
     enabled: resource?.enabled ?? true,
   });
+}
+
+function open(resource: SourcePolicyEgress | null): void {
+  if (pending.value) return;
+  invalidatePreview();
+  deleted.value = false;
+  scopeError.value = false;
+  plans.value = [];
+  selectedPlanIndex.value = 0;
+  previewError.value = "";
+  setDraft(resource);
   importText.value = "";
   importOpen.value = false;
   if (form.value) clearFormValidation(form.value);
@@ -116,10 +131,7 @@ function open(resource: SourcePolicyEgress | null): void {
 
 function close(): void {
   if (pending.value) return;
-  previewGeneration += 1;
-  if (previewTimer !== null) window.clearTimeout(previewTimer);
-  previewTimer = null;
-  previewPending.value = false;
+  invalidatePreview();
   dialog.value?.close();
 }
 
@@ -211,7 +223,9 @@ function previewReady(): boolean {
 }
 
 async function refreshPreview(): Promise<void> {
-  const generation = ++previewGeneration;
+  if (pending.value) return;
+  invalidatePreview();
+  const generation = previewGeneration;
   if (!dialog.value?.open || deleted.value || !previewReady()) {
     plans.value = [];
     previewError.value = previewReady() ? "" : "填写映射名称、出口地址和至少一条源 CIDR 后生成预览。";
@@ -220,10 +234,13 @@ async function refreshPreview(): Promise<void> {
   }
   previewPending.value = true;
   previewError.value = "";
+  const controller = new AbortController();
+  previewController = controller;
   try {
     const response = await api<{ manualPlans: SourcePolicyManualPlan[] }>("/api/source-policies/preview", {
       method: "POST",
       mutationWait: false,
+      signal: controller.signal,
       body: JSON.stringify({ ...payload(), id: editingId.value ?? undefined }),
     });
     if (generation === previewGeneration) {
@@ -236,20 +253,26 @@ async function refreshPreview(): Promise<void> {
       previewError.value = error instanceof Error ? error.message : "无法生成草稿预览";
     }
   } finally {
-    if (generation === previewGeneration) previewPending.value = false;
+    if (generation === previewGeneration) {
+      previewPending.value = false;
+      previewController = null;
+    }
   }
 }
 
 watch(draft, () => {
-  if (!dialog.value?.open || deleted.value) return;
-  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  if (!dialog.value?.open || deleted.value || pending.value) return;
+  invalidatePreview();
+  plans.value = [];
+  previewError.value = "";
   previewTimer = window.setTimeout(() => {
     previewTimer = null;
     void refreshPreview();
   }, 180);
-}, { deep: true, flush: "post" });
+}, { deep: true, flush: "sync" });
 
 async function save(): Promise<void> {
+  if (pending.value || deleted.value) return;
   scopeError.value = draft.nodeIds !== null && draft.nodeIds.length === 0;
   if (scopeError.value) {
     document.querySelector<HTMLElement>("#sourcePolicyNodeScope")?.focus();
@@ -258,12 +281,15 @@ async function save(): Promise<void> {
   }
   if (!form.value || !validateForm(form.value)) return;
   pending.value = true;
+  invalidatePreview();
+  previewError.value = "";
   const id = editingId.value;
   try {
     const result = await api<SourcePolicyMutationResponse>(id ? `/api/source-policies/${encodeURIComponent(id)}` : "/api/source-policies", {
       method: id ? "PUT" : "POST",
       body: JSON.stringify(payload()),
     });
+    setDraft(result.resource);
     plans.value = result.manualPlans;
     selectedPlanIndex.value = 0;
     await loadDashboard(draft.nodeIds?.[0] ?? dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
@@ -278,9 +304,12 @@ async function save(): Promise<void> {
 }
 
 async function remove(): Promise<void> {
+  if (pending.value) return;
   const resource = editingId.value ? inventory.value?.sourcePolicies.find((item) => item.id === editingId.value) : null;
   if (!resource || !window.confirm(`删除源地址出口映射“${resource.label}”？将同时下发系统规则清理。`)) return;
   pending.value = true;
+  invalidatePreview();
+  previewError.value = "";
   try {
     const result = await api<{ manualPlans: SourcePolicyManualPlan[] }>(`/api/source-policies/${encodeURIComponent(resource.id)}`, { method: "DELETE" });
     plans.value = result.manualPlans;
@@ -333,7 +362,7 @@ onMounted(() => {
   window.addEventListener("birdbox:resource-edit", handleEdit);
 });
 onBeforeUnmount(() => {
-  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  invalidatePreview();
   window.removeEventListener("birdbox:resource-create", handleCreate);
   window.removeEventListener("birdbox:resource-edit", handleEdit);
 });
@@ -341,7 +370,7 @@ onBeforeUnmount(() => {
 
 <template>
   <dialog id="sourcePolicyDialog" ref="dialog" class="editor-dialog source-policy-editor-dialog" aria-labelledby="sourcePolicyDialogTitle" @cancel.prevent="close">
-    <form ref="form" novalidate :aria-busy="pending" @submit.prevent="save">
+    <form ref="form" novalidate :aria-busy="pending" :inert="pending" @submit.prevent="save">
       <div class="dialog-head"><span class="dialog-icon">⇢</span><div><p class="eyebrow">SOURCE POLICY EGRESS</p><h2 id="sourcePolicyDialogTitle">{{ deleted ? "系统规则清理" : (editing ? "编辑源地址出口映射" : "新增源地址出口映射") }}</h2></div></div>
       <template v-if="!deleted">
         <div class="dialog-grid">

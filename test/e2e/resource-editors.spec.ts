@@ -1,4 +1,6 @@
 import { expect, test } from "@playwright/test";
+import type { SourcePolicyManualPlan } from "../../packages/contracts/src/api";
+import type { SourcePolicyEgress } from "../../packages/contracts/src/inventory";
 
 async function authenticate(page: import("@playwright/test").Page): Promise<void> {
   await page.goto("/");
@@ -10,6 +12,95 @@ async function authenticate(page: import("@playwright/test").Page): Promise<void
   await page.locator("#authSubmitButton").click();
   await expect(page.locator("#appMain")).toBeVisible();
 }
+
+test("源地址出口保存后继续编辑保留分配，删除结果不被旧预览覆盖", async ({ page }) => {
+  test.setTimeout(75_000);
+  let resource: SourcePolicyEgress | null = null;
+  const writes: Array<{ method: string; path: string; body: Record<string, any> }> = [];
+  let holdPreview = false;
+  let heldPreviews = 0;
+  let releasePreview!: () => void;
+  const previewBarrier = new Promise<void>((resolve) => { releasePreview = resolve; });
+  const plan = (birdConfig: string): SourcePolicyManualPlan => ({
+    operation: "reconcile", resourceId: "e2e_saved_source_policy", resourceLabel: "E2E 出口",
+    nodeId: "local", nodeName: "E2E Router", platform: "linux", birdConfig,
+    rules: [], removeRules: [], gatewayRules: [], removeGatewayRules: [],
+    managedRules: [], removeManagedRules: [], applyScript: null, cleanupScript: birdConfig,
+    systemdUnit: null, systemdInstallScript: null, instructions: [],
+    management: "manual", upgradeRequired: false, warning: null,
+  });
+  await page.route("**/api/dashboard**", async (route) => {
+    const response = await route.fetch();
+    const dashboard = await response.json();
+    dashboard.inventory.sourcePolicies = resource ? [resource] : [];
+    await route.fulfill({ response, json: dashboard });
+  });
+  await page.route(/\/api\/source-policies(?:\/[^?]*)?$/, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (path.endsWith("/preview")) {
+      if (holdPreview) {
+        heldPreviews += 1;
+        await previewBarrier;
+      }
+      await route.fulfill({ json: { manualPlans: [plan("旧草稿预览")] } });
+      return;
+    }
+    const body = method === "DELETE" ? {} : route.request().postDataJSON();
+    writes.push({ method, path, body });
+    if (method === "DELETE") {
+      resource = null;
+      await route.fulfill({ json: { manualPlans: [plan("已删除后的规则清理")] } });
+      return;
+    }
+    resource = {
+      ...body, id: "e2e_saved_source_policy", rulePriorityBase: 10000,
+      groups: body.groups.map((group: Record<string, unknown>) => ({
+        ...group, id: "e2e_saved_gateway", kernelTable: 50001, ruleSlot: 0,
+      })),
+    } as SourcePolicyEgress;
+    await route.fulfill({ json: { resource, manualPlans: [plan("已保存的配置")] } });
+  });
+  try {
+    await authenticate(page);
+    await page.locator("#resourceWorkspaceTab").click();
+    await page.locator("#resourceSourcePoliciesTab").click();
+    await page.locator("#resource-sourcePolicies .primary-button").click();
+    const dialog = page.locator("#sourcePolicyDialog");
+    await page.locator("#sourcePolicyLabel").fill("E2E 出口");
+    await page.locator("#sourcePolicyGroup0").fill("172.20.177.36");
+    await page.locator("#sourcePolicySource0_0").fill("198.51.100.10/32");
+    await page.locator('label[for="sourcePolicyCopyInternal"]').click();
+    await expect(page.locator("#sourcePolicyCopyInternal")).not.toBeChecked();
+    await expect(dialog).toContainText("旧草稿预览");
+    const save = dialog.getByRole("button", { name: "预检、保存并下发 BIRD" });
+    await save.click();
+    await expect(page.locator("#sourcePolicyDialogTitle")).toHaveText("编辑源地址出口映射");
+    await expect(page.locator("#sourcePolicyKernelTable0")).toHaveValue("50001");
+    await expect(save).toBeEnabled();
+    await page.locator("#sourcePolicyLabel").fill("E2E 更新出口");
+    await save.click();
+    await expect(save).toBeEnabled();
+    expect(writes.map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: "POST", path: "/api/source-policies" },
+      { method: "PUT", path: "/api/source-policies/e2e_saved_source_policy" },
+    ]);
+    expect(writes[1]?.body.groups[0]).toMatchObject({ id: "e2e_saved_gateway", kernelTable: 50001 });
+
+    holdPreview = true;
+    await page.locator("#sourcePolicyLabel").fill("等待预览时删除");
+    await expect.poll(() => heldPreviews).toBeGreaterThan(0);
+    page.once("dialog", (confirmation) => confirmation.accept());
+    await dialog.getByRole("button", { name: "删除映射集" }).click();
+    await expect(page.locator("#sourcePolicyDialogTitle")).toHaveText("系统规则清理");
+    releasePreview();
+    await expect(dialog).toContainText("已删除后的规则清理");
+    await expect(dialog).not.toContainText("旧草稿预览");
+  } finally {
+    releasePreview();
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+  }
+});
 
 test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", async ({ page }) => {
   const pageErrors: string[] = [];

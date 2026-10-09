@@ -89,6 +89,10 @@ function dashboardPayload() {
 }
 
 async function authenticate(page: import("@playwright/test").Page): Promise<void> {
+  await page.route("**/api/ospf/render", (route) => {
+    const draft = route.request().postDataJSON() as typeof domain;
+    return route.fulfill({ json: { configs: draft.nodeConfigs.map((config) => ({ nodeId: config.nodeId, config: `protocol ospf v2 birdbox_ospf_${draft.id}_ospfv2 {\n  router id ${config.routerId};\n}` })) } });
+  });
   await page.goto("/");
   const title = page.locator("#authTitle");
   await expect(title).toHaveText(/^(设置管理密码|登录 Birdbox)$/);
@@ -229,6 +233,75 @@ test("OSPF 失败保存后恢复交互并可再次操作", async ({ page }) => {
   await expect(page.locator(".ospf-path-dialog")).toBeVisible();
   expect(saveAttempts).toBe(1);
   expect(pageErrors).toEqual([]);
+});
+
+test("OSPF Area 与节点草稿独立，重复选择节点保留未保存参数", async ({ page }) => {
+  const isolated = structuredClone(domain);
+  isolated.links[1].area = "0.0.0.2";
+  let submitted: typeof domain | null = null;
+  await page.route("**/api/dashboard*", (route) => route.fulfill({ json: dashboardPayload() }));
+  await page.route("**/api/ospf", (route) => route.fulfill({ json: { domains: [isolated], layout: isolated.layout, inventory } }));
+  await page.route("**/api/ospf/*/runtime", (route) => route.fulfill({ json: runtime }));
+  await page.route("**/api/nodes/*/interfaces", (route) => route.fulfill({ json: { interfaces: ["bbtest23", "bbtest24"] } }));
+  await page.route("**/api/ospf/preview", (route) => {
+    submitted = route.request().postDataJSON();
+    return route.fulfill({ json: { valid: true, configs: [] } });
+  });
+  await authenticate(page);
+  await openOspfWorkspace(page);
+  await expect(page.locator(".ospf-node-stats em.up").first()).toBeVisible();
+  const advanced = page.locator("details.ospf-advanced");
+  await advanced.locator("summary").first().click();
+  await expect(page.locator(".ospf-area-card")).toHaveCount(1);
+  await expect(page.locator(".ospf-area-card")).toContainText("Area 0.0.0.0");
+  const routerId = page.locator(".ospf-form-grid .field").filter({ hasText: "Router ID" }).locator("input");
+  await routerId.fill("192.0.2.99");
+  await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Alpha" }).click();
+  await expect(routerId).toHaveValue("192.0.2.99");
+  await page.getByRole("button", { name: "预检配置" }).click();
+  await expect(page.locator(".ospf-preview-dialog")).toBeVisible();
+  expect(submitted!.nodeConfigs.find((config) => config.nodeId === "local")!.areaOptions).not.toHaveProperty("0.0.0.2");
+  expect(submitted!.nodeConfigs.find((config) => config.nodeId === "local")!.routerId).toBe("192.0.2.99");
+});
+
+test("OSPF 域切换和新建保护未保存草稿，取消恢复原选择", async ({ page }) => {
+  const other = { ...structuredClone(domain), id: "ospf_other", name: "Other OSPF" };
+  await page.route("**/api/dashboard*", (route) => route.fulfill({ json: dashboardPayload() }));
+  await page.route("**/api/ospf", (route) => route.fulfill({ json: { domains: [domain, other], layout: domain.layout, inventory } }));
+  await page.route("**/api/ospf/*/runtime", (route) => route.fulfill({ json: runtime }));
+  await page.route("**/api/nodes/*/interfaces", (route) => route.fulfill({ json: { interfaces: ["bbtest23", "bbtest24"] } }));
+  await authenticate(page);
+  await openOspfWorkspace(page);
+  const picker = page.locator(".ospf-domain-picker select");
+  const routerId = page.locator(".ospf-form-grid .field").filter({ hasText: "Router ID" }).locator("input");
+  let confirmations = 0;
+  let accept = false;
+  page.on("dialog", async (dialog) => {
+    confirmations += 1;
+    expect(dialog.message()).toContain("未保存修改");
+    if (accept) await dialog.accept(); else await dialog.dismiss();
+  });
+  // Hydration and materialization of default advanced options are read-only.
+  await picker.selectOption(other.id);
+  await expect(picker).toHaveValue(other.id);
+  expect(confirmations).toBe(0);
+  await routerId.fill("192.0.2.99");
+  await picker.selectOption(domain.id);
+  await expect(picker).toHaveValue(other.id);
+  await expect(routerId).toHaveValue("192.0.2.99");
+  expect(confirmations).toBe(1);
+  await page.getByRole("button", { name: "新建域" }).click();
+  await expect(picker).toHaveValue(other.id);
+  await expect(routerId).toHaveValue("192.0.2.99");
+  expect(confirmations).toBe(2);
+  accept = true;
+  await picker.selectOption(domain.id);
+  await expect(picker).toHaveValue(domain.id);
+  await expect(routerId).toHaveValue("192.0.2.1");
+  expect(confirmations).toBe(3);
+  await page.getByRole("button", { name: "新建域" }).click();
+  await expect(page.getByRole("textbox", { name: "OSPF 域名称" })).toHaveValue("新 OSPF 域");
+  expect(confirmations).toBe(3);
 });
 
 test("OSPF 20 节点 100 链路拓扑保持可交互", async ({ page }, testInfo) => {

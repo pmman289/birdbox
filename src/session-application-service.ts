@@ -39,7 +39,7 @@ interface StagedSession extends PreparedSession {
 interface SessionApplicationServiceOptions {
   store: InventoryStore;
   deploymentService: DeploymentService;
-  withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+  withDeploymentLock<Result>(operation: () => Promise<Result> | Result, options?: { allowPendingJournal?: boolean; waitForActive?: boolean }): Promise<Result>;
   makeId(prefix: string): string;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
   getEvents(): ChangeEvent[];

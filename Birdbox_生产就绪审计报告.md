@@ -1648,7 +1648,7 @@ MySQL 的 `GET_LOCK` 虽然能保证部署事务互斥，但**不能**弥补上�
 
 ### 11.1 实测结论：OSPF 能否跑通？
 
-**能在上述实验条件下跑通完整主流程，但暂不宜据此撤销项目自带的生产风险警告。** 实际操作与结果如下：
+**能在上述实验条件下跑通完整主流程，但暂不宜据此撤销项目自带的生产风险警告。** 这段结论针对本节记录的 `9f59b31` 历史版本；当前分支的 OSPF 重设计和最新验收记录见 [`docs/ospf-redesign.md`](docs/ospf-redesign.md)。实际操作与结果如下：
 
 1. 两个真实 Agent 节点经 `setup-script → register → test → POST /api/nodes` 接入；两个独立 BIRD 进程分别在隔离网络命名空间中运行。
 2. 通过 `POST /api/ospf/preview` 对 **OSPFv2 + OSPFv3** 的配置做了目标节点的真实 `birdc configure check`，返回 `valid=true`。
@@ -1657,7 +1657,7 @@ MySQL 的 `GET_LOCK` 虽然能保证部署事务互斥，但**不能**弥补上�
 5. `PUT /api/ospf/:domainId` 把链路 Cost 从 10 改到 30，生成配置相应变化，邻居恢复到 Full；`PATCH /api/ospf/layout` 与 `PATCH /api/ospf/:domainId/layout` 成功。
 6. 向同一节点创建自环链路得到 400，原域未被覆盖；`DELETE /api/ospf/:domainId` 成功后协议从 `birdc show protocols` 消失，学习到的内核路由撤回。
 
-**边界：** 未验证 OSPF 密码认证、BFD、虚链路、NSSA、多 Area、链路故障切换、BIRD 2.19.1/OpenWrt 实机、数据库故障下恢复或真实多用户同时操作。OSPF 工作区本身在 `apps/web/src/app/AppRoot.vue:432-435` 明确提示“实验阶段，勿在生产网络使用”；一次双节点成功不等于所有选项达到生产标准。
+**边界：** 未验证 OSPF 密码认证、BFD、虚链路、NSSA、多 Area、链路故障切换、BIRD 2.19.1/OpenWrt 实机、数据库故障下恢复或真实多用户同时操作。上述历史版本的 OSPF 工作区曾显示实验阶段警告；当前分支已改为应用前确认 BIRD 检查、部署、重载、备份和回滚条件。一次双节点成功不等于所有选项都达到生产标准。
 
 **实测补充发现：** 创建源地址出口映射后，BIRD 确实生成递归默认路由，Agent 确实写入了 `ip rule`，但实验中出口表显示 `unreachable default proto bird`。原因是我只在 n2 建了 Direct 资源，n1 的 `master4` 没有用于解析出口地址的直连路由。**这不能直接定性为产品渲染缺陷**；它证明“配置预检/保存成功”不能替代“策略路由下一跳可达”。建议在源地址映射预检后增加运行态检查 `birdc show route table master4 for <出口IP> all`，把“递归出口目前不可达”作为醒目警告（而不是直接拒绝保存，因为初次部署时路由可能尚未收敛）。
 

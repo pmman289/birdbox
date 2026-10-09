@@ -117,19 +117,39 @@ function sourcePolicyNode(resource: SourcePolicyEgress, index: number, defineNam
 }
 
 function ospfNodes(domains: OspfDomain[], functions: ReadonlyMap<string, string>, filters: ReadonlyMap<string, string>, defines: ReadonlyMap<string, string>): DependencyNode[] {
-  return domains.map((domain, index) => {
+  // OSPF policies are selected per node configuration. Represent each
+  // configuration as its own dependency consumer so a node-scoped Function,
+  // Filter, or Define can be used by the matching endpoint without making a
+  // domain-wide global-scope claim that incorrectly includes every member.
+  return domains.flatMap((domain, domainIndex) => domain.nodeConfigs.map((config, configIndex) => {
     const references = new Set<string>();
-    for (const config of domain.nodeConfigs) {
+    if (config.enabled !== false) {
       for (const version of ["ospfv2", "ospfv3"] as const) {
-        const define = config.exportDefineIds[version]; if (define) { const name = defines.get(define); if (name) references.add(name); }
+        const exportPolicy = config.exportPolicies[version];
+        const define = exportPolicy.mode !== "custom" && exportPolicy.formAction === "cidr"
+          ? config.exportDefineIds[version]
+          : null;
+        if (define) { const name = defines.get(define); if (name) references.add(name); }
         for (const policy of [config.importPolicies[version], config.exportPolicies[version]]) {
-          if (policy.filterId) { const name = filters.get(policy.filterId); if (name) references.add(name); }
-          for (const step of policy.steps) if (step.type === "function") { const name = functions.get(step.functionId); if (name) references.add(name); }
+          if (policy.mode === "custom" && policy.filterId) { const name = filters.get(policy.filterId); if (name) references.add(name); }
+          if (policy.mode === "combined") {
+            for (const step of policy.steps) if (step.type === "function") { const name = functions.get(step.functionId); if (name) references.add(name); }
+          }
         }
       }
     }
-    return { key: `OSPF:${domain.id}`, kind: "OSPF", name: domain.name, enabled: true, scope: { nodeId: null }, phase: 4, index, references, providedSymbols: new Set() };
-  });
+    return {
+      key: `OSPF:${domain.id}:${config.nodeId}`,
+      kind: "OSPF",
+      name: `${domain.name} (${config.nodeId})`,
+      enabled: config.enabled !== false,
+      scope: { nodeId: config.nodeId },
+      phase: 4,
+      index: domainIndex * 100_000 + configIndex,
+      references,
+      providedSymbols: new Set(),
+    };
+  }));
 }
 
 function dependencyNodes(inventory: DependencyInventory): DependencyNode[] {

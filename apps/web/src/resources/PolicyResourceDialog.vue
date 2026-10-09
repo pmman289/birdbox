@@ -63,6 +63,8 @@ const nameEdited = ref(false);
 const sourceEdited = ref(false);
 const scopeError = ref(false);
 const { dashboard } = useDashboardStore();
+let resolveController: AbortController | null = null;
+let resolveGeneration = 0;
 
 const draft = reactive<Draft>({
   nodeIds: null,
@@ -195,6 +197,10 @@ function resourceSource(resource: PolicyResource): string {
 }
 
 function open(nextCollection: PolicyCollection, resource: PolicyResource | null): void {
+  resolveGeneration += 1;
+  resolveController?.abort();
+  resolveController = null;
+  resolving.value = false;
   collection.value = nextCollection;
   editingId.value = resource?.id ?? null;
   draft.nodeIds = resource?.nodeIds === null || !resource ? null : [...resource.nodeIds];
@@ -224,6 +230,10 @@ function open(nextCollection: PolicyCollection, resource: PolicyResource | null)
 
 function close(): void {
   if (!pending.value) dialog.value?.close();
+  resolveGeneration += 1;
+  resolveController?.abort();
+  resolveController = null;
+  resolving.value = false;
 }
 
 function updateCursor(): void {
@@ -357,10 +367,23 @@ async function save(): Promise<void> {
 
 async function resolvePreview(): Promise<void> {
   if (!form.value || !validateForm(form.value)) return;
+  resolveController?.abort();
+  const controller = new AbortController();
+  resolveController = controller;
+  const generation = ++resolveGeneration;
+  const requestSignature = JSON.stringify({
+    type: draft.type,
+    asSet: draft.asSet,
+    server: draft.server,
+    databases: draft.databases,
+    prefixLimit: draft.prefixLimit,
+    allowMoreSpecific: draft.allowMoreSpecific,
+  });
   resolving.value = true;
   try {
     const result = await api<{ entries: string[]; count: number }>("/api/defines/irr/resolve", {
       method: "POST",
+      signal: controller.signal,
       body: JSON.stringify({
         type: draft.type,
         entrySource: {
@@ -370,10 +393,25 @@ async function resolvePreview(): Promise<void> {
         },
       }),
     });
+    const currentSignature = JSON.stringify({
+      type: draft.type,
+      asSet: draft.asSet,
+      server: draft.server,
+      databases: draft.databases,
+      prefixLimit: draft.prefixLimit,
+      allowMoreSpecific: draft.allowMoreSpecific,
+    });
+    if (generation !== resolveGeneration || controller.signal.aborted || currentSignature !== requestSignature) return;
     draft.source = result.entries.join("\n");
     dispatchToast(`测试展开成功，共 ${result.count} 条前缀`, "success");
-  } catch (error) { presentFormError(form.value, error, fieldMappings); }
-  finally { resolving.value = false; }
+  } catch (error) {
+    if (generation === resolveGeneration && !controller.signal.aborted) presentFormError(form.value, error, fieldMappings);
+  } finally {
+    if (generation === resolveGeneration) {
+      resolving.value = false;
+      resolveController = null;
+    }
+  }
 }
 
 async function syncNow(): Promise<void> {
@@ -432,6 +470,9 @@ onMounted(() => {
   window.addEventListener("birdbox:resource-edit", handleEdit);
 });
 onBeforeUnmount(() => {
+  resolveGeneration += 1;
+  resolveController?.abort();
+  resolveController = null;
   window.removeEventListener("birdbox:resource-create", handleCreate);
   window.removeEventListener("birdbox:resource-edit", handleEdit);
 });

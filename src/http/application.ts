@@ -32,7 +32,7 @@ interface HttpApplicationOptions {
   isDeploymentLocked(): boolean;
   recoveryState?: () => "idle" | "pending" | "failed";
   loadDashboard(nodeId: string | null, peerId: string | null): Promise<DashboardResponse>;
-  withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+  withDeploymentLock<Result>(operation: () => Promise<Result> | Result, options?: { allowPendingJournal?: boolean; waitForActive?: boolean }): Promise<Result>;
   withNodeOperationLock<Result>(nodeId: string, operation: () => Promise<Result> | Result): Promise<Result>;
   mutationService: MutationService;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
@@ -198,6 +198,7 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     // high-volume human audit stream; registration and failed controller
     // operations remain visible through structured logs and metrics.
     const auditableApiRequest = pathname.startsWith("/api/")
+      && pathname !== "/api/ospf/render"
       && !pathname.startsWith("/api/agent/")
       && !["GET", "HEAD", "OPTIONS"].includes(request.method);
     if (auditableApiRequest) {
@@ -246,7 +247,9 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     const authenticated = !unauthenticatedPrefix && publicError.code !== "AUTH_REQUIRED"
       ? await options.authStore.isAuthenticated(requestSessionToken(request)).catch(() => false)
       : false;
-    if (authenticated) options.addEvent("error", safeErrorMessage(publicError));
+    // Invalid drafts are normal during typing. Rendering is read-only and
+    // must not fill the global change stream with every incomplete edit.
+    if (authenticated && pathname !== "/api/ospf/render") options.addEvent("error", safeErrorMessage(publicError));
     if (healthPath) return sendJson(reply, 503, { status: "error" });
     if (unexpected || (publicError.status ?? publicError.statusCode ?? 500) >= 500) {
       logger.error("HTTP 请求处理失败", {

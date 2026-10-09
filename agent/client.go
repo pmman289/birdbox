@@ -153,12 +153,33 @@ func (c *Client) RunPoll(ctx context.Context) error {
 		})
 	}
 	taskContext := ctx
-	if readOnlyTask(response.Task.Method) {
-		var cancel context.CancelFunc
-		taskContext, cancel = context.WithDeadline(ctx, deadline)
-		defer cancel()
-	}
+	// The controller removes a task from its pending set at the deadline and
+	// may start a rollback. Every operation, including mutating BIRD changes,
+	// must stop at that same boundary so a late agent cannot keep changing the
+	// node after the controller has moved on.
+	var cancel context.CancelFunc
+	taskContext, cancel = context.WithDeadline(ctx, deadline)
+	defer cancel()
+	heartbeatCtx, stopHeartbeat := context.WithCancel(taskContext)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if err := c.request(heartbeatCtx, http.MethodPost, "/api/agent/heartbeat", map[string]any{"nodeId": c.cfg.NodeID}, nil); err != nil {
+					log.Printf("agent heartbeat failed while running task node_id=%s error=%v", c.cfg.NodeID, err)
+				}
+			}
+		}
+	}()
 	r := executeTask(taskContext, *response.Task)
+	stopHeartbeat()
+	<-heartbeatDone
 	r.Stdout = truncateUTF8(r.Stdout, maxResultStdout)
 	r.Stderr = truncateUTF8(r.Stderr, maxResultStderr)
 	log.Printf("agent task finished node_id=%s task_id=%s method=%s ok=%t code=%v", c.cfg.NodeID, response.Task.TaskID, response.Task.Method, r.OK, r.Code)
@@ -209,7 +230,7 @@ func executeTask(parent context.Context, t task) result {
 		return networkIPRulesTask(parent, t.Params, r)
 	}
 	if t.Method == "agent.self_upgrade" {
-		return upgradeTask(t, r)
+		return upgradeTask(parent, t, r)
 	}
 	if strings.HasPrefix(t.Method, "bird.") {
 		return birdTask(parent, t, r)
@@ -298,7 +319,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func upgradeTask(t task, r result) result {
+func upgradeTask(parent context.Context, t task, r result) result {
 	url, _ := t.Params["url"].(string)
 	sha, _ := t.Params["sha256"].(string)
 	target, _ := t.Params["targetPath"].(string)
@@ -313,7 +334,7 @@ func upgradeTask(t task, r result) result {
 		r.Code = "INVALID_UPGRADE"
 		return r
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -364,9 +385,14 @@ func upgradeTask(t task, r result) result {
 		r.Code = "INSTALL_FAILED"
 		return r
 	}
-	if err = probeBinary(tmpName); err != nil {
+	if err = probeBinary(ctx, tmpName); err != nil {
 		r.Stderr = "new agent binary cannot run on this host: " + err.Error()
 		r.Code = "INSTALL_FAILED"
+		return r
+	}
+	if err := ctx.Err(); err != nil {
+		r.Stderr = "upgrade deadline exceeded: " + err.Error()
+		r.Code = "TIMEOUT"
 		return r
 	}
 	if _, statErr := os.Stat(target); statErr == nil {
@@ -386,8 +412,8 @@ func upgradeTask(t task, r result) result {
 	return r
 }
 
-func probeBinary(path string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func probeBinary(parent context.Context, path string) error {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "-version")
 	cmd.Env = []string{}

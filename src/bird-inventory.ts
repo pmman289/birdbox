@@ -30,7 +30,7 @@ import {
 } from "./bird-source-policy.js";
 import { normalizeIbgpDomain } from "./ibgp-domain.js";
 import { validateResourceDependencyGraph } from "./bird-resource-dependencies.js";
-import { normalizeOspfDomain, ospfDomainNodeIds } from "./ospf.js";
+import { normalizeOspfDomain, ospfDomainNodeIds, ospfNodeHasAreas, ospfProtocolName } from "./ospf.js";
 import { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
 import {
   resourceAppliesToNode,
@@ -116,6 +116,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   assertValidation(new Set(sessions.map((item) => item.id)).size === sessions.length, "会话 ID 重复");
   assertValidation(new Set(ibgpDomains.map((item) => item.id)).size === ibgpDomains.length, "iBGP 域 ID 重复");
   assertValidation(new Set(ospfDomains.map((item) => item.id)).size === ospfDomains.length, "OSPF 域 ID 重复");
+  assertValidation(new Set(ospfDomains.map((item) => item.name)).size === ospfDomains.length, "OSPF 域名称重复");
   const allIbgpAdjacencies = ibgpDomains.flatMap((domain) => domain.adjacencies);
   assertValidation(new Set(allIbgpAdjacencies.map((item) => item.id)).size === allIbgpAdjacencies.length, "跨 iBGP 域的邻接 ID 重复");
 
@@ -150,23 +151,46 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   const ospfLayout = normalizeOspfLayout(input.ospfLayout, new Set(nodes.map((node) => node.id)), ospfDomains);
   for (const domain of ospfDomains) {
     const nodeConfigIds = new Set(domain.nodeConfigs.map((item) => item.nodeId));
+    const routerIdsByVersion = new Map<"ospfv2" | "ospfv3", Map<string, string>>([
+      ["ospfv2", new Map()],
+      ["ospfv3", new Map()],
+    ]);
     for (const nodeId of ospfDomainNodeIds(domain)) assertValidation(nodeMap.has(nodeId), `OSPF 域 ${domain.name} 引用了不存在的节点`);
     for (const config of domain.nodeConfigs) {
       assertValidation(config.versions.length > 0, `OSPF 域 ${domain.name} 至少启用一个协议版本`);
       if (config.routerId !== null) assertValidation(net.isIP(config.routerId) === 4, `OSPF 域 ${domain.name} Router ID 必须是 IPv4 地址`);
+      // A disabled node configuration is retained as an editable draft, but
+      // it produces no BIRD protocol block. Ignore stale policy references
+      // until the operator enables it again, at which point the full checks
+      // below run before deployment.
+      if (!config.enabled) continue;
+      const effectiveRouterId = config.routerId ?? nodeMap.get(config.nodeId)?.routerId ?? null;
+      for (const version of config.versions) {
+        if (effectiveRouterId === null) continue;
+        const owners = routerIdsByVersion.get(version)!;
+        const previousNodeId = owners.get(effectiveRouterId);
+        assertValidation(!previousNodeId || previousNodeId === config.nodeId, `OSPF 域 ${domain.name} 的 ${version} Router ID ${effectiveRouterId} 被节点 ${previousNodeId} 和 ${config.nodeId} 重复使用`);
+        owners.set(effectiveRouterId, config.nodeId);
+      }
       for (const family of ["ospfv2", "ospfv3"] as const) {
         const expectedType = family === "ospfv2" ? "cidr4" : "cidr6";
         const defineId = config.exportDefineIds[family];
         const define = defineId === null ? null : defineMap.get(defineId);
-        assertValidation(defineId === null || (define?.type === expectedType && define.enabled && resourceAppliesToNode(define, config.nodeId)), `OSPF 域 ${domain.name} 的 ${family} 导出 Define 不可用`);
+        const exportPolicy = config.exportPolicies[family];
+        const usesCidrDefine = exportPolicy.mode !== "custom" && exportPolicy.formAction === "cidr";
+        assertValidation(!usesCidrDefine || defineId !== null, `OSPF 域 ${domain.name} 的 ${family} 导出 CIDR 策略必须选择 Define`);
+        assertValidation(!usesCidrDefine || (define?.type === expectedType && define.enabled && resourceAppliesToNode(define, config.nodeId)), `OSPF 域 ${domain.name} 的 ${family} 导出 Define 不可用`);
         for (const policy of [config.importPolicies[family], config.exportPolicies[family]]) {
-          for (const step of policy.steps.filter((item) => item.type === "function")) {
-            const fn = functionMap.get(step.functionId);
-            assertValidation(fn && fn.enabled && fn.callable && resourceAppliesToNode(fn, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Function`);
-          }
-          if (policy.filterId !== null) {
-            const filter = filterMap.get(policy.filterId);
+          if (policy.mode === "custom") {
+            assertValidation(policy.filterId !== null, `OSPF 域 ${domain.name} 的 ${family} 自定义策略必须选择 Filter`);
+            const filter = policy.filterId === null ? undefined : filterMap.get(policy.filterId);
             assertValidation(filter && filter.enabled && resourceAppliesToNode(filter, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Filter`);
+          }
+          if (policy.mode === "combined") {
+            for (const step of policy.steps.filter((item) => item.type === "function")) {
+              const fn = functionMap.get(step.functionId);
+              assertValidation(fn && fn.enabled && fn.callable && resourceAppliesToNode(fn, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Function`);
+            }
           }
         }
       }
@@ -313,6 +337,11 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
       ...nodeFunctions.map((item) => item.name),
       ...nodeFilters.map((item) => item.name),
       ...nodeSessions.map((item) => item.protocolName),
+      ...ospfDomains.flatMap((domain) => {
+        const config = domain.nodeConfigs.find((item) => item.nodeId === node.id);
+        if (!config || !config.enabled || !ospfNodeHasAreas(domain, node.id)) return [];
+        return config.versions.map((version) => ospfProtocolName(domain, version));
+      }),
       ...normalizedDirectProtocols.filter((item) => item.enabled && item.nodeId === node.id).map((item) => item.name),
       ...normalizedKernelProtocols.filter((item) => item.enabled && resourceAppliesToNode(item, node.id)).flatMap((item) => item.ipv4 && item.ipv6 ? [`${item.name}4`, `${item.name}6`] : [item.name]),
       ...nodeStaticProtocols.map((item) => item.name),

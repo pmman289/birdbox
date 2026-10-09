@@ -11,6 +11,7 @@ import {
   configureManagedSsh,
   configureAgentBroker,
   executeNodeCommand,
+  inspectOspfRuntime,
   extractProtocolDetails,
   locateStaticRouteDiagnostic,
   makeStaticProtocolName,
@@ -575,6 +576,20 @@ test("uses explicit Direct and Kernel resources, including an intentional empty 
   const empty = renderBirdConfig(normalized, [], [], [], [], [], [], [], [], [], [], []);
   assert.doesNotMatch(empty, /protocol direct birdbox_direct/);
   assert.doesNotMatch(empty, /protocol kernel birdbox_kernel/);
+});
+
+test("rejects Direct and Kernel names reserved for generated Birdbox protocols", () => {
+  const normalized = normalizeNode({ id: "router", name: "Router", transport: "local", routerId: "192.0.2.1" });
+  for (const name of ["birdbox_device", "birdbox_bfd", "birdbox_static", "birdbox_static4", "birdbox_static6"]) {
+    assert.throws(
+      () => normalizeDirectProtocol({ id: `direct_${name}`, label: "Reserved", name, nodeId: normalized.id }),
+      /内部协议冲突/,
+    );
+    assert.throws(
+      () => normalizeKernelProtocol({ id: `kernel_${name}`, label: "Reserved", name, nodeIds: [normalized.id] }),
+      /内部协议冲突/,
+    );
+  }
 });
 
 test("renders Kernel export policy independently for IPv4 and IPv6", () => {
@@ -1341,6 +1356,102 @@ test("executes a managed node command through the Agent RPC transport", async ()
   assert.equal(task?.method, "legacy.exec");
   broker.result({ taskId: task.taskId, nodeId: "agent_exec", ok: true, stdout: "agent-ok", stderr: "" }, token);
   assert.deepEqual(await command, { ok: true, stdout: "agent-ok", stderr: "" });
+});
+
+test("keeps OSPF runtime version detection compatible with old Agents", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const token = await broker.issueToken("agent_ospf_legacy");
+  await broker.register({ nodeId: "agent_ospf_legacy", token, agentVersion: "old", protocolVersion: 1 });
+  configureAgentBroker(broker);
+  const agentNode = normalizeNode({ ...node, id: "agent_ospf_legacy", transport: "agent" });
+  const pending = inspectOspfRuntime(agentNode, { v2: "birdbox_ospf_x_ospfv2", v3: "birdbox_ospf_x_ospfv3" });
+  const task = await broker.poll("agent_ospf_legacy", token, 1000);
+  assert.equal(task?.method, "bird.ospf");
+  broker.result({
+    taskId: task.taskId,
+    nodeId: task.nodeId,
+    ok: true,
+    stdout: [
+      "birdbox_ospf_x_ospfv2:",
+      "Router ID   Pri State      DTime Interface Router IP",
+      "192.0.2.2  1 Full/PtP 30 eth0 192.0.2.2",
+      "",
+      "---BIRDBOX-OSPF-V2-COUNT---",
+      "1 of 1 routes for 1 networks",
+      "---BIRDBOX-OSPF-V2-ROUTES---",
+      "",
+      "---BIRDBOX-OSPF-V3-COUNT---",
+      "unknown protocol",
+      "---BIRDBOX-OSPF-V3-ROUTES---",
+      "",
+      "---BIRDBOX-OSPF-INTERFACES---",
+      "eth0",
+    ].join("\n"),
+    stderr: "",
+  }, token);
+  const runtime = await pending;
+  assert.equal(runtime.reachable, true);
+  assert.equal(runtime.v2.configured, true);
+  assert.equal(runtime.v3.configured, false);
+});
+
+test("rejects incomplete OSPF status markers from a new Agent", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const token = await broker.issueToken("agent_ospf_bad_marker");
+  await broker.register({ nodeId: "agent_ospf_bad_marker", token, agentVersion: "new", protocolVersion: 1 });
+  configureAgentBroker(broker);
+  const agentNode = normalizeNode({ ...node, id: "agent_ospf_bad_marker", transport: "agent" });
+  const pending = inspectOspfRuntime(agentNode, { v2: "birdbox_ospf_x_ospfv2", v3: "birdbox_ospf_x_ospfv3" });
+  const task = await broker.poll("agent_ospf_bad_marker", token, 1000);
+  assert.equal(task?.method, "bird.ospf");
+  broker.result({
+    taskId: task.taskId,
+    nodeId: task.nodeId,
+    ok: true,
+    stdout: "---BIRDBOX-OSPF-STATUS---\nneighbors=0\nv2count=0\n",
+    stderr: "",
+  }, token);
+  const runtime = await pending;
+  assert.equal(runtime.reachable, false);
+  assert.equal(runtime.error, "节点 OSPF 运行态状态标记不完整");
+});
+
+test("keeps local OSPF reachability separate from per-version query failures", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-ospf-runtime-"));
+  const birdc = path.join(directory, "birdc");
+  const ip = path.join(directory, "ip");
+  const bashEnv = path.join(directory, "bash.env");
+  await fs.writeFile(birdc, `#!/bin/sh
+case "$*" in
+  *"show ospf neighbors"*) printf '%s\\n' 'birdbox_ospf_x_ospfv2:' 'Router ID   Pri State      DTime Interface Router IP' '192.0.2.2  1 Full/PtP 30 eth0 192.0.2.2'; exit 0 ;;
+  *"show route protocol birdbox_ospf_x_ospfv2 count"*) printf '%s\\n' '1 of 1 routes for 1 networks'; exit 0 ;;
+  *"show route protocol birdbox_ospf_x_ospfv3 count"*) printf '%s\\n' 'CF_SYM_UNDEFINED'; exit 1 ;;
+  *"master4 protocol birdbox_ospf_x_ospfv2 all"*) printf '%s\\n' '192.0.2.0/24 unicast'; exit 0 ;;
+  *"master6 protocol birdbox_ospf_x_ospfv3 all"*) printf '%s\\n' 'CF_SYM_UNDEFINED'; exit 1 ;;
+esac
+exit 1
+`);
+  await fs.writeFile(ip, "#!/bin/sh\nprintf '%s\\n' '1: lo: <LOOPBACK>'\n");
+  await fs.writeFile(bashEnv, `export PATH=${directory}:$PATH\n`);
+  await fs.chmod(birdc, 0o755); await fs.chmod(ip, 0o755);
+  const previousPath = process.env.PATH;
+  const previousBashEnv = process.env.BASH_ENV;
+  process.env.PATH = `${directory}:${previousPath ?? ""}`;
+  process.env.BASH_ENV = bashEnv;
+  try {
+    const runtime = await inspectOspfRuntime(normalizeNode({ ...node, socketPath: "/tmp/birdbox-test.ctl" }), { v2: "birdbox_ospf_x_ospfv2", v3: "birdbox_ospf_x_ospfv3" });
+    assert.equal(runtime.reachable, true);
+    assert.equal(runtime.v2.configured, true);
+    assert.equal(runtime.v2.error, null);
+    assert.equal(runtime.v3.configured, false);
+    assert.equal(runtime.v3.error, null);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousBashEnv === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = previousBashEnv;
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("surfaces legacy Agent generated-config errors without treating regular files as invalid locally", async () => {

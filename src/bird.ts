@@ -46,4 +46,4 @@ export {
   sourcePolicyRules,
 } from "./bird-source-policy.js";
 export { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
-export { normalizeOspfDomain, ospfDomainNodeIds, ospfProtocolName } from "./ospf.js";
+export { normalizeOspfDomain, ospfDomainNodeIds, ospfLinkOptions, ospfNodeHasAreas, ospfProtocolName } from "./ospf.js";

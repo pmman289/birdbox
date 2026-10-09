@@ -453,8 +453,8 @@ onBeforeUnmount(() => {
   </dialog>
 
   <dialog id="ospfWarningDialog" ref="ospfWarningDialog" class="editor-dialog ospf-warning-dialog" aria-labelledby="ospfWarningTitle" aria-describedby="ospfWarningDetail" @cancel.prevent="closeOspfWarning">
-    <div class="dialog-head"><span class="dialog-icon warning">!</span><div><p class="eyebrow">EXPERIMENTAL FEATURE</p><h2 id="ospfWarningTitle">OSPF 管理暂不建议使用</h2></div></div>
-    <p id="ospfWarningDetail" class="ospf-warning-copy">OSPF 管理功能目前仍处于实验阶段，配置生成、预检和应用可能存在严重问题。请勿在生产网络使用，建议先在隔离测试环境验证并保留现有配置备份。</p>
+    <div class="dialog-head"><span class="dialog-icon warning">!</span><div><p class="eyebrow">OSPF MANAGEMENT</p><h2 id="ospfWarningTitle">应用 OSPF 配置前请确认</h2></div></div>
+    <p id="ospfWarningDetail" class="ospf-warning-copy">保存并应用会对受管节点执行 BIRD 配置检查、部署和重载。建议先执行预检，并确认已有配置备份和可用的回滚条件。</p>
     <div class="dialog-actions"><button class="secondary-button" type="button" @click="closeOspfWarning">返回</button><button class="primary-button danger" type="button" @click="confirmOspfWarning">我已了解风险，继续</button></div>
   </dialog>
 

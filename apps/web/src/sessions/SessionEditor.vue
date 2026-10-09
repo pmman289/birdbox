@@ -366,6 +366,10 @@ function openApplyDialog(): void {
   if (validateDraft(true)) applyDialog.value?.showModal();
 }
 
+function closeApplyDialog(): void {
+  if (!applyPending.value) applyDialog.value?.close();
+}
+
 async function applySession(): Promise<void> {
   if (applyPending.value || !validateDraft(true)) return;
   const payload = sessionPayload();
@@ -499,12 +503,12 @@ onBeforeUnmount(() => {
     </form>
   </section>
 
-  <dialog ref="applyDialog" aria-labelledby="applyDialogTitle">
+  <dialog ref="applyDialog" aria-labelledby="applyDialogTitle" @cancel.prevent="closeApplyDialog">
     <form method="dialog" @submit.prevent="applySession">
       <div class="dialog-head"><span class="dialog-icon">⇄</span><div><p class="eyebrow">节点部署</p><h2 id="applyDialogTitle">应用节点会话配置</h2></div></div>
       <div class="dialog-route"><span>{{ pairLocal }}</span><i></i><span>{{ peer?.name ?? "远端" }} · AS{{ peer?.asn ?? "-" }}</span></div>
       <p class="dialog-note">将合并此节点的全部已启用会话，预检通过后更新该节点。</p>
-      <div class="dialog-actions"><button class="secondary-button" type="button" @click="applyDialog?.close()">取消</button><button class="primary-button" type="submit">确认应用</button></div>
+      <div class="dialog-actions"><button class="secondary-button" type="button" @click="closeApplyDialog">取消</button><button class="primary-button" type="submit">确认应用</button></div>
     </form>
   </dialog>
   <PolicyActionDialog ref="policyActionDialog" :local-asn="draft?.localAsn ?? null" @saved="insertPolicyFunction" />

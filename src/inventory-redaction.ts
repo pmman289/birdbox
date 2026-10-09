@@ -18,8 +18,8 @@ export function redactPayload<T>(value: T): T {
 function redactConfig(value: string): string {
   // Preserve the useful config preview while hiding quoted credentials.
   return value
-    .replace(/(\bpassword\s+)(["'])(.*?)\2/gi, `$1$2${SECRET_PLACEHOLDER}$2`)
-    .replace(/(\bsecret\s+)(["'])(.*?)\2/gi, `$1$2${SECRET_PLACEHOLDER}$2`);
+    .replace(/(\b(?:password|secret|bird private key|remote public key)\s+)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*')/gi,
+      (_match, prefix: string, quoted: string) => `${prefix}${quoted[0]}${SECRET_PLACEHOLDER}${quoted[0]}`);
 }
 
 function redactValue(value: unknown, key = ""): unknown {
@@ -49,11 +49,15 @@ function restoreValue(incoming: unknown, previous: unknown, key: string): unknow
   if (Array.isArray(incoming)) {
     const oldItems = Array.isArray(previous) ? previous : [];
     return incoming.map((item, index) => {
-      const old = isRecord(item)
-        ? oldItems.find((candidate) => isRecord(candidate)
-          && ((item.id !== undefined && candidate.id === item.id)
-            || (item.nodeId !== undefined && candidate.nodeId === item.nodeId)))
-          ?? oldItems[index]
+      // A newly inserted/reordered record must never inherit another
+      // record's secret just because it occupies the same array position.
+      // Virtual links share a Router ID across transit areas, so both fields
+      // form their identity.
+      const hasIdentity = isRecord(item) && (item.id !== undefined || item.nodeId !== undefined);
+      const old = hasIdentity
+        ? oldItems.find((candidate) => isRecord(candidate) && (item.id !== undefined
+          ? candidate.id === item.id && (item.area === undefined || candidate.area === item.area)
+          : candidate.nodeId === item.nodeId))
         : oldItems[index];
       return restoreValue(item, old, "");
     });

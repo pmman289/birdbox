@@ -13,6 +13,21 @@ import { normalizeChannelPolicy } from "./bird-session.js";
 
 type RecordValue = Record<string, unknown>;
 
+// These declarations are emitted by Birdbox itself. Direct and Kernel
+// resources are user-named, so reject collisions here before a duplicate
+// protocol block can make an otherwise valid deployment unloadable.
+const RESERVED_PROTOCOL_NAMES = new Set([
+  "birdbox_device",
+  "birdbox_static",
+  "birdbox_static4",
+  "birdbox_static6",
+  "birdbox_bfd",
+]);
+
+function assertAvailableProtocolName(name: string, label: string): void {
+  assertValidation(!RESERVED_PROTOCOL_NAMES.has(name), `${label}与 Birdbox 内部协议冲突`);
+}
+
 function record(value: unknown, message: string): RecordValue {
   assertValidation(value && typeof value === "object" && !Array.isArray(value), message);
   return value as RecordValue;
@@ -44,6 +59,7 @@ function normalizeKernelExportPolicy(value: unknown, fallback: ChannelPolicy, fa
 export function normalizeDirectProtocol(inputValue: unknown): DirectProtocol {
   const input = record(inputValue, "Direct 资源参数不能为空");
   const name = normalizeId(input.name ?? "birdbox_direct", "Direct 协议名称");
+  assertAvailableProtocolName(name, "Direct 协议名称");
   const ipv4 = input.ipv4 !== false;
   const ipv6 = input.ipv6 !== false;
   assertValidation(ipv4 || ipv6, "Direct 至少启用一个地址族");
@@ -62,6 +78,7 @@ export function normalizeDirectProtocol(inputValue: unknown): DirectProtocol {
 export function normalizeKernelProtocol(inputValue: unknown): KernelProtocol {
   const input = record(inputValue, "Kernel 资源参数不能为空");
   const name = normalizeId(input.name ?? "birdbox_kernel", "Kernel 协议名称");
+  assertAvailableProtocolName(name, "Kernel 协议名称");
   const ipv4 = input.ipv4 !== false;
   const ipv6 = input.ipv6 !== false;
   assertValidation(ipv4 || ipv6, "Kernel 至少启用一个地址族");

@@ -15,6 +15,7 @@ import BgpOptionsEditor from "../sessions/BgpOptionsEditor.vue";
 import ChannelEditor from "../sessions/ChannelEditor.vue";
 
 const props = defineProps<{
+  side: "left" | "right";
   nodeName: string;
   peer: Peer;
   defines: PolicyDefine[];
@@ -23,6 +24,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  dirty: [];
   "open-policy-action": [context: {
     family: AddressFamily;
     direction: "import" | "export";
@@ -65,10 +67,10 @@ const visibleFilters = computed(() =>
 </script>
 
 <template>
-  <section class="ibgp-side-editor" :data-node-id="model.nodeId">
+  <section class="ibgp-side-editor" :data-node-id="model.nodeId" @input="emit('dirty')" @change="emit('dirty')">
     <div class="subsection-head ibgp-side-heading">
       <div>
-        <h3>{{ nodeName }}</h3>
+        <div class="ibgp-side-title"><span class="ibgp-side-label">{{ side === "left" ? "左端" : "右端" }}</span><h3>{{ nodeName }}</h3></div>
         <span>连接到 {{ peer.name }} · {{ peer.address }}</span>
       </div>
       <span class="status-pill unconfigured">iBGP</span>

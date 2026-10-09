@@ -13,6 +13,8 @@ const kind = ref<"directs" | "kernels">("directs");
 const pending = ref(false);
 const interfaceLoading = ref(false);
 const interfaceError = ref("");
+let interfaceRequestId = 0;
+let interfaceController: AbortController | null = null;
 const interfaceSearch = ref("");
 const interfaceOptions = ref<string[]>([]);
 const kernelNodeSearch = ref("");
@@ -146,6 +148,9 @@ function reset(resource: DirectProtocol | KernelProtocol | null): void {
 }
 
 function open(nextKind: "directs" | "kernels", resource: DirectProtocol | KernelProtocol | null): void {
+  interfaceRequestId += 1;
+  interfaceController?.abort();
+  interfaceController = null;
   kind.value = nextKind;
   reset(resource);
   if (nextKind === "directs") void loadInterfaces(draft.nodeId);
@@ -173,17 +178,30 @@ function interfacesValue(): string {
 }
 
 async function loadInterfaces(nodeId: string): Promise<void> {
+  const requestId = ++interfaceRequestId;
+  interfaceController?.abort();
+  const controller = new AbortController();
+  interfaceController = controller;
   interfaceOptions.value = [...new Set(draft.interfaces as string[])];
   interfaceError.value = "";
-  if (!nodeId) return;
+  if (!nodeId || kind.value !== "directs") {
+    interfaceLoading.value = false;
+    interfaceController = null;
+    return;
+  }
   interfaceLoading.value = true;
   try {
-    const response = await api<{ interfaces: string[] }>(`/api/nodes/${encodeURIComponent(nodeId)}/interfaces`);
+    const response = await api<{ interfaces: string[] }>(`/api/nodes/${encodeURIComponent(nodeId)}/interfaces`, { signal: controller.signal });
+    if (requestId !== interfaceRequestId || controller.signal.aborted || draft.nodeId !== nodeId) return;
     interfaceOptions.value = [...new Set([...response.interfaces, ...draft.interfaces])].sort();
   } catch (error) {
+    if (controller.signal.aborted || requestId !== interfaceRequestId) return;
     interfaceError.value = error instanceof Error ? error.message : "无法读取节点接口，可继续手动填写";
   } finally {
-    interfaceLoading.value = false;
+    if (requestId === interfaceRequestId) {
+      interfaceLoading.value = false;
+      interfaceController = null;
+    }
   }
 }
 
@@ -233,6 +251,10 @@ async function remove(): Promise<void> {
   } catch (error) { dispatchToast(error instanceof Error ? error.message : "协议资源删除失败", "error"); } finally { pending.value = false; }
 }
 
+function close(): void {
+  if (!pending.value) dialog.value?.close();
+}
+
 function handleCreate(event: CustomEvent<{ kind: string }>): void { if (event.detail.kind === "directs" || event.detail.kind === "kernels") open(event.detail.kind, null); }
 function handleEdit(event: CustomEvent<{ kind: string; id: string }>): void {
   if (event.detail.kind !== "directs" && event.detail.kind !== "kernels") return;
@@ -240,11 +262,11 @@ function handleEdit(event: CustomEvent<{ kind: string; id: string }>): void {
   open(event.detail.kind, resource ?? null);
 }
 onMounted(() => { window.addEventListener("birdbox:resource-create", handleCreate); window.addEventListener("birdbox:resource-edit", handleEdit); });
-onBeforeUnmount(() => { window.removeEventListener("birdbox:resource-create", handleCreate); window.removeEventListener("birdbox:resource-edit", handleEdit); });
+onBeforeUnmount(() => { interfaceRequestId += 1; interfaceController?.abort(); window.removeEventListener("birdbox:resource-create", handleCreate); window.removeEventListener("birdbox:resource-edit", handleEdit); });
 </script>
 
 <template>
-  <dialog ref="dialog" class="editor-dialog" :aria-labelledby="`${kind}DialogTitle`">
+  <dialog ref="dialog" class="editor-dialog" :aria-labelledby="`${kind}DialogTitle`" @cancel.prevent="close">
     <form @submit.prevent="save">
       <div class="dialog-head"><span class="dialog-icon">{{ kind === 'directs' ? 'D' : 'K' }}</span><div><p class="eyebrow">资源</p><h2 :id="`${kind}DialogTitle`">{{ editing ? '编辑' : '添加' }} {{ kind === 'directs' ? 'Direct' : 'Kernel' }}</h2></div></div>
       <div class="dialog-grid">
@@ -305,7 +327,7 @@ onBeforeUnmount(() => { window.removeEventListener("birdbox:resource-create", ha
         </section>
         <label class="toggle-row full-width"><span>启用资源</span><input v-model="draft.enabled" type="checkbox"><i></i></label>
       </div>
-      <div class="dialog-actions split-actions"><button v-if="editing" class="text-danger-button" type="button" :disabled="pending" @click="remove">删除资源</button><span></span><button class="secondary-button" type="button" :disabled="pending" @click="dialog?.close()">取消</button><button class="primary-button" type="submit" :disabled="pending">{{ pending ? '正在应用' : '保存并应用' }}</button></div>
+      <div class="dialog-actions split-actions"><button v-if="editing" class="text-danger-button" type="button" :disabled="pending" @click="remove">删除资源</button><span></span><button class="secondary-button" type="button" :disabled="pending" @click="close">取消</button><button class="primary-button" type="submit" :disabled="pending">{{ pending ? '正在应用' : '保存并应用' }}</button></div>
     </form>
   </dialog>
 </template>

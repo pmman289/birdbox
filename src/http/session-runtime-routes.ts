@@ -6,6 +6,7 @@ import type { AuthStore } from "../auth.js";
 import { executeNodeCommand, executeNodeRpc, inspectNode, inspectOspfRuntime, inspectProtocolDetails, inspectProtocolRoutes, inspectRoutePath, setProtocolState, type OspfRuntimeResult } from "../bird.js";
 import { ospfDomainNodeIds, ospfProtocolName } from "../ospf.js";
 import { configForNode } from "../inventory-domain.js";
+import { redactPayload } from "../inventory-redaction.js";
 import type { InventoryStore } from "../store.js";
 import { requestSessionToken, sessionCookie } from "./auth-routes.js";
 
@@ -13,7 +14,7 @@ interface SessionRuntimeRoutesOptions {
   authStore: AuthStore;
   secureCookieSetting: boolean | null;
   store: InventoryStore;
-  withDeploymentLock<Result>(operation: () => Promise<Result> | Result): Promise<Result>;
+  withDeploymentLock<Result>(operation: () => Promise<Result> | Result, options?: { allowPendingJournal?: boolean; waitForActive?: boolean }): Promise<Result>;
   withNodeOperationLock<Result>(nodeId: string, operation: () => Promise<Result> | Result): Promise<Result>;
   addEvent(level: string, message: unknown, nodeId?: string | null): ChangeEvent;
   getEvents(): ChangeEvent[];
@@ -50,7 +51,7 @@ function jsonReply(reply: FastifyReply, status: number, payload: unknown, header
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
     ...headers,
-  }).send(payload);
+  }).send(redactPayload(payload));
 }
 
 function findNode(state: Inventory, nodeId: string): ManagedNode {
@@ -125,7 +126,7 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
       ? await executeNodeRpc(node, "system.interfaces", {}, 15_000)
       : await executeNodeCommand(
         node,
-        "ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p'",
+        "interfaces_raw=$(ip -o link show 2>/dev/null); interfaces_status=$?; [ \"$interfaces_status\" -eq 0 ] || exit \"$interfaces_status\"; printf '%s\\n' \"$interfaces_raw\" | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p'",
         { timeout: 10_000 },
       );
     if (!result.ok) throw routeError(502, result.stderr || "无法读取节点接口");

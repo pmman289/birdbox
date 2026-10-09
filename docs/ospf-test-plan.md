@@ -305,7 +305,7 @@ L0/L1 使用内存对象或 JSON fixture，不访问测试机；L2 通过 Playwr
 | OSPF-VAL-002 | 节点配置去重 | 相同 `nodeId` 两条配置必须拒绝 | P0 |
 | OSPF-VAL-003 | 链路节点引用 | 不存在节点、同节点自环必须拒绝 | P0 |
 | OSPF-VAL-004 | 接口完整性 | 本端或对端接口为空必须拒绝；两端接口名称按端点独立保存 | P0 |
-| OSPF-VAL-005 | 端点自动启用 | 链路存在时两端 `enabled` 为 false，规范化后都为 true；删除最后一条链路不应误启用其它节点 | P0 |
+| OSPF-VAL-005 | 端点启用与拓扑成员 | 新建链路会物化两端成员配置；之后显式设置的 `enabled: false` 必须保留，链路仍可作为拓扑记录；删除最后一条链路不应误启用或误加入其它节点 | P0 |
 | OSPF-VAL-006 | 版本选择 | v2、v3 可单独或同时启用；至少保留一个版本；禁用 v2 不得影响 v3 策略 | P0 |
 | OSPF-VAL-007 | 策略隔离 | n1/n2 使用不同 import/export action、Function、Filter、Define；切换节点、保存、重新加载后值仍分别保持 | P0 |
 | OSPF-VAL-008 | 版本策略隔离 | 同一节点 v2 与 v3 使用不同策略；生成配置分别落在 IPv4/IPv6 channel | P0 |
@@ -315,7 +315,7 @@ L0/L1 使用内存对象或 JSON fixture，不访问测试机；L2 通过 Playwr
 | OSPF-VAL-012 | 数值边界 | cost 1/65535、hello 1/65535、dead=hello、dead<hello、instance 0/255、tick、ECMP、优先级、TTL、DSCP 等边界分别测试 | P1 |
 | OSPF-VAL-013 | Area 约束 | Area 必须 IPv4；Backbone 禁止 Stub/NSSA；Networks/External/Stubnet 前缀、tag、cost 非法时拒绝 | P1 |
 | OSPF-VAL-014 | Virtual Link | Router ID 和传输 Area 必须为非 Backbone IPv4；时间、认证、密码参数完整校验 | P1 |
-| OSPF-VAL-015 | 认证组合 | none 不输出认证指令；simple/md5/ipsec 生成正确；OSPFv3 simple 必须拒绝；密码选项完整保留 | P1 |
+| OSPF-VAL-015 | 认证组合 | none 不输出认证指令；simple/md5 生成正确；OSPFv3 simple 和 BIRD 不支持的 ipsec 明确拒绝；密码选项完整保留 | P1 |
 | OSPF-VAL-016 | 旧数据兼容 | 缺失 `options.type`、旧认证字段、旧 layout、旧 node config 读取后补默认值且不丢字段 | P0 |
 | OSPF-VAL-017 | 布局清理 | layout 中不存在的节点被移除；合法节点坐标四舍五入并保留 locked | P1 |
 | OSPF-VAL-018 | 依赖递归与成环 | Function、Filter、Define 互相引用形成直接或间接环时拒绝保存；无环链按依赖顺序通过 | P0 |
@@ -578,7 +578,7 @@ sha256sum /etc/birdbox/generated.conf /etc/birdbox/resources/*.conf
 | --- | --- | --- | --- |
 | OSPF-ADV-007 | Area `stub`、`nssa`、`summary`、`defaultNssa` | 每个 Area 只生成一个 block，开关和 summary 正确 | Backbone 禁止 Stub/NSSA；相互冲突的组合给出字段错误 |
 | OSPF-ADV-008 | `defaultCost`、`defaultCost2`、`translator`、`translatorStability` | 数值和 Translator 指令落在所属 Area | 0、负数、小数和超范围值拒绝；删除 Area 后不留孤儿配置 |
-| OSPF-ADV-009 | `networks` | 合法 IPv4 前缀、`hidden` 输出正确，重复条目按产品规则去重或拒绝 | IPv6、缺少前缀长度、长度 >32、注入字符拒绝 |
+| OSPF-ADV-009 | `networks` | OSPFv2 输出合法 IPv4、OSPFv3 输出合法 IPv6 前缀，`hidden` 输出正确，重复条目按产品规则去重或拒绝 | 缺少前缀长度、长度超过对应地址族上限、注入字符拒绝 |
 | OSPF-ADV-010 | `external` | prefix、hidden、tag 均输出，最大 tag 可解析 | tag 超过 32 位、负数、非法前缀拒绝 |
 | OSPF-ADV-011 | `stubnets` | hidden、summary、cost 各组合输出 | 非法前缀、0/负数 cost 拒绝；与 networks 重叠的行为明确 |
 | OSPF-ADV-012 | Virtual Link | 非 Backbone 传输 Area、Router ID、时间、认证和密码完整渲染 | Backbone Area、非法 Router ID/时间、OSPFv3 不支持的认证组合拒绝 |
@@ -593,7 +593,7 @@ sha256sum /etc/birdbox/generated.conf /etc/birdbox/resources/*.conf
 | OSPF-ADV-016 | rx/tx buffer、tx length | normal/large/数值及 tx length 输出正确 | 小于 BIRD 最小值、负数和小数拒绝 |
 | OSPF-ADV-017 | Link-LSA、strict/real broadcast、PTP netmask/address、secondary、check link | 每个开关独立渲染，OSPFv2/v3 适用范围正确 | 版本不支持的指令拒绝或不输出，并给出可读提示 |
 | OSPF-ADV-018 | BFD、TTL security、TX class/DSCP/priority | on/tx-only 和数值边界可解析，运行态故障检测符合设置 | DSCP/class/priority 超界拒绝；单链路失败不影响其它接口 |
-| OSPF-ADV-019 | simple/md5/cryptographic/ipsec 密码 | none 不输出认证；密钥时间窗和算法按版本生成 | 密码缺失、OSPFv3 simple、时间窗反向或非法算法拒绝；日志不泄露密码 |
+| OSPF-ADV-019 | simple/md5/cryptographic 密码 | none 不输出认证；密钥时间窗和算法按版本生成 | 密码缺失、OSPFv3 simple、BIRD 不支持的 ipsec、时间窗反向或非法算法拒绝；日志不泄露密码 |
 | OSPF-ADV-020 | NBMA/PtMP neighbors | 多个合法邻居只在对应接口 block 输出，eligible 保留 | 邻居地址非法、跨节点接口混用、重复邻居按规则拒绝或去重 |
 
 ## 13. 生命周期、API、安全、运行态与性能补充用例

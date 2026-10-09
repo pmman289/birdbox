@@ -24,6 +24,54 @@ test("Agent broker rejects revoked credentials", async () => {
   await assert.rejects(() => broker.register({ nodeId: "agent_two", token, agentVersion: "test", protocolVersion: 1 }), /凭据无效/);
 });
 
+test("Agent credential persistence failure leaves the working token and connection intact", async () => {
+  class FailingDatabase extends MemoryDatabase {
+    failWrites = false;
+    async mutateState(...args) {
+      if (this.failWrites && args[0] === "agent_credentials") throw new Error("database unavailable");
+      return super.mutateState(...args);
+    }
+  }
+  const database = new FailingDatabase();
+  const broker = new AgentBroker({ database });
+  await broker.initialize();
+  const token = await broker.issueToken("durable_agent");
+  await broker.register({ nodeId: "durable_agent", token, agentVersion: "test", protocolVersion: 1 });
+  database.failWrites = true;
+  await assert.rejects(broker.rotateToken("durable_agent"), /database unavailable/);
+  await assert.rejects(broker.revoke("durable_agent"), /database unavailable/);
+  assert.equal(broker.authenticate("durable_agent", token), true);
+  assert.equal(broker.status("durable_agent")?.connected, true);
+  database.failWrites = false;
+  const reloaded = new AgentBroker({ database });
+  await reloaded.initialize();
+  assert.equal(reloaded.authenticate("durable_agent", token), true);
+});
+
+test("rotating Agent credentials closes old polls and cancels tasks before delivering new work", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const oldToken = await broker.issueToken("rotated_agent");
+  await broker.register({ nodeId: "rotated_agent", token: oldToken, agentVersion: "test", protocolVersion: 1 });
+  const inFlight = broker.dispatch("rotated_agent", "bird.apply", {}, 2000);
+  const delivered = await broker.poll("rotated_agent", oldToken, 1000);
+  const queued = broker.dispatch("rotated_agent", "bird.apply", {}, 2000);
+  const nextToken = await broker.rotateToken("rotated_agent");
+  assert.equal((await inFlight).code, "AGENT_CREDENTIAL_CHANGED");
+  assert.equal((await queued).code, "AGENT_CREDENTIAL_CHANGED");
+  assert.equal(broker.status("rotated_agent"), null);
+  assert.equal(broker.authenticate("rotated_agent", oldToken), false);
+  broker.requeue(delivered);
+  const oldPoll = broker.poll("rotated_agent", nextToken, 1000);
+  const thirdToken = await broker.rotateToken("rotated_agent");
+  assert.equal(await oldPoll, null);
+  const fresh = broker.dispatch("rotated_agent", "bird.apply", { config: "fresh" }, 2000);
+  const task = await broker.poll("rotated_agent", thirdToken, 1000);
+  assert.equal(task.params.config, "fresh");
+  broker.result({ taskId: task.taskId, nodeId: task.nodeId, ok: true }, thirdToken);
+  assert.equal((await fresh).ok, true);
+});
+
 test("Agent broker accepts structured source-policy rule tasks", async () => {
   const broker = new AgentBroker({ database: new MemoryDatabase() });
   await broker.initialize();
@@ -98,6 +146,19 @@ test("Agent broker removes an aborted long-poll waiter and requeues the next tas
   const task = await broker.poll("abort_agent", token, 1000);
   assert.equal(task?.method, "bird.validate");
   broker.result({ taskId: task.taskId, nodeId: task.nodeId, ok: true, stdout: "", stderr: "" }, token);
+  assert.equal((await pending).ok, true);
+});
+
+test("an already aborted Agent poll leaves queued work for the next connection", async () => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const token = await broker.issueToken("aborted_queue_agent");
+  await broker.register({ nodeId: "aborted_queue_agent", token, agentVersion: "test", protocolVersion: 1 });
+  const pending = broker.dispatch("aborted_queue_agent", "bird.apply", { config: "next" }, 2000);
+  assert.equal(await broker.poll("aborted_queue_agent", token, 1000, AbortSignal.abort()), null);
+  const task = await broker.poll("aborted_queue_agent", token, 1000);
+  assert.equal(task?.params.config, "next");
+  broker.result({ taskId: task.taskId, nodeId: task.nodeId, ok: true }, token);
   assert.equal((await pending).ok, true);
 });
 

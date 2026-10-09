@@ -45,8 +45,8 @@ interface RouteInspectionResult {
 export interface OspfRuntimeResult {
   reachable: boolean;
   error: string | null;
-  v2: { state: string | null; neighbors: number; routes: number | null };
-  v3: { state: string | null; neighbors: number; routes: number | null };
+  v2: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
+  v3: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
   neighbors: OspfNeighborRuntime[];
   routes: OspfRouteRuntime[];
   routesTruncated: boolean;
@@ -219,18 +219,20 @@ export async function inspectNode(nodeInput: unknown, timeoutMs = 20_000): Promi
   const node = normalizeNode(nodeInput);
   const boundedTimeout = Math.max(250, Math.min(timeoutMs, 120_000));
   const command = `
-version=$(bird --version 2>&1 || true)
+version=$(bird --version 2>&1); version_status=$?
 if [ -S '${node.socketPath}' ]; then
-  protocols=$(birdc -s '${node.socketPath}' -v 'show protocols all' 2>&1 || true)
+  protocols=$(birdc -s '${node.socketPath}' -v 'show protocols all' 2>&1); protocol_status=$?
 else
-  protocols=''
+  protocols='BIRD 控制 Socket 不存在'; protocol_status=1
 fi
-printf '%s\\n---BIRDBOX---\\n%s\\n' "$version" "$protocols"
+printf '%s\\n---BIRDBOX---\\n%s\\n---BIRDBOX-STATUS---\\nversion=%s\\nprotocols=%s\\n' "$version" "$protocols" "$version_status" "$protocol_status"
+[ "$version_status" -eq 0 ] && [ "$protocol_status" -eq 0 ]
 `.trim();
   const result = node.transport === "agent"
     ? await executeNodeRpc(node, "bird.inspect", { socketPath: node.socketPath }, boundedTimeout)
     : await executeNodeCommand(node, command, { timeout: Math.min(boundedTimeout, 12_000) });
-  const [version = "", raw = ""] = result.stdout.split("---BIRDBOX---");
+  const [payload = "", statusRaw = ""] = result.stdout.split("---BIRDBOX-STATUS---");
+  const [version = "", raw = ""] = payload.split("---BIRDBOX---");
   return {
     nodeId: node.id,
     reachable: result.ok,
@@ -324,6 +326,62 @@ function parseOspfRouteCount(raw: string): number | null {
   return match?.[1] ? Number(match[1]) : null;
 }
 
+function parseOspfCommandStatuses(raw: string): Record<string, number> {
+  return Object.fromEntries(
+    [...raw.matchAll(/^(neighbors|v2count|v3count|v2routes|v3routes|interfaces)=(-?\d+)$/gm)]
+      .map((match) => [match[1]!, Number(match[2])]),
+  );
+}
+
+const OSPF_STATUS_KEYS = ["neighbors", "v2count", "v2routes", "v3count", "v3routes", "interfaces"] as const;
+
+function ospfStatusMarkerError(raw: string, statuses: Record<string, number>): string | null {
+  // Agents predating the status marker emitted no marker at all. Keep that
+  // output useful while rejecting a marker that is present but incomplete or
+  // malformed, which would otherwise be mistaken for a successful legacy
+  // response.
+  if (!raw.trim()) return null;
+  if (OSPF_STATUS_KEYS.some((key) => statuses[key] === undefined)) return "节点 OSPF 运行态状态标记不完整";
+  const unexpected = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    .some((line) => !/^(neighbors|v2count|v2routes|v3count|v3routes|interfaces)=-?\d+$/.test(line));
+  return unexpected ? "节点 OSPF 运行态状态标记无效" : null;
+}
+
+function ospfConfigured(
+  status: number | undefined,
+  neighborsRaw: string,
+  protocolName: string,
+  countRaw: string,
+  routesRaw: string,
+  family: "ipv4" | "ipv6",
+): boolean {
+  if (status !== undefined) return status === 0;
+  // Older Agents did not emit command status markers. Infer configuration
+  // from the protocol section or the count/detail response so those Agents
+  // remain useful while a newer status-aware Agent is rolled out.
+  return neighborsRaw.split(/\r?\n/).some((line) => line.trim() === `${protocolName}:`)
+    || parseOspfRouteCount(countRaw) !== null
+    || parseRouteDetails(routesRaw, family).routes.length > 0;
+}
+
+function ospfVersionRuntime(
+  statuses: Record<string, number>, key: "v2" | "v3", protocolName: string,
+  neighbors: string, count: string, routes: string,
+): OspfRuntimeResult["v2"] {
+  const family = key === "v2" ? "ipv4" : "ipv6";
+  const countStatus = statuses[`${key}count`];
+  const routeStatus = statuses[`${key}routes`];
+  const missing = /\bCF_SYM_UNDEFINED\b/.test(count);
+  const failedStatus = countStatus !== undefined && countStatus !== 0 ? countStatus
+    : routeStatus !== undefined && routeStatus !== 0 ? routeStatus : null;
+  return {
+    ...parseOspfSectionByTable(neighbors, protocolName),
+    routes: missing || failedStatus !== null ? null : parseOspfRouteCount(count) ?? parseRouteDetails(routes, family).routes.length,
+    configured: !missing && ospfConfigured(countStatus, neighbors, protocolName, count, routes, family),
+    error: !missing && failedStatus !== null ? `OSPF${key} 查询失败（状态码 ${failedStatus}）` : null,
+  };
+}
+
 export async function inspectOspfRuntime(
   nodeInput: unknown,
   protocolNames: { v2: string; v3: string },
@@ -339,12 +397,15 @@ export async function inspectOspfRuntime(
       v2,
       v3,
     }, boundedTimeout);
-    const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
+    const [payload = "", statusRaw = ""] = result.stdout.split("---BIRDBOX-OSPF-STATUS---");
+    const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = payload.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
+    const statuses = parseOspfCommandStatuses(statusRaw);
+    const statusError = ospfStatusMarkerError(statusRaw, statuses);
     return {
-      reachable: result.ok,
-      error: result.ok ? null : (result.stderr || "节点不可达"),
-      v2: { ...parseOspfSectionByTable(neighbors, v2), routes: parseOspfRouteCount(v2count) ?? parseRouteDetails(v2routes, "ipv4").routes.length },
-      v3: { ...parseOspfSectionByTable(neighbors, v3), routes: parseOspfRouteCount(v3count) ?? parseRouteDetails(v3routes, "ipv6").routes.length },
+      reachable: !statusError && result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0),
+      error: statusError || (result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0) ? null : (result.stderr || "节点不可达")),
+      v2: ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes),
+      v3: ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes),
       neighbors: [
         ...parseOspfNeighborDetails(neighbors, v2, "ospfv2"),
         ...parseOspfNeighborDetails(neighbors, v3, "ospfv3"),
@@ -358,24 +419,26 @@ export async function inspectOspfRuntime(
     };
   }
   const command = [
-    `neighbors=$(birdc -s '${node.socketPath}' 'show ospf neighbors' 2>&1 || true)`,
-    `v2count=$(birdc -s '${node.socketPath}' 'show route protocol ${v2} count' 2>&1 || true)`,
-    `v3count=$(birdc -s '${node.socketPath}' 'show route protocol ${v3} count' 2>&1 || true)`,
-    // Runtime polling only needs a bounded preview. Keep the count query
-    // separate from the detail payload so large OSPF tables cannot exhaust
-    // the SSH channel or controller memory.
-    `v2routes=$(birdc -s '${node.socketPath}' 'show route table master4 protocol ${v2} all' 2>&1 | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count > 200) { print "---BIRDBOX-ROUTE-TRUNCATED---"; exit } } { print }' || true)`,
-    `v3routes=$(birdc -s '${node.socketPath}' 'show route table master6 protocol ${v3} all' 2>&1 | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count > 200) { print "---BIRDBOX-ROUTE-TRUNCATED---"; exit } } { print }' || true)`,
-    "interfaces=$(ip -o link show 2>/dev/null | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p' | paste -sd '\\n' -)",
-    "printf '%s\\n---BIRDBOX-OSPF-V2-COUNT---\\n%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-COUNT---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n' \"$neighbors\" \"$v2count\" \"$v2routes\" \"$v3count\" \"$v3routes\" \"$interfaces\"",
+    `neighbors=$(birdc -s '${node.socketPath}' 'show ospf neighbors' 2>&1) || neighbors_status=$?; neighbors_status=\${neighbors_status:-0}`,
+    `v2count=$(birdc -s '${node.socketPath}' 'show route protocol ${v2} count' 2>&1) || v2count_status=$?; v2count_status=\${v2count_status:-0}`,
+    `v3count=$(birdc -s '${node.socketPath}' 'show route protocol ${v3} count' 2>&1) || v3count_status=$?; v3count_status=\${v3count_status:-0}`,
+    // Capture birdc's status before formatting the bounded route preview so
+    // awk/paste cannot mask a failed BIRD query.
+    `v2routes_raw=$(birdc -s '${node.socketPath}' 'show route table master4 protocol ${v2} all' 2>&1); v2routes_status=$?; v2routes=$(printf '%s\\n' "$v2routes_raw" | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count == 201) print "---BIRDBOX-ROUTE-TRUNCATED---" } count <= 200 { print }')`,
+    `v3routes_raw=$(birdc -s '${node.socketPath}' 'show route table master6 protocol ${v3} all' 2>&1); v3routes_status=$?; v3routes=$(printf '%s\\n' "$v3routes_raw" | awk 'BEGIN { count = 0 } /^[[:space:]]*[0-9A-Fa-f:.]+\\/[0-9]+[[:space:]]/ { count += 1; if (count == 201) print "---BIRDBOX-ROUTE-TRUNCATED---" } count <= 200 { print }')`,
+    "interfaces_raw=\$(ip -o link show 2>/dev/null) || interfaces_status=\$?; interfaces=\$(printf '%s\\n' \"\$interfaces_raw\" | sed -n 's/^[0-9]*: \\([^:@]*\\).*$/\\1/p' | paste -sd '\\n' -); interfaces_status=\${interfaces_status:-0}",
+    "printf '%s\\n---BIRDBOX-OSPF-V2-COUNT---\\n%s\\n---BIRDBOX-OSPF-V2-ROUTES---\\n%s\\n---BIRDBOX-OSPF-V3-COUNT---\\n%s\\n---BIRDBOX-OSPF-V3-ROUTES---\\n%s\\n---BIRDBOX-OSPF-INTERFACES---\\n%s\\n---BIRDBOX-OSPF-STATUS---\\nneighbors=%s\\nv2count=%s\\nv2routes=%s\\nv3count=%s\\nv3routes=%s\\ninterfaces=%s\\n' \"$neighbors\" \"$v2count\" \"$v2routes\" \"$v3count\" \"$v3routes\" \"$interfaces\" \"$neighbors_status\" \"$v2count_status\" \"$v2routes_status\" \"$v3count_status\" \"$v3routes_status\" \"$interfaces_status\"",
   ].join("\n");
   const result = await executeNodeCommand(node, command, { timeout: Math.min(boundedTimeout, 15_000) });
-  const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = result.stdout.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
+  const [payload = "", statusRaw = ""] = result.stdout.split("---BIRDBOX-OSPF-STATUS---");
+  const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = payload.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
+  const statuses = parseOspfCommandStatuses(statusRaw);
+  const statusError = ospfStatusMarkerError(statusRaw, statuses);
   return {
-    reachable: result.ok,
-    error: result.ok ? null : (result.stderr || "节点不可达"),
-    v2: { ...parseOspfSectionByTable(neighbors, v2), routes: parseOspfRouteCount(v2count) ?? parseRouteDetails(v2routes, "ipv4").routes.length },
-    v3: { ...parseOspfSectionByTable(neighbors, v3), routes: parseOspfRouteCount(v3count) ?? parseRouteDetails(v3routes, "ipv6").routes.length },
+    reachable: !statusError && result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0),
+    error: statusError || (result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0) ? null : (result.stderr || "节点不可达")),
+    v2: ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes),
+    v3: ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes),
     neighbors: [
       ...parseOspfNeighborDetails(neighbors, v2, "ospfv2"),
       ...parseOspfNeighborDetails(neighbors, v3, "ospfv3"),
