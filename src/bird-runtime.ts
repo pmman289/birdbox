@@ -623,7 +623,7 @@ async function stageResourceFiles(node: ManagedNode, bundle: NodeConfigBundle, b
     const result = await executeNodeCommand(node, [
       "set -eu", "umask 0077",
       REMOTE_FILE_GID_HELPER,
-      `if [ -S '${node.socketPath}' ]; then bird_group=$(file_gid '${node.socketPath}'); else bird_group=$(id -g bird); fi`,
+      `if [ "$(id -u)" -eq 0 ]; then if [ -S '${node.socketPath}' ]; then bird_group=$(file_gid '${node.socketPath}'); else bird_group=$(id -g bird); fi; else bird_group=$(id -g); fi`,
       `mkdir -p '${versionDirectory}'`,
       `chgrp "$bird_group" '${resourceDirectory}' '${versionDirectory}'`,
       `chmod 0750 '${resourceDirectory}' '${versionDirectory}'`,
@@ -759,9 +759,13 @@ export async function stageAndValidate(nodeInput: unknown, bundleInput: string |
   const command = [
     "set -eu",
     "umask 0077",
-    `install -d -o bird -g bird -m 0750 '${RUNTIME.baseDir}'`,
+    // The controller normally runs as root and keeps the runtime tree owned
+    // by bird.  Development/test controllers may intentionally run as an
+    // unprivileged user; retain the same permissions there without trying
+    // to chown a directory the process cannot own.
+    `if [ "$(id -u)" -eq 0 ]; then install -d -o bird -g bird -m 0750 '${RUNTIME.baseDir}'; else mkdir -p '${RUNTIME.baseDir}' && chmod 0750 '${RUNTIME.baseDir}'; fi`,
     `cat > '${RUNTIME.configPath}.candidate'`,
-    `chown bird:bird '${RUNTIME.configPath}.candidate'`,
+    `if [ "$(id -u)" -eq 0 ]; then chown bird:bird '${RUNTIME.configPath}.candidate'; fi`,
     `chmod 0640 '${RUNTIME.configPath}.candidate'`,
     "resource_restore_commands=''",
     ...resourceSwitchCommands(bundle, RUNTIME.baseDir, "check"),
@@ -830,7 +834,7 @@ export async function applyStagedConfig(nodeInput: unknown, bundleInput: string 
     `test -f '${RUNTIME.configPath}.candidate'`,
     `if [ -f '${RUNTIME.configPath}' ]; then cp -a '${RUNTIME.configPath}' '${RUNTIME.configPath}.rollback'; else rm -f '${RUNTIME.configPath}.rollback'; fi`,
     `mv -f '${RUNTIME.configPath}.candidate' '${RUNTIME.configPath}'`,
-    `chown bird:bird '${RUNTIME.configPath}' && chmod 0640 '${RUNTIME.configPath}'`,
+    `if [ "$(id -u)" -eq 0 ]; then chown bird:bird '${RUNTIME.configPath}'; fi; chmod 0640 '${RUNTIME.configPath}'`,
     `if [ -S '${RUNTIME.socketPath}' ] && birdc -s '${RUNTIME.socketPath}' 'show status' >/dev/null 2>&1; then status=0; birdc -s '${RUNTIME.socketPath}' configure || status=$?; else rm -f '${RUNTIME.socketPath}' '${RUNTIME.pidPath}'; status=0; bird -c '${RUNTIME.configPath}' -s '${RUNTIME.socketPath}' -P '${RUNTIME.pidPath}' -u bird -g bird || status=$?; fi`,
     "if [ \"$status\" -eq 0 ]; then exit 0; fi",
     ...resourceRollbackCommands(bundle, RUNTIME.baseDir),

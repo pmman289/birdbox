@@ -229,7 +229,12 @@ export async function executeNodeCommand(
   try {
     const executable = node.transport === "local" ? "bash" : "ssh";
     const args = node.transport === "local"
-      ? ["-lc", command]
+      // Do not use a login shell here.  Login startup/logout scripts are
+      // host-specific (for example Debian's clear_console hook can return a
+      // non-zero status for non-interactive users), which would turn a
+      // successful node operation into a false failure.  BASH_ENV is still
+      // honored by non-interactive bash for the test/runtime environment.
+      ? ["-c", command]
       : sshArgs(node, command);
     const result = await execFileWithInput(executable, args, {
       timeout,
