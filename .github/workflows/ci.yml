@@ -27,7 +27,23 @@ jobs:
       - run: npm ci
       - run: npm run typecheck:server
       - run: npm run typecheck:web
-      - run: npm test
+      - name: Run npm test
+        run: |
+          set +e
+          NODE_OPTIONS=--import=tsx node --test --test-reporter=tap --test-concurrency=1 test/*.test.js > "$RUNNER_TEMP/birdbox-tests.tap" 2>&1
+          test_status=$?
+          cat "$RUNNER_TEMP/birdbox-tests.tap"
+          python3 - "$RUNNER_TEMP/birdbox-tests.tap" <<'PY'
+          import pathlib, sys
+          log = pathlib.Path(sys.argv[1]).read_text()
+          lines = log.splitlines()
+          for index, line in enumerate(lines):
+              if line.startswith('not ok '):
+                  detail = '\n'.join(lines[index:index + 40])
+                  detail = detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f'::error::{detail}')
+          PY
+          exit "$test_status"
       - run: go vet ./...
         working-directory: agent
       - run: go test ./...
