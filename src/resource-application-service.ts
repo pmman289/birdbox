@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import type { ChangeEvent, IbgpPreviewSide, SourcePolicyManualPlan, SourcePolicyRuleInstruction } from "../packages/contracts/src/api.js";
 import type {
   BgpSession,
@@ -48,7 +49,7 @@ import { resolveIrrAsSet, type IrrResolveRequest } from "./irr-as-set.js";
 import type { NodeOnboardingService } from "./node-onboarding-service.js";
 import { resourceChangeNodeIds, resourceNodeIds, uniqueNodeIds } from "./resource-impact.js";
 import { expandIbgpDomain, normalizeIbgpDomain } from "./ibgp-domain.js";
-import { normalizeOspfDomain, ospfDomainNodeIds } from "./ospf.js";
+import { normalizeOspfDomain, ospfDomainNodeIds, toOspfDomainModel } from "./ospf.js";
 import type { SessionApplicationService } from "./session-application-service.js";
 import type { InventoryStore } from "./store.js";
 import { logger } from "./logger.js";
@@ -81,6 +82,33 @@ export function createResourceApplicationService(
   };
   const withDeploymentLock = options.withDeploymentLock;
   const mutateAndApply = options.deploymentService.mutateAndApply.bind(options.deploymentService);
+
+  const ospfPreviews = new Map<string, { hash: string; revision: number | null; expiresAt: number }>();
+  function ospfCandidateHash(domain: OspfDomain): string {
+    const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+      : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([key]) => key !== "layout").sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value;
+    return createHash("sha256").update(JSON.stringify(canonical(domain))).digest("hex");
+  }
+  async function saveOspfDraft(body: Record<string, unknown>, domainId?: string) {
+    return withDeploymentLock(async () => {
+      const { domain } = await ospfCandidate({ ...body, ...(domainId ? { id: domainId } : {}) });
+      const revision = await assertOspfRevision(body);
+      const current = await store.read();
+      if (current.ospfDomains.some((item) => item.id !== domain.id && item.name === domain.name)) fail(409, "OSPF 域名称已存在");
+      await store.saveOspfDraft(domain, revision);
+      return { status: 200, payload: { domain: toOspfDomainModel(domain), inventoryRevision: revision, draft: true, deployment: { applied: false, nodeIds: [], nodes: [], sessions: [] } } };
+    });
+  }
+  async function assertOspfPreview(body: Record<string, unknown>, domainId?: string): Promise<void> {
+    if (body.mode === undefined) return; // Existing API clients still receive transaction preflight.
+    if (body.mode !== "apply") fail(400, "无效的 OSPF 保存模式");
+    const { domain } = await ospfCandidate({ ...body, ...(domainId ? { id: domainId } : {}) });
+    const revision = await assertOspfRevision(body);
+    const preview = ospfPreviews.get(String(body.previewId ?? ""));
+    if (!preview || preview.expiresAt < Date.now() || preview.revision !== revision || preview.hash !== body.candidateHash || preview.hash !== ospfCandidateHash(domain)) {
+      fail(409, "草稿或库存已变化，请重新预检后再应用", "OSPF_PREVIEW_STALE");
+    }
+  }
 
   function irrRequest(body: Record<string, unknown>): IrrResolveRequest {
     const entrySource = body.entrySource && typeof body.entrySource === "object" && !Array.isArray(body.entrySource)
@@ -220,7 +248,23 @@ export function createResourceApplicationService(
 
   function materializeOspf(input: Record<string, unknown>, previous: OspfDomain | null = null): OspfDomain {
     const restoredInput = previous ? restoreSecretPlaceholders(input, previous) : input;
-    return normalizeOspfDomain({ ...(previous ?? {}), ...restoredInput, id: previous?.id ?? input.id ?? makeId("ospf") });
+    const candidate = { ...(previous ?? {}), ...restoredInput, id: previous?.id ?? input.id ?? makeId("ospf") } as Record<string, unknown>;
+    // The editor may submit the compact shape for a structured saved domain.
+    // Stale projections must not override its edited nodes and endpoints.
+    if (Array.isArray(restoredInput.nodeConfigs) && !Array.isArray(restoredInput.members)) {
+      delete candidate.members;
+      delete candidate.areas;
+    }
+    return normalizeOspfDomain(candidate);
+  }
+
+  async function assertOspfRevision(body: Record<string, unknown>): Promise<number | null> {
+    const current = await store.read();
+    const revision = store.revisionOf(current);
+    if (body.inventoryRevision !== undefined && (typeof body.inventoryRevision !== "number" || !Number.isInteger(body.inventoryRevision) || body.inventoryRevision !== revision)) {
+      fail(409, "OSPF 草稿基于旧的库存版本，请重新加载或对比后再提交", "STATE_CONFLICT");
+    }
+    return revision;
   }
 
   function stripUnknownOspfLayout(domain: OspfDomain): OspfDomain {
@@ -233,6 +277,11 @@ export function createResourceApplicationService(
 
   async function ospfCandidate(body: Record<string, unknown>) {
     const current = await store.read();
+    const expectedRevision = body.inventoryRevision;
+    const actualRevision = store.revisionOf(current);
+    if (expectedRevision !== undefined && (typeof expectedRevision !== "number" || !Number.isInteger(expectedRevision) || expectedRevision !== actualRevision)) {
+      fail(409, "OSPF 草稿基于旧的库存版本，请重新加载或对比后再提交", "STATE_CONFLICT");
+    }
     const id = body.id === undefined || body.id === "" ? makeId("ospf") : String(body.id);
     const previous = current.ospfDomains.find((item) => item.id === id) ?? null;
     const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id }, previous));
@@ -1155,7 +1204,10 @@ export function createResourceApplicationService(
 
   async listOspfDomains() {
     const state = await store.read();
-    return { status: 200, payload: { domains: state.ospfDomains, layout: state.ospfLayout, inventory: state } };
+    const drafts = await store.readOspfDrafts();
+    const domains = state.ospfDomains.map(toOspfDomainModel);
+    for (const { domain } of Object.values(drafts)) if (!domains.some((item) => item.id === domain.id)) domains.push(toOspfDomainModel(domain));
+    return { status: 200, payload: { domains, drafts, layout: state.ospfLayout, inventoryRevision: store.revisionOf(state), inventory: state } };
   },
 
   async updateOspfLayout(body) {
@@ -1171,23 +1223,68 @@ export function createResourceApplicationService(
   async previewOspfDomain(body) {
     return withDeploymentLock(async () => {
       const { domain, inventory, affected } = await ospfCandidate(body);
-      const configs = [] as Array<{ nodeId: string; config: string; validation: Awaited<ReturnType<typeof stageAndValidate>> }>;
+      const current = await store.read();
+      const configs = [] as Array<{
+        nodeId: string;
+        config: string;
+        /** Complete node-level candidate versus the currently saved config. */
+        diff: { changed: boolean; added: number; removed: number; unified: string };
+        validation: Awaited<ReturnType<typeof stageAndValidate>>;
+      }>;
       for (const nodeId of affected) {
         const node = findNode(inventory, nodeId);
         const config = configForNode(inventory, node);
-        configs.push({ nodeId, config, validation: await stageAndValidate(node, config) });
+        const previous = configForNode(current, findNode(current, nodeId));
+        const before = previous.split("\n");
+        const after = config.split("\n");
+        const max = Math.max(before.length, after.length);
+        const lines: string[] = [];
+        let added = 0;
+        let removed = 0;
+        for (let index = 0; index < max; index += 1) {
+          if (before[index] === after[index]) {
+            if (before[index] !== undefined) lines.push(`  ${before[index]}`);
+          } else {
+            if (before[index] !== undefined) { lines.push(`- ${before[index]}`); removed += 1; }
+            if (after[index] !== undefined) { lines.push(`+ ${after[index]}`); added += 1; }
+          }
+        }
+        configs.push({
+          nodeId,
+          config,
+          diff: { changed: added > 0 || removed > 0, added, removed, unified: lines.join("\n") },
+          validation: await stageAndValidate(node, config).catch((error: unknown) => ({ ok: false, stdout: "", stderr: error instanceof Error ? error.message : "节点预检失败", code: "NODE_PREFLIGHT_ERROR" })),
+        });
       }
-      return { status: 200, payload: { valid: configs.every((item) => item.validation.ok), domain, configs } };
+      const valid = configs.every((item) => item.validation.ok);
+      const previewId = randomUUID();
+      const candidateHash = ospfCandidateHash(domain);
+      const now = Date.now();
+      for (const [id, ticket] of ospfPreviews) if (ticket.expiresAt < now) ospfPreviews.delete(id);
+      if (ospfPreviews.size >= 100) ospfPreviews.delete(ospfPreviews.keys().next().value!);
+      if (valid) ospfPreviews.set(previewId, { hash: candidateHash, revision: store.revisionOf(current), expiresAt: now + 300_000 });
+      return {
+        status: 200,
+        payload: {
+          valid, previewId, candidateHash,
+          diagnostics: configs.flatMap((item) => item.validation.ok ? [] : [{ nodeId: item.nodeId, message: item.validation.stderr || item.validation.stdout || "节点预检失败", code: item.validation.code ?? null }]),
+          domain: toOspfDomainModel(domain),
+          configs,
+        },
+      };
     });
   },
 
   async renderOspfDomain(body) {
     const { domain, inventory, affected } = await ospfCandidate(body);
     const configs = affected.map((nodeId) => ({ nodeId, config: configForNode(inventory, findNode(inventory, nodeId)) }));
-    return { status: 200, payload: { domain, configs } };
+    return { status: 200, payload: { domain: toOspfDomainModel(domain), configs } };
   },
 
   async createOspfDomain(body) {
+    if (body.mode === "draft") return saveOspfDraft(body);
+    await assertOspfPreview(body);
+    const inventoryRevision = await assertOspfRevision(body);
     const domain = stripUnknownOspfLayout(materializeOspf({ ...body, id: body.id ?? makeId("ospf") }));
     const { state, deployment } = await mutateAndApply((draft) => {
       if (draft.ospfDomains.some((item) => item.id === domain.id)) fail(409, "OSPF 域 ID 已存在");
@@ -1195,11 +1292,15 @@ export function createResourceApplicationService(
       draft.ospfDomains.push(domain);
       return domain;
     }, () => ospfDomainNodeIds(domain));
+    await store.deleteOspfDraft(domain.id);
     event("success", `已创建 OSPF 域 ${domain.name}`);
-    return { status: 201, payload: { domain: state.ospfDomains.find((item) => item.id === domain.id), inventory: state, deployment, events: events() } };
+    return { status: 201, payload: { domain: state.ospfDomains.find((item) => item.id === domain.id) ? toOspfDomainModel(state.ospfDomains.find((item) => item.id === domain.id)!) : undefined, inventory: state, inventoryRevision: store.revisionOf(state) ?? (inventoryRevision === null ? null : inventoryRevision + 1), deployment, events: events() } };
   },
 
   async updateOspfDomain(domainId, body) {
+    if (body.mode === "draft") return saveOspfDraft(body, domainId);
+    await assertOspfPreview(body, domainId);
+    const inventoryRevision = await assertOspfRevision(body);
     let affected: string[] = [];
     const { state, result: domain, deployment } = await mutateAndApply((draft) => {
       const index = draft.ospfDomains.findIndex((item) => item.id === domainId);
@@ -1212,8 +1313,9 @@ export function createResourceApplicationService(
       affected = uniqueNodeIds(ospfDomainNodeIds(previous), ospfDomainNodeIds(updated));
       return updated;
     }, () => affected);
+    await store.deleteOspfDraft(domain.id);
     event("success", `已更新 OSPF 域 ${domain.name}`);
-    return { status: 200, payload: { domain, inventory: state, deployment, events: events() } };
+    return { status: 200, payload: { domain: toOspfDomainModel(domain), inventory: state, inventoryRevision: store.revisionOf(state) ?? (inventoryRevision === null ? null : inventoryRevision + 1), deployment, events: events() } };
   },
 
   async deleteOspfDomain(domainId) {
@@ -1225,6 +1327,7 @@ export function createResourceApplicationService(
       if (!target) fail(404, "OSPF 域不存在");
       affected = ospfDomainNodeIds(target); draft.ospfDomains.splice(index, 1); return target;
     }, () => affected);
+    await store.deleteOspfDraft(domain.id);
     event("success", `已删除 OSPF 域 ${domain.name}`);
     return { status: 200, payload: { inventory: state, deployment, events: events() } };
   },

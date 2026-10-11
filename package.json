@@ -1,6 +1,6 @@
 {
   "name": "birdbox",
-  "version": "0.38.0-alpha.10",
+  "version": "0.38.0-alpha.11",
   "private": true,
   "description": "A BIRD 2 node, peer, and BGP session management controller",
   "type": "module",
@@ -13,7 +13,8 @@
     "test": "NODE_OPTIONS=--import=tsx node --test --test-concurrency=1 test/*.test.js",
     "test:e2e": "playwright test",
     "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
-    "typecheck:web": "vue-tsc --noEmit -p apps/web/tsconfig.json"
+    "typecheck:web": "vue-tsc --noEmit -p apps/web/tsconfig.json",
+    "demo:ospf": "npm run build:web && tsx scripts/ospf-demo.ts"
   },
   "engines": {
     "node": ">=24"

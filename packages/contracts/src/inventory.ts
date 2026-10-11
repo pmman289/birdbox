@@ -445,6 +445,8 @@ export interface OspfAreaOptions {
 export interface OspfVirtualLink {
   id: string;
   area: string;
+  /** Structured model owner. Legacy records keep this on OspfNodeConfig. */
+  nodeId?: string;
   instanceId?: number | null;
   hello?: number | null;
   retransmit?: number | null;
@@ -507,11 +509,57 @@ export interface OspfLink {
   hello: number;
   dead: number;
   passive: boolean;
-  authentication: "none" | "simple" | "md5" | "ipsec";
+  authentication: OspfAuthentication | "none" | "simple" | "md5" | "ipsec";
   /** Legacy shared endpoint options. New records use localOptions/remoteOptions. */
   options?: OspfInterfaceOptions;
   localOptions?: OspfInterfaceOptions;
   remoteOptions?: OspfInterfaceOptions;
+  /** Structured model reference; normalized records also expose area. */
+  areaId?: string;
+  /** Structured model endpoints; normalized records also expose flat fields. */
+  endpoints?: [OspfLinkEndpoint, OspfLinkEndpoint];
+  localInterfaceSource?: OspfInterfaceSource;
+  remoteInterfaceSource?: OspfInterfaceSource;
+}
+
+export interface OspfAuthentication {
+  method: "none" | "simple" | "md5" | "ipsec";
+  password?: string | null;
+  passwordOptions?: OspfPasswordOptions;
+}
+
+export type OspfInterfaceSource = "discovered" | "manual";
+
+export interface OspfLinkEndpoint {
+  nodeId: string;
+  interfaceName: string;
+  interfaceSource: OspfInterfaceSource;
+  options: OspfInterfaceOptions;
+}
+
+export interface OspfArea {
+  id: string;
+  area: string;
+  type: "normal" | "stub" | "nssa";
+  options: OspfAreaOptions;
+  prefixes: Array<{ prefix: string; kind: "network" | "external" | "stubnet" }>;
+  virtualLinks: OspfVirtualLink[];
+}
+
+export interface OspfMember {
+  nodeId: string;
+  enabled: boolean;
+  routerId: string | null;
+  versions: OspfVersion[];
+  bfd: boolean;
+  gracefulRestart: boolean;
+  redistributeStatic: boolean;
+  protocolOptions: OspfProtocolOptions;
+  policies: Record<OspfVersion, {
+    import: ChannelPolicy;
+    export: ChannelPolicy;
+    exportDefineId: string | null;
+  }>;
 }
 
 export interface OspfNodeConfig {
@@ -536,6 +584,9 @@ export interface OspfDomain {
   nodeConfigs: OspfNodeConfig[];
   links: OspfLink[];
   layout: Record<string, TopologyPosition>;
+  /** New topology-first model. The service normalizes it to nodeConfigs/links for rendering. */
+  members?: OspfMember[];
+  areas?: OspfArea[];
 }
 
 export interface Inventory {

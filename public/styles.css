@@ -1236,7 +1236,9 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ospf-topology-node { position: absolute; transform: translate(-50%, -50%); display: grid; grid-template-columns: 9px 1fr; gap: 2px 7px; width: 178px; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid #aebbc3; border-radius: 8px; background: var(--surface-elevated, var(--surface)); box-shadow: 0 10px 26px var(--shadow-strong); color: var(--ink); text-align: left; cursor: grab; user-select: none; -webkit-user-select: none; transition: border-color var(--motion-base) ease, background-color var(--motion-base) ease, box-shadow var(--motion-base) ease; }
 .ospf-topology-node:hover, .ospf-topology-node:active, .ospf-topology-node.dragging { transform: translate(-50%, -50%); cursor: grabbing; }
 .ospf-topology-node.selected { border-left-color: var(--green); box-shadow: 0 0 0 2px rgba(25,113,73,.18), 0 10px 26px var(--shadow-strong); }.ospf-topology-node strong, .ospf-topology-node small, .ospf-topology-node em { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.ospf-topology-node small, .ospf-topology-node em { color: var(--muted); font-size: 11px; font-style: normal; }.ospf-node-status { grid-row: 1 / span 3; width: 9px; height: 9px; margin-top: 3px; border-radius: 999px; background: var(--green); box-shadow: 0 0 0 3px rgba(43,138,87,.14); }
+.ospf-topology-node.connect-source { border-color: var(--accent); border-left-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent), 0 10px 26px var(--shadow-strong); }
 .ospf-link-editor { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-link-endpoints { display: flex; align-items: end; gap: 8px; flex: 1 1 360px; min-width: 280px; }.ospf-link-endpoints > div { display: grid; gap: 4px; flex: 1 1 0; min-width: 0; }.ospf-link-endpoints small { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.ospf-link-endpoints input { width: 100%; min-width: 0; }.ospf-link-endpoints > span { color: var(--muted); padding-bottom: 8px; }.ospf-link-editor .field { display: grid; gap: 3px; min-width: 74px; }.ospf-link-editor .field label { font-size: 10px; color: var(--muted); }.ospf-link-editor input { width: 74px; }.ospf-link-editor select { min-width: 90px; }.ospf-checkbox { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; }.ospf-checkbox input, .ospf-options input, .switch-label input { width: 16px !important; height: 16px !important; min-height: 16px !important; padding: 0 !important; accent-color: var(--green); box-shadow: none !important; }.ospf-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }.ospf-policy-grid .policy-block { min-width: 0; margin: 0; }
+.ospf-connect-hint { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); color: var(--muted); font-size: 11px; line-height: 1.45; }
 .ospf-version-checks { display: flex; flex-wrap: wrap; gap: 8px; }.ospf-version-checks label { display: inline-flex; align-items: center; gap: 6px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }.ospf-version-checks input { width: 16px; height: 16px; accent-color: var(--accent); }.ospf-version-policy { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }.ospf-version-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }.ospf-version-heading small { color: var(--muted); font-size: 11px; }
 [data-theme="dark"] .ospf-topology-canvas { background: linear-gradient(180deg, rgba(17,26,31,.96), rgba(12,19,23,.96)), var(--bg); }.ospf-topology-node { color: var(--ink); }
 
@@ -1292,16 +1294,68 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
  * and let the topology itself remain the scroll/pan surface. */
 .ospf-domain-picker { display: grid; gap: 4px; min-width: 160px; color: var(--muted); font-size: 11px; }
 .ospf-domain-picker select, .ospf-domain-name { min-width: 0; width: 100%; }
+.ospf-overview { display: grid; gap: 12px; }
+.ospf-overview-head { margin-bottom: 0; }
+.ospf-overview-head { align-items: flex-start; flex-direction: column; gap: 16px; }
+.ospf-overview-head > .ospf-actions { width: 100%; min-width: 0; align-items: end; flex-wrap: wrap; }
+.ospf-overview-head > .ospf-actions > button { flex: 0 0 auto; white-space: nowrap; }
+.ospf-overview-head > .ospf-actions > .ospf-domain-name { flex: 1 1 180px; width: 180px; }
+.ospf-overview-head > .ospf-actions > .ospf-domain-picker { flex: 0 1 180px; }
+.ospf-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.ospf-health-card { display: grid; gap: 4px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.ospf-health-card.warning { border-color: color-mix(in srgb, var(--amber, #f59e0b) 55%, var(--line)); background: color-mix(in srgb, var(--amber, #f59e0b) 6%, var(--surface)); }
+.ospf-health-card span, .ospf-health-card small { color: var(--muted); font-size: 11px; }
+.ospf-health-card strong { overflow: hidden; text-overflow: ellipsis; font-size: 17px; }
+.ospf-apply-dialog { width: min(720px, calc(100vw - 32px)); }
+.ospf-apply-copy { display: grid; gap: 4px; margin-top: 18px; padding: 12px; border-radius: 7px; background: var(--surface-soft); }
+.ospf-apply-copy span { color: var(--muted); font-size: 12px; }
+.ospf-apply-list { display: grid; gap: 6px; max-height: min(45vh, 420px); margin-top: 14px; overflow: auto; }
+.ospf-apply-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.ospf-apply-row.status-failed, .ospf-apply-row.status-unknown { border-color: color-mix(in srgb, var(--danger, #b42318) 45%, var(--line)); }
+.ospf-apply-node { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 3px 8px; align-items: center; min-width: 0; }
+.ospf-apply-node i { grid-row: 1 / span 2; width: 8px; height: 8px; border-radius: 999px; background: var(--muted); }
+.status-success .ospf-apply-node i { background: var(--green); }.status-failed .ospf-apply-node i, .status-unknown .ospf-apply-node i { background: var(--danger, #b42318); }.status-applying .ospf-apply-node i { background: var(--amber, #f59e0b); }
+.ospf-apply-node small, .ospf-apply-status small { color: var(--muted); font-size: 11px; }
+.ospf-apply-status { color: var(--muted); font-size: 12px; text-align: right; }
+.ospf-preview-actions { justify-content: space-between; }
+.ospf-preview-diff-summary { display: grid; gap: 6px; margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+.ospf-preview-diff-summary h3 { margin: 0 0 2px; font-size: 13px; }
+.ospf-preview-diff-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; font-size: 12px; }
+.ospf-preview-diff-row .field-error { grid-column: 1 / -1; margin: 0; }
+.ospf-interface-manual { margin-top: 5px; }
 .ospf-topology-actions { flex-wrap: wrap; justify-content: flex-end; }
 .ospf-topology-actions > button { white-space: nowrap; }
 .ospf-topology-actions .status-dot-label { white-space: nowrap; }
+.ospf-overview { margin-bottom: 16px; }
+.ospf-editor { container-type: inline-size; }
+.ospf-area-card > .ospf-subheading, .ospf-area-entry-groups { flex: 1 1 100%; min-width: 0; }
+.ospf-area-card > .checkbox-inline { display: inline-flex; align-items: center; gap: 6px; }
+.ospf-area-card .checkbox-inline input { width: 16px; height: 16px; min-height: 16px; padding: 0; }
+.ospf-area-entry-row { grid-template-columns: minmax(0, 1fr) auto 30px; }
+.ospf-area-entry-row.external-entry { grid-template-columns: minmax(0, 1fr) auto minmax(70px, .45fr) 30px; }
+.ospf-area-entry-row.stubnet-entry { grid-template-columns: minmax(0, 1fr) auto auto minmax(70px, .4fr) 30px; }
+.ospf-area-entry-row .icon-button { justify-self: end; }
+.ospf-virtual-link-row { grid-template-columns: repeat(auto-fit, minmax(min(145px, 100%), 1fr)); padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+.ospf-advanced-grid > .area-wide { grid-column: 1 / -1; }
+.ospf-link-editor .ospf-advanced-grid input:not([type="checkbox"]) { width: 100%; min-width: 0; }
+.ospf-node-membership-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+@container (max-width: 580px) {
+  .ospf-area-entry-row, .ospf-area-entry-row.external-entry, .ospf-area-entry-row.stubnet-entry { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ospf-area-entry-row > input:first-child { flex: 1 1 100%; }
+  .ospf-area-entry-row > input:not(:first-child) { flex: 1 1 80px; width: 80px; }
+  .ospf-area-entry-row > .icon-button { margin-left: auto; }
+}
 @media (max-width: 700px) {
-  .section-heading { flex-direction: column; }
-  .section-heading > * { width: 100%; min-width: 0; }
+  .ospf-workspace .section-heading { flex-direction: column; }
+  .ospf-workspace .section-heading > * { width: 100%; min-width: 0; }
+  .ospf-topology-panel > .panel-head { flex-direction: column; align-items: stretch; gap: 12px; }
   .ospf-topology-panel { padding: 12px; }
+  .ospf-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ospf-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px; width: 100%; min-width: 0; }
   .ospf-actions .ospf-domain-picker, .ospf-actions .ospf-domain-name { grid-column: 1 / -1; }
   .ospf-actions > button { width: 100%; min-width: 0; }
+  .ospf-overview-head > .ospf-actions > .ospf-domain-name { width: 100%; }
+  .ospf-overview-head > .ospf-actions > button:last-child { grid-column: 1 / -1; }
   .ospf-topology-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; justify-content: stretch; gap: 7px; width: 100%; }
   .ospf-topology-actions .status-dot-label, .ospf-topology-actions .ospf-layout-status { grid-column: 1 / -1; }
   .ospf-topology-actions > button { width: 100%; min-width: 0; }
@@ -1317,12 +1371,93 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
   .ospf-link-editor .ospf-link-advanced, .ospf-link-editor > .danger-button, .ospf-link-editor > .icon-button { grid-column: 1 / -1; }
   .ospf-node-row { align-items: flex-start; }
   .ospf-node-stats { max-width: 45%; }
+  .ospf-area-card, .ospf-area-entry-groups, .ospf-area-entry-group, .ospf-virtual-links, .ospf-virtual-link-row { min-width: 0; max-width: 100%; }
+  .ospf-area-entry-row { display: flex; flex-wrap: wrap; min-width: 0; width: 100%; }
+  .ospf-area-entry-row > input:first-child { flex: 1 1 100%; min-width: 0; }
+  .ospf-area-entry-row > input:not(:first-child) { flex: 1 1 88px; min-width: 0; width: auto; }
+  .ospf-area-entry-row > .checkbox-inline { flex: 1 1 auto; min-width: 0; }
+  .ospf-area-entry-row > .icon-button { flex: 0 0 30px; }
+  .ospf-virtual-link-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .ospf-virtual-link-row input, .ospf-virtual-link-row select { min-width: 0; width: 100%; }
 }
 @media (max-width: 380px) {
-  .ospf-actions { grid-template-columns: 1fr; }
-  .ospf-actions > button { grid-column: 1; }
-  .ospf-topology-actions { grid-template-columns: 1fr; }
-  .ospf-topology-actions .status-dot-label, .ospf-topology-actions .ospf-layout-status { grid-column: 1; }
   .ospf-link-editor { grid-template-columns: 1fr; }
   .ospf-link-endpoints, .ospf-link-editor .ospf-link-advanced, .ospf-link-editor > .danger-button, .ospf-link-editor > .icon-button { grid-column: 1; }
+}
+
+/* OSPF workspace: topology is the stable primary surface; the current object
+ * is edited in one independently scrolling inspector. */
+.ospf-workbench { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 460px); gap: 16px; align-items: start; }
+.ospf-workbench .ospf-topology-panel { min-width: 0; margin-bottom: 0; }
+.ospf-inspector { position: sticky; top: 16px; display: flex; flex-direction: column; min-width: 0; max-height: calc(100svh - 132px); overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.ospf-inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
+.ospf-inspector-head-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.ospf-inspector-head h3 { margin: 2px 0 4px; }
+.ospf-draft-badge, .ospf-saved-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+.ospf-draft-badge { color: var(--amber, #b45309); }.ospf-saved-badge { color: var(--green); }
+.ospf-inspector-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.ospf-inspector-nav button { min-width: 0; padding: 7px 4px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; }
+.ospf-inspector-nav button:hover, .ospf-inspector-nav button.active { border-color: var(--line-strong); background: var(--surface); color: var(--accent); }
+.ospf-inspector-runtime-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.ospf-inspector-runtime-summary .runtime-summary-card { min-width: 0; padding: 8px 6px; }
+.ospf-runtime-drawer-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 16px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--amber) 10%, var(--surface)); color: var(--ink); font-size: 12px; }
+.ospf-inspector > .ospf-layout { display: block; min-width: 0; max-height: none; overflow: auto; }
+.ospf-inspector > .ospf-layout .ospf-node-panel, .ospf-inspector > .ospf-layout .ospf-editor { border: 0; padding: 16px; }
+.ospf-inspector > .ospf-layout .ospf-editor .ospf-area-advanced, .ospf-inspector > .ospf-layout .ospf-editor .ospf-virtual-links { display: none; }
+.ospf-inspector > .ospf-layout .ospf-runtime { display: none; }
+.ospf-inspector > .ospf-link-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; max-height: calc(100svh - 220px); overflow: auto; padding: 16px; border: 0; border-radius: 0; background: transparent; }
+.ospf-inspector > .ospf-link-editor .ospf-link-endpoints, .ospf-inspector > .ospf-link-editor .ospf-endpoint-mode, .ospf-inspector > .ospf-link-editor .ospf-link-advanced, .ospf-inspector > .ospf-link-editor > .danger-button, .ospf-inspector > .ospf-link-editor > .icon-button, .ospf-inspector > .ospf-link-editor > .ospf-ipsec-warning { grid-column: 1 / -1; }
+.ospf-inspector > .ospf-link-editor .ospf-link-endpoints { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: start; }
+.ospf-inspector > .ospf-link-editor .ospf-link-endpoints > span { padding-top: 30px; text-align: center; }
+.ospf-inspector > .ospf-link-editor .field { min-width: 0; }.ospf-inspector > .ospf-link-editor .field input, .ospf-inspector > .ospf-link-editor .field select { width: 100%; min-width: 0; }
+.ospf-domain-inspector { min-height: 0; overflow: auto; padding: 16px; }
+.ospf-domain-health-strip { display: flex; justify-content: space-between; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); font-size: 12px; }
+.ospf-domain-health-strip span { color: var(--muted); }.ospf-empty-state { margin: 12px 0; padding: 12px; border: 1px dashed var(--line-strong); border-radius: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.ospf-setup-card { display: grid; gap: 12px; margin: 14px 0 18px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.ospf-setup-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ospf-setup-card h4 { margin: 2px 0 0; font-size: 16px; }
+.ospf-setup-progress { color: var(--accent); font-size: 12px; font-weight: 700; }
+.ospf-setup-card > p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.ospf-setup-card .primary-button { width: 100%; }
+.ospf-setup-steps { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; counter-reset: setup-step; }
+.ospf-setup-steps li { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.ospf-setup-steps li::before { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; border: 1px solid var(--line-strong); border-radius: 999px; content: counter(setup-step); counter-increment: setup-step; font-size: 11px; }
+.ospf-setup-steps li.active { color: var(--accent); font-weight: 700; }
+.ospf-setup-steps li.done { color: var(--green); }
+.ospf-setup-steps li.done::before { border-color: var(--green); background: color-mix(in srgb, var(--green) 12%, var(--surface)); content: "✓"; }
+.ospf-area-inspector { display: grid; gap: 8px; margin-top: 18px; }.ospf-area-inspector h4 { margin: 0 0 3px; }.ospf-area-inspector .ospf-area-card { display: grid; gap: 8px; align-items: stretch; margin: 0; cursor: pointer; }.ospf-area-inspector .ospf-area-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent); }.ospf-area-summary { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--muted); font-size: 11px; }.ospf-area-compact-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); }.ospf-area-compact-fields .area-wide { grid-column: 1 / -1; }.ospf-area-compact-fields .field { display: grid; gap: 3px; font-size: 11px; color: var(--muted); }.ospf-area-compact-fields input { width: 100%; min-width: 0; }
+.ospf-area-advanced-details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }.ospf-area-advanced-details summary { cursor: pointer; color: var(--accent); font-size: 12px; font-weight: 600; }
+.ospf-inspector .ospf-policy-grid { grid-template-columns: 1fr; }.ospf-inspector .ospf-version-policy { margin-top: 14px; }.ospf-inspector .ospf-version-policy .policy-block { overflow: hidden; }.ospf-inspector .ospf-advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ospf-inspector-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 12px; min-height: 320px; overflow: auto; padding: 12px; background: var(--surface-soft); }
+.ospf-inspector-body > .ospf-domain-inspector,
+.ospf-inspector-body > .ospf-link-editor { flex: 0 0 auto; margin: 0; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); box-shadow: 0 4px 14px var(--shadow-soft, rgba(15, 23, 42, .06)); }
+.ospf-inspector-body > .ospf-domain-inspector { min-height: 220px; overflow: visible; }
+.ospf-inspector-body > .ospf-link-editor { min-height: 300px; }
+.ospf-inspector .ospf-layout { display: block; min-width: 0; margin: 0; overflow: visible; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
+.ospf-inspector .ospf-layout .ospf-node-panel { border: 0; border-bottom: 2px solid var(--line-strong); border-radius: 10px 10px 0 0; padding: 14px 16px; background: var(--surface-soft); }
+.ospf-inspector .ospf-layout .ospf-editor { border: 0; border-radius: 0 0 10px 10px; padding: 18px 16px; background: var(--surface); }
+.ospf-inspector .ospf-layout .ospf-editor:before { display: block; margin: -2px 0 14px; color: var(--muted); content: "当前节点配置"; font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.ospf-inspector .ospf-runtime { display: none; }
+.ospf-inspector .ospf-link-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; padding: 16px; overflow: visible; }
+.ospf-inspector .ospf-link-editor .ospf-link-endpoints, .ospf-inspector .ospf-link-editor .ospf-endpoint-mode, .ospf-inspector .ospf-link-editor .ospf-link-advanced, .ospf-inspector .ospf-link-editor > .danger-button, .ospf-inspector .ospf-link-editor > .icon-button, .ospf-inspector .ospf-link-editor > .ospf-ipsec-warning { grid-column: 1 / -1; }
+.ospf-inspector .ospf-link-editor .ospf-link-endpoints { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: start; }
+.ospf-inspector .ospf-link-editor .ospf-link-endpoints > span { padding-top: 30px; text-align: center; }
+.ospf-inspector .ospf-link-editor .field { min-width: 0; }.ospf-inspector .ospf-link-editor .field input, .ospf-inspector .ospf-link-editor .field select { width: 100%; min-width: 0; }
+@media (max-width: 980px) { .ospf-workbench { grid-template-columns: minmax(0, 1fr) minmax(320px, 380px); } }
+@media (max-width: 760px) {
+  .ospf-workbench { display: block; }
+  .ospf-inspector { position: static; max-height: none; margin-top: 12px; }
+  .ospf-inspector > .ospf-layout, .ospf-inspector > .ospf-link-editor { max-height: none; overflow: visible; }
+  .ospf-inspector > .ospf-link-editor { grid-template-columns: 1fr; }
+  .ospf-inspector > .ospf-link-editor .ospf-link-endpoints { grid-template-columns: 1fr; gap: 8px; }
+  .ospf-inspector > .ospf-link-editor .ospf-link-endpoints > span { padding: 0; text-align: left; }
+  .ospf-inspector > .ospf-link-editor .ospf-link-endpoints, .ospf-inspector > .ospf-link-editor .ospf-endpoint-mode, .ospf-inspector > .ospf-link-editor .ospf-link-advanced, .ospf-inspector > .ospf-link-editor > .danger-button, .ospf-inspector > .ospf-link-editor > .icon-button { grid-column: 1; }
+  .ospf-inspector .ospf-advanced-grid, .ospf-area-compact-fields { grid-template-columns: 1fr; }
+  .ospf-inspector .ospf-advanced-grid > .area-wide, .ospf-area-compact-fields .area-wide { grid-column: 1; }
+  .ospf-inspector-body { min-height: 0; overflow: visible; padding: 10px; }
+  .ospf-inspector-body > .ospf-domain-inspector, .ospf-inspector-body > .ospf-link-editor { border-radius: 8px; }
+  .ospf-inspector .ospf-link-editor { grid-template-columns: 1fr; }
+  .ospf-inspector .ospf-link-editor .ospf-link-endpoints { grid-template-columns: 1fr; gap: 8px; }
+  .ospf-inspector .ospf-link-editor .ospf-link-endpoints > span { padding: 0; text-align: left; }
+  .ospf-inspector .ospf-link-editor .ospf-link-endpoints, .ospf-inspector .ospf-link-editor .ospf-endpoint-mode, .ospf-inspector .ospf-link-editor .ospf-link-advanced, .ospf-inspector .ospf-link-editor > .danger-button, .ospf-inspector .ospf-link-editor > .icon-button { grid-column: 1; }
 }

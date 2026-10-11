@@ -697,3 +697,41 @@ test("filters OSPF interface options by address-family support", async () => {
   await fs.writeFile(file, config);
   await execFileAsync("bird", ["-p", "-c", file]);
 });
+
+test("structured OSPF normalization preserves custom Area references across stored reads", async () => {
+  const { toOspfDomainModel } = await import("../src/ospf.js");
+  const input = toOspfDomainModel(normalizeOspfDomain(domain()));
+  input.areas[0].id = "custom_backbone";
+  input.links[0].areaId = "custom_backbone";
+  const normalized = normalizeOspfDomain(input);
+  assert.equal(normalized.areas[0].id, "custom_backbone");
+  assert.equal(normalized.links[0].areaId, "custom_backbone");
+  assert.deepEqual(normalizeOspfDomain(JSON.parse(JSON.stringify(normalized))), normalized);
+});
+
+test("compact editor updates replace structured projections in server previews", async () => {
+  const { toOspfDomainModel } = await import("../src/ospf.js");
+  const { createResourceApplicationService } = await import("../src/resource-application-service.js");
+  const saved = toOspfDomainModel(normalizeOspfDomain(domain()));
+  const current = validateInventory({ version: 28, nodes: [node("n1", "192.0.2.1"), { ...node("n2", "192.0.2.2"), transport: "agent" }], ospfDomains: [saved] });
+  const service = createResourceApplicationService({
+    store: { read: async () => current, revisionOf: () => 4 },
+    deploymentService: { mutateAndApply: () => { throw new Error("preview must not deploy"); } },
+    nodeOnboarding: {}, sessions: {}, withDeploymentLock: async (operation) => operation(),
+    makeId: (prefix) => `${prefix}_test`, addEvent: () => ({}), getEvents: () => [],
+  });
+  const draft = structuredClone(current.ospfDomains[0]);
+  delete draft.members;
+  delete draft.areas;
+  draft.nodeConfigs[0].routerId = "192.0.2.99";
+  draft.links[0].cost = 57;
+  draft.links[0].localOptions.priority = 100;
+  delete draft.links[0].endpoints;
+  delete draft.links[0].areaId;
+  const response = await service.renderOspfDomain({ ...draft, inventoryRevision: 4 });
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.domain.nodeConfigs[0].routerId, "192.0.2.99");
+  assert.equal(response.payload.domain.links[0].cost, 57);
+  assert.match(response.payload.configs[0].config, /cost 57;/);
+  assert.equal(current.ospfDomains[0].links[0].cost, 20);
+});

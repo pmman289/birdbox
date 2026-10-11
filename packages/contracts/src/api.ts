@@ -13,6 +13,7 @@ import type {
   StaticProtocol,
   DirectProtocol,
   KernelProtocol,
+  OspfDomain,
 } from "./inventory.js";
 
 export type SessionMutationRequest = Omit<BgpSession, "id" | "managedBy">;
@@ -130,8 +131,12 @@ export interface DashboardRuntimeResponse {
 
 export interface DeploymentReport {
   applied: boolean;
+  /** Stable transaction identifier for querying or explaining a deployment. */
+  transactionId?: string;
   nodeIds: string[];
   nodes: Array<{ id: string; name: string }>;
+  nodeResults?: Array<{ nodeId: string; status: "success" | "failed" | "rolled_back" | "unknown"; error?: string | null }>;
+  rollback?: { attempted: boolean; succeeded: boolean; error?: string | null };
   sessions: Array<{ id: string; nodeId: string; protocolName: string }>;
 }
 
@@ -140,6 +145,26 @@ export interface NodeCommandResponse {
   stdout: string;
   stderr: string;
   code?: string | number;
+}
+
+export interface OspfPreviewNode {
+  nodeId: string;
+  config: string;
+  diff: { changed: boolean; added: number; removed: number; unified: string };
+  validation: NodeCommandResponse;
+}
+
+export interface OspfPreviewResponse {
+  valid: boolean;
+  domain: OspfDomain;
+  configs: OspfPreviewNode[];
+  diagnostics: Array<{ nodeId: string; message: string; code: string | number | null }>;
+}
+
+export interface OspfRuntimeResponse {
+  domainId: string;
+  lastCheckedAt: string;
+  nodes: Array<{ nodeId: string; name: string; runtime: unknown }>;
 }
 
 export interface SessionPreviewResponse {

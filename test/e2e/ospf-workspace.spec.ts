@@ -207,6 +207,7 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
 
 test("OSPF 失败保存后恢复交互并可再次操作", async ({ page }) => {
   let saveAttempts = 0;
+  let previewAttempts = 0;
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.route("**/api/dashboard*", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dashboardPayload()) }));
@@ -222,16 +223,25 @@ test("OSPF 失败保存后恢复交互并可再次操作", async ({ page }) => {
     }
     return route.continue();
   });
+  await page.route("**/api/ospf/preview", async (route) => {
+    previewAttempts += 1;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      valid: false,
+      diagnostics: [{ nodeId: "local", message: "OSPF 链路 link_ab 接口不合法", code: "OSPF_INTERFACE_INVALID" }],
+      configs: [{ nodeId: "local", config: "", validation: { ok: false, stdout: "", stderr: "OSPF 链路 link_ab 接口不合法" } }],
+    }) });
+  });
   await page.route("**/api/ospf/*/runtime", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runtime) }));
   await page.route("**/api/nodes/*/interfaces", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ interfaces: ["bbtest23", "bbtest24"] }) }));
   await authenticate(page);
   await openOspfWorkspace(page);
   await page.getByRole("button", { name: "保存并应用" }).click();
-  await expect(page.locator("#toastRegion .toast")).toContainText("OSPF 链路 link_ab 接口不合法");
+  await expect(page.locator("#toastRegion .toast")).toContainText("OSPF 配置预检失败：OSPF 链路 link_ab 接口不合法");
   await expect(page.getByRole("button", { name: "保存并应用" })).toBeEnabled();
   await page.getByRole("button", { name: "查询路径" }).click();
   await expect(page.locator(".ospf-path-dialog")).toBeVisible();
-  expect(saveAttempts).toBe(1);
+  expect(previewAttempts).toBe(1);
+  expect(saveAttempts).toBe(0);
   expect(pageErrors).toEqual([]);
 });
 

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import PolicyEditor from "../sessions/PolicyEditor.vue";
+import OspfOverview from "./OspfOverview.vue";
+import OspfApplyDialog, { type OspfApplyNode } from "./OspfApplyDialog.vue";
+import OspfRuntimeDrawer from "./OspfRuntimeDrawer.vue";
 import type {
   ChannelPolicy,
   PolicyDefine,
@@ -44,6 +47,8 @@ interface OspfLink {
   options?: OspfInterfaceOptions;
   localOptions?: OspfInterfaceOptions;
   remoteOptions?: OspfInterfaceOptions;
+  localInterfaceSource?: "discovered" | "manual";
+  remoteInterfaceSource?: "discovered" | "manual";
 }
 interface OspfRuntimeSummary {
   error: string | null;
@@ -86,14 +91,15 @@ interface OspfRuntimeNode {
 const { dashboard } = useDashboardStore();
 const runtimeByNode = ref<Record<string, OspfRuntimeSummary>>({});
 const runtimeLoadError = ref("");
-const runtimeDialog = ref<HTMLDialogElement | null>(null);
 const runtimeDetailKind = ref<"neighbors" | "routes" | "areas" | null>(null);
 const routePathDialog = ref<HTMLDialogElement | null>(null);
 const previewDialog = ref<HTMLDialogElement | null>(null);
 const serverPreviewByNode = ref<Record<string, string>>({});
+const previewDiffByNode = ref<Record<string, { changed: boolean; added: number; removed: number; unified: string; valid: boolean; error: string }>>({});
 const previewError = ref("");
 const previewLoading = ref(false);
 const previewValidated = ref(false);
+const previewDraftSignature = ref("");
 function makeDraftDomainId(): string {
   return `ospf_${Array.from(crypto.getRandomValues(new Uint32Array(4)), (value) => value.toString(16).padStart(8, "0")).join("")}`;
 }
@@ -107,7 +113,10 @@ const routePathPending = ref(false);
 const routePathError = ref("");
 let routePathGeneration = 0;
 let routePathAbortController: AbortController | null = null;
-const ospfActionPending = ref<"preview" | "save" | null>(null);
+const ospfActionPending = ref<"preview" | "draft" | "save" | null>(null);
+const applyDialogOpen = ref(false);
+const applyDialogError = ref("");
+const applyNodes = ref<OspfApplyNode[]>([]);
 interface OspfPathStep {
   nodeId: string;
   route: RoutePathResponse["routes"][number];
@@ -120,6 +129,7 @@ const routePathScale = ref(1);
 const routePathPan = ref({ x: 0, y: 0 });
 const routePathDragging = ref<{ pointerId: number; x: number; y: number } | null>(null);
 const interfaceOptionsByNode = ref<Record<string, string[]>>({});
+const interfaceDiscoveryCache = new Map<string, { expiresAt: number; interfaces: string[] }>();
 const nodes = computed<OspfNode[]>(
   () =>
     dashboard.value?.inventory.nodes.map((node) => ({
@@ -133,6 +143,15 @@ const nodes = computed<OspfNode[]>(
       routes: runtimeByNode.value[node.id]?.routes ?? 0,
     })) ?? [],
 );
+const overviewNodes = computed(() => nodes.value.filter((node) => nodeConfigs.value[node.id]).map((node) => ({
+  id: node.id,
+  name: node.name,
+  v2: nodeConfigs.value[node.id]?.versions.includes("ospfv2") ? node.v2 : "未启用",
+  v3: nodeConfigs.value[node.id]?.versions.includes("ospfv3") ? node.v3 : "未启用",
+  neighbors: node.neighbors,
+  routes: node.routes,
+  error: runtimeByNode.value[node.id]?.error ?? null,
+})));
 function runtimeStateClass(state: string): "up" | "warn" | "" {
   const normalized = state.trim().toLowerCase();
   if (normalized.startsWith("full") || normalized === "established" || normalized === "up") return "up";
@@ -140,6 +159,13 @@ function runtimeStateClass(state: string): "up" | "warn" | "" {
   return "";
 }
 const selectedNodeId = ref("");
+type OspfInspectorTarget =
+  | { kind: "domain" }
+  | { kind: "node"; nodeId: string }
+  | { kind: "link"; linkId: string }
+  | { kind: "area"; areaId: string };
+const inspectorTarget = ref<OspfInspectorTarget>({ kind: "domain" });
+const selectedAreaId = ref<string | null>(null);
 const enabledVersions = ref<OspfVersion[]>(["ospfv2"]);
 const enabled = ref(true);
 const routerId = ref("172.20.177.7");
@@ -170,6 +196,25 @@ const configuredAreas = computed(() => [...new Set([
 function ensureAreaOptions(area: string): OspfAreaOptions {
   if (!areaOptions.value[area]) areaOptions.value = { ...areaOptions.value, [area]: {} };
   return areaOptions.value[area]!;
+}
+function addArea(): void {
+  const candidates = Array.from({ length: 254 }, (_, index) => `0.0.${Math.floor(index / 254)}.${index + 1}`);
+  const area = candidates.find((candidate) => !configuredAreas.value.includes(candidate)) ?? `10.0.0.${configuredAreas.value.length + 1}`;
+  areaOptions.value = { ...areaOptions.value, [area]: {} };
+}
+function removeArea(area: string): void {
+  if (area === "0.0.0.0") return;
+  const affectedLinks = links.value.filter((link) => link.area === area);
+  const affectedNodes = new Set(affectedLinks.flatMap((link) => [link.from, link.to]));
+  const impact = affectedLinks.length
+    ? `Area ${area} 关联 ${affectedLinks.length} 条链路和 ${affectedNodes.size} 个节点。确认后将这些链路移到 Backbone Area 0.0.0.0。`
+    : `确认删除 Area ${area}？`;
+  if (!window.confirm(impact)) return;
+  if (affectedLinks.length) links.value = links.value.map((link) => link.area === area ? { ...link, area: "0.0.0.0" } : link);
+  const next = { ...areaOptions.value };
+  delete next[area];
+  areaOptions.value = next;
+  virtualLinks.value = virtualLinks.value.filter((link) => link.area !== area);
 }
 function addVirtualLink(): void {
   // A virtual link must use a non-Backbone transit area. Prefer an area
@@ -227,6 +272,8 @@ const search = ref("");
 const links = ref<OspfLink[]>([]);
 const selectedLinkId = ref<string | null>(null);
 const showAddLink = ref(false);
+const linkConnectMode = ref(false);
+const linkConnectFirstNodeId = ref<string | null>(null);
 const linkDraftFrom = ref("mrouter");
 const linkDraftTo = ref("nbcjp");
 const linkDraftLocalInterface = ref("");
@@ -285,11 +332,13 @@ interface OspfNodeConfig {
 const nodeConfigs = ref<Record<string, OspfNodeConfig>>({});
 const ospfDomainId = ref<string | null>(null);
 const ospfDomainName = ref("默认 OSPF 域");
+const inventoryRevision = ref<number | null>(null);
 const ospfDomains = ref<Array<{ id: string; name: string; nodeConfigs: OspfNodeConfig[]; links: OspfLink[]; layout?: Record<string, OspfNodePosition> }>>([]);
 const savedDomainSignature = ref("");
 const ospfDomainsState = ref<"loading" | "ready" | "error">("loading");
 const ospfLoadError = ref("");
 const ospfDomainsReady = computed(() => ospfDomainsState.value === "ready");
+const domainMemberCount = computed(() => Object.keys(nodeConfigs.value).length);
 
 const selectedLink = computed(
   () =>
@@ -384,10 +433,8 @@ const runtimeDetailTitle = computed(() => {
 });
 function openRuntimeDetails(kind: "neighbors" | "routes" | "areas"): void {
   runtimeDetailKind.value = kind;
-  if (!runtimeDialog.value?.open) runtimeDialog.value?.showModal();
 }
 function closeRuntimeDetails(): void {
-  runtimeDialog.value?.close();
   runtimeDetailKind.value = null;
 }
 const routePathNodeIds = computed(() => new Set([
@@ -639,6 +686,61 @@ const topologyLinks = computed(() => {
     (link) => nodeIds.has(link.from) && nodeIds.has(link.to),
   );
 });
+// The domain inspector is the first screen most users see. Keep the next
+// action derived from the actual draft so the page explains what to do instead
+// of presenting a collection of unrelated controls.
+const setupNodeReady = computed(() => Object.values(nodeConfigs.value).filter((config) => config.enabled).length >= 2);
+const setupLinkReady = computed(() => topologyLinks.value.length > 0);
+const setupAreaReady = computed(() => setupLinkReady.value && configuredAreas.value.length > 0);
+const setupCurrentStep = computed<"node" | "link" | "area" | "preview">(() => {
+  if (!setupNodeReady.value) return "node";
+  if (!setupLinkReady.value) return "link";
+  if (!setupAreaReady.value) return "area";
+  return "preview";
+});
+const setupCompletedSteps = computed(() => [
+  setupNodeReady.value,
+  setupLinkReady.value,
+  setupAreaReady.value,
+  previewValidated.value,
+].filter(Boolean).length);
+const setupTitle = computed(() => {
+  if (!setupNodeReady.value) return "先选择至少两个受管节点";
+  if (!setupLinkReady.value) return "下一步：添加一条连接";
+  if (!setupAreaReady.value) return "检查连接所属 Area";
+  return previewValidated.value ? "配置已预检，可以应用" : "配置已完成，可以预检";
+});
+const setupDescription = computed(() => {
+  if (!setupNodeReady.value) return "先在拓扑或节点编辑器中启用两个节点，OSPF 才能建立邻接。";
+  if (!setupLinkReady.value) return "点击“添加连接”，再在拓扑上依次点选两个不同节点，接口会自动发现。";
+  if (!setupAreaReady.value) return "确认链路使用的 Area；默认使用 Backbone Area 0.0.0.0。";
+  return previewValidated.value
+    ? "变更摘要已经生成，确认受影响节点后即可应用。"
+    : "服务端会为每个节点生成配置并检查错误，预检通过后才能应用。";
+});
+const setupActionLabel = computed(() => {
+  if (!setupNodeReady.value) return "开始选择节点";
+  if (!setupLinkReady.value) return "添加连接";
+  if (!setupAreaReady.value) return "检查 Area";
+  return previewValidated.value ? "查看变更" : "预检并查看变更";
+});
+function startNextOspfStep(): void {
+  if (setupCurrentStep.value === "node") {
+    const node = nodes.value.find((item) => !nodeConfigs.value[item.id]) ?? nodes.value[0];
+    if (node) selectNode(node);
+    return;
+  }
+  if (setupCurrentStep.value === "link") {
+    openAddLink();
+    return;
+  }
+  if (setupCurrentStep.value === "area") {
+    selectAreaInspector(configuredAreas.value[0] ?? "0.0.0.0");
+    return;
+  }
+  if (previewValidated.value) openOspfPreview();
+  else void previewOspf();
+}
 function defaultTopologyPosition(index: number, total: number): OspfNodePosition {
   const columns = Math.min(6, Math.max(1, total));
   const rows = Math.max(1, Math.ceil(total / columns));
@@ -853,6 +955,11 @@ function handleDomainSelection(select: HTMLSelectElement): void {
   }
   void selectOspfDomain(nextDomainId, true);
 }
+function handleDomainSelectionById(nextDomainId: string): void {
+  if (!nextDomainId) return;
+  if (!confirmDiscardDomainDraft()) return;
+  void selectOspfDomain(nextDomainId, true);
+}
 
 function domainPayload(): Record<string, unknown> {
   // New endpoint drafts are enabled when they are first materialized. Existing
@@ -866,6 +973,7 @@ function domainPayload(): Record<string, unknown> {
   if (selectedNodeId.value && (drafts[selectedNodeId.value] || enabled.value)) drafts[selectedNodeId.value] = selectedNodeConfigDraft();
   const configs = Object.values(drafts).filter((config) => nodes.value.some((node) => node.id === config.nodeId));
   return {
+    inventoryRevision: inventoryRevision.value ?? undefined,
     id: ospfDomainId.value ?? draftDomainId.value,
     name: ospfDomainName.value.trim() || "默认 OSPF 域",
     nodeConfigs: configs,
@@ -884,6 +992,8 @@ function domainPayload(): Record<string, unknown> {
       options: link.options,
       localOptions: link.localOptions,
       remoteOptions: link.remoteOptions,
+      localInterfaceSource: link.localInterfaceSource,
+      remoteInterfaceSource: link.remoteInterfaceSource,
     })),
     layout: nodePosition.value,
   };
@@ -895,10 +1005,13 @@ function clearOspfDraft(): void {
   ospfDomainName.value = "新 OSPF 域";
   links.value = [];
   selectedLinkId.value = null;
+  inspectorTarget.value = { kind: "domain" };
+  selectedAreaId.value = null;
   selectedLinkEndpoint.value = "from";
   nodeConfigs.value = {};
   nodePosition.value = cloneDraft(globalNodePosition.value);
   serverPreviewByNode.value = {};
+  previewDiffByNode.value = {};
   ensureNodePositions();
   if (nodes.value[0]) {
     selectedNodeId.value = nodes.value[0].id;
@@ -915,11 +1028,14 @@ async function selectOspfDomain(domainId: string, skipDirtyCheck = false): Promi
   ospfDomainId.value = domain.id;
   ospfDomainName.value = domain.name;
   selectedLinkId.value = null;
+  inspectorTarget.value = { kind: "domain" };
+  selectedAreaId.value = null;
   selectedLinkEndpoint.value = "from";
   links.value = cloneDraft(domain.links).map((link) => ({ ...link, from: (link as unknown as { from?: string }).from ?? (link as unknown as { fromNodeId: string }).fromNodeId, to: (link as unknown as { to?: string }).to ?? (link as unknown as { toNodeId: string }).toNodeId, mode: (link as unknown as { passive?: boolean }).passive ? "passive" : "active", auth: ((value: string) => value === "simple" || value === "md5" || value === "ipsec" ? value : "none")((link as unknown as { authentication?: string }).authentication ?? "none") } as OspfLink));
   nodeConfigs.value = Object.fromEntries(cloneDraft(domain.nodeConfigs).map((config) => [config.nodeId, config]));
   nodePosition.value = cloneDraft({ ...(domain.layout ?? {}), ...globalNodePosition.value });
   serverPreviewByNode.value = {};
+  previewDiffByNode.value = {};
   runtimeByNode.value = {};
   runtimeLoadError.value = "";
   ensureNodePositions();
@@ -951,14 +1067,64 @@ function removeSelectedLink(): void {
   if (!link || !window.confirm(`确认删除链路 ${link.from} ↔ ${link.to}？`)) return;
   links.value = links.value.filter((item) => item.id !== selectedLinkId.value);
   selectedLinkId.value = null;
+  selectDomainInspector();
+}
+function prepareApplyDialog(): void {
+  if (previewDialog.value?.open) closeOspfPreview();
+  const configuredNodeIds = new Set(Object.keys(nodeConfigs.value));
+  applyNodes.value = nodes.value
+    .filter((node) => configuredNodeIds.has(node.id))
+    .map((node) => ({ nodeId: node.id, name: node.name, status: "ready" }));
+  applyDialogError.value = "";
+  applyDialogOpen.value = true;
+}
+function closeApplyDialog(): void {
+  if (ospfActionPending.value) return;
+  applyDialogOpen.value = false;
+}
+function focusRuntime(): void {
+  openRuntimeDetails("neighbors");
+}
+async function saveDraftOspf(): Promise<void> {
+  if (ospfActionPending.value || !ospfDomainsReady.value) return;
+  ospfActionPending.value = "draft";
+  try {
+    const payload = { ...domainPayload(), mode: "draft" as const };
+    const response = await api<{ domain?: { id: string; name?: string }; inventoryRevision?: number | null }>(
+      ospfDomainId.value ? `/api/ospf/${encodeURIComponent(ospfDomainId.value)}` : "/api/ospf",
+      {
+        method: ospfDomainId.value ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    if (response.domain?.id) ospfDomainId.value = response.domain.id;
+    if (response.domain?.name) ospfDomainName.value = response.domain.name;
+    if (response.inventoryRevision !== undefined) inventoryRevision.value = response.inventoryRevision;
+    savedDomainSignature.value = currentDomainSignature();
+    await loadOspfDomains();
+    dispatchToast("OSPF 草稿已保存，尚未下发节点", "success");
+  } catch (error) {
+    dispatchToast(error instanceof Error ? error.message : "保存 OSPF 草稿失败", "error");
+  } finally {
+    ospfActionPending.value = null;
+  }
 }
 async function saveOspf(): Promise<void> {
+  if (!previewValidated.value || previewDraftSignature.value !== serializedDraft.value) {
+    await previewOspf();
+  }
+  if (previewValidated.value) prepareApplyDialog();
+}
+async function applyOspf(): Promise<void> {
   if (ospfActionPending.value || !ospfDomainsReady.value || !nodes.value.length) return;
   ospfActionPending.value = "save";
+  applyDialogError.value = "";
+  applyNodes.value = applyNodes.value.map((node) => ({ ...node, status: "applying", detail: undefined }));
   serverPreviewByNode.value = {};
   try {
-    const payload = domainPayload();
-    const response = await api<{ domain: { id: string; name?: string } }>(
+    const payload = { ...domainPayload(), mode: "apply" as const, candidateHash: previewDraftSignature.value };
+    const response = await api<{ domain: { id: string; name?: string }; inventoryRevision?: number | null; deployment?: { transactionId?: string; nodeResults?: Array<{ nodeId?: string; status?: string; error?: string | null }> } }>(
       ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
       {
         method: ospfDomainId.value ? "PUT" : "POST",
@@ -972,9 +1138,20 @@ async function saveOspf(): Promise<void> {
     await saveLayout(nodePosition.value);
     await loadDashboard(selectedNodeId.value || null, dashboard.value?.selectedPeer?.id ?? null);
     await refreshOspfRuntime();
+    const results = new Map((response.deployment?.nodeResults ?? []).filter((item): item is { nodeId: string; status?: string; error?: string | null } => typeof item.nodeId === "string").map((item) => [item.nodeId, item]));
+    applyNodes.value = applyNodes.value.map((node) => {
+      const result = results.get(node.nodeId);
+      if (!result || result.status === "success") return { ...node, status: "success", detail: response.deployment?.transactionId ? `配置已应用 · ${response.deployment.transactionId}` : "配置已应用" };
+      if (result.status === "unknown") return { ...node, status: "unknown", detail: result.error ?? "结果未知" };
+      if (result.status === "rolled_back" || result.status === "failed") return { ...node, status: "failed", detail: result.error ?? "节点应用失败" };
+      return { ...node, status: "success", detail: "配置已应用" };
+    });
     dispatchToast("OSPF 配置已保存并应用", "success");
   } catch (error) {
-    dispatchToast(error instanceof Error ? error.message : "保存并应用 OSPF 配置失败", "error");
+    const message = error instanceof Error ? error.message : "保存并应用 OSPF 配置失败";
+    applyDialogError.value = message;
+    applyNodes.value = applyNodes.value.map((node) => ({ ...node, status: "failed", detail: message }));
+    dispatchToast(message, "error");
   } finally {
     ospfActionPending.value = null;
   }
@@ -984,6 +1161,7 @@ async function previewOspf(): Promise<void> {
   ospfActionPending.value = "preview";
   cancelDraftPreview();
   previewValidated.value = false;
+  previewDraftSignature.value = "";
   previewError.value = "";
   serverPreviewByNode.value = {};
   stabilizeDraftForSerialization();
@@ -994,7 +1172,8 @@ async function previewOspf(): Promise<void> {
   try {
     const result = await api<{
       valid: boolean;
-      configs?: Array<{ nodeId: string; config?: string; validation?: { ok?: boolean; stderr?: string } }>;
+      diagnostics?: Array<{ nodeId: string; message?: string }>;
+      configs?: Array<{ nodeId: string; config?: string; diff?: { changed?: boolean; added?: number; removed?: number; unified?: string }; validation?: { ok?: boolean; stderr?: string; stdout?: string } }>;
     }>("/api/ospf/preview", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1002,7 +1181,7 @@ async function previewOspf(): Promise<void> {
     });
     if (!result.valid) {
       const failed = result.configs?.find((item) => item.validation?.ok === false);
-      const detail = failed?.validation?.stderr?.trim();
+      const detail = failed?.validation?.stderr?.trim() || failed?.validation?.stdout?.trim() || result.diagnostics?.[0]?.message;
       dispatchToast(detail ? `OSPF 配置预检失败：${detail}` : "OSPF 配置预检失败，请检查节点返回的错误", "error");
       return;
     }
@@ -1015,7 +1194,16 @@ async function previewOspf(): Promise<void> {
       (result.configs ?? []).filter((item): item is { nodeId: string; config: string } => typeof item.config === "string")
         .map((item) => [item.nodeId, item.config]),
     );
+    previewDiffByNode.value = Object.fromEntries((result.configs ?? []).map((item) => [item.nodeId, {
+      changed: item.diff?.changed === true,
+      added: item.diff?.added ?? 0,
+      removed: item.diff?.removed ?? 0,
+      unified: item.diff?.unified ?? "",
+      valid: item.validation?.ok !== false,
+      error: item.validation?.stderr?.trim() || item.validation?.stdout?.trim() || "",
+    }]));
     previewValidated.value = true;
+    previewDraftSignature.value = submittedDraft;
     previewDialog.value?.showModal();
     dispatchToast("OSPF 配置预检通过", "success");
   } catch (error) {
@@ -1129,17 +1317,21 @@ async function renderDraftPreview(): Promise<void> {
 }
 watch([serializedDraft, ospfDomainsReady], () => {
   serverPreviewByNode.value = {};
+  previewDiffByNode.value = {};
   previewError.value = "";
   previewValidated.value = false;
+  previewDraftSignature.value = "";
   scheduleDraftPreview();
 }, { immediate: true });
 
 function selectNode(node: OspfNode): void {
   if (ospfActionPending.value) return;
-  if (node.id === selectedNodeId.value) return;
+  if (node.id === selectedNodeId.value && inspectorTarget.value.kind === "node") return;
   invalidateRoutePathQuery(true);
   saveSelectedNodeConfig();
   selectedNodeId.value = node.id;
+  inspectorTarget.value = { kind: "node", nodeId: node.id };
+  selectedAreaId.value = null;
   if (selectedLink.value) selectedLinkEndpoint.value = selectedLink.value.to === node.id ? "to" : "from";
   routerId.value = node.routerId;
   loadNodeConfig(node.id);
@@ -1183,7 +1375,13 @@ function centerTopologyView(positions: Record<string, OspfNodePosition>): void {
   const minY = Math.min(...points.map((point) => point.y));
   const maxY = Math.max(...points.map((point) => point.y));
   topologyPan.value = {
-    x: TOPOLOGY_WIDTH / 2 - (minX + maxX) / 2,
+    // Keep the first managed node inside the initial viewport. The world is
+    // intentionally larger than the canvas for panning, so mathematically
+    // centering a sparse graph can place its first node just outside the
+    // viewport (especially on desktop where the canvas is narrower than the
+    // world). A small rightward bias makes the initial state immediately
+    // actionable while preserving free pan/zoom.
+    x: TOPOLOGY_WIDTH / 2 - (minX + maxX) / 2 + 220,
     y: TOPOLOGY_HEIGHT / 2 - (minY + maxY) / 2,
   };
 }
@@ -1223,11 +1421,32 @@ function topologyCanvasPoint(clientX: number, clientY: number): { x: number; y: 
     y: ((clientY - rect.top - rect.height / 2 - topologyPan.value.y) / scale) + TOPOLOGY_HEIGHT / 2,
   };
 }
+function handleTopologyClick(event: MouseEvent): void {
+  const target = (event.target as HTMLElement | null)?.closest<HTMLElement>(".ospf-link-hit-button");
+  const linkId = target?.dataset.linkId;
+  if (!linkId) return;
+  const link = topologyLinks.value.find((item) => item.id === linkId);
+  if (link) selectLink(link);
+}
 function selectLink(link: OspfLink): void {
   if (ospfActionPending.value) return;
   ensureLinkEndpointOptions(link);
   selectedLinkEndpoint.value = selectedNodeId.value === link.to ? "to" : "from";
   selectedLinkId.value = link.id;
+  inspectorTarget.value = { kind: "link", linkId: link.id };
+  selectedAreaId.value = null;
+}
+function selectDomainInspector(): void {
+  if (ospfActionPending.value) return;
+  selectedLinkId.value = null;
+  selectedAreaId.value = null;
+  inspectorTarget.value = { kind: "domain" };
+}
+function selectAreaInspector(area: string): void {
+  if (ospfActionPending.value) return;
+  selectedLinkId.value = null;
+  selectedAreaId.value = area;
+  inspectorTarget.value = { kind: "area", areaId: area };
 }
 const linkDraftLocalOptions = computed(() =>
   interfacesForNode(linkDraftFrom.value),
@@ -1241,6 +1460,8 @@ function resetLinkDraft(): void {
   linkDraftRemoteInterface.value = "";
 }
 function handleDraftFromChange(): void {
+  linkConnectMode.value = false;
+  linkConnectFirstNodeId.value = null;
   linkDraftLocalInterface.value = "";
   linkDraftRemoteInterface.value = "";
   if (linkDraftFrom.value === linkDraftTo.value) {
@@ -1248,6 +1469,8 @@ function handleDraftFromChange(): void {
   }
 }
 function handleDraftToChange(): void {
+  linkConnectMode.value = false;
+  linkConnectFirstNodeId.value = null;
   linkDraftLocalInterface.value = "";
   linkDraftRemoteInterface.value = "";
   if (linkDraftTo.value === linkDraftFrom.value) {
@@ -1260,10 +1483,14 @@ function openAddLink(): void {
   if (!nodes.value.some((node) => node.id === linkDraftFrom.value)) linkDraftFrom.value = first;
   if (!nodes.value.some((node) => node.id === linkDraftTo.value) || linkDraftTo.value === linkDraftFrom.value) linkDraftTo.value = second;
   showAddLink.value = true;
+  linkConnectMode.value = true;
+  linkConnectFirstNodeId.value = null;
   resetLinkDraft();
 }
 function closeAddLink(): void {
   showAddLink.value = false;
+  linkConnectMode.value = false;
+  linkConnectFirstNodeId.value = null;
   linkDraftError.value = "";
 }
 function addLink(): void {
@@ -1300,6 +1527,8 @@ function addLink(): void {
     area: linkDraftArea.value.trim() || "0.0.0.0",
     localInterface,
     remoteInterface,
+    localInterfaceSource: interfaceOptionsByNode.value[from]?.includes(localInterface) ? "discovered" : "manual",
+    remoteInterfaceSource: interfaceOptionsByNode.value[to]?.includes(remoteInterface) ? "discovered" : "manual",
     cost: inheritedCost,
     hello: 10,
     dead: 40,
@@ -1365,6 +1594,8 @@ function addLink(): void {
     }
   }
   selectedLinkId.value = id;
+  inspectorTarget.value = { kind: "link", linkId: id };
+  selectedAreaId.value = null;
   closeAddLink();
 }
 function startNodeDrag(event: PointerEvent, node: OspfNode): void {
@@ -1414,6 +1645,26 @@ function dragNode(event: PointerEvent): void {
 function handleNodeClick(node: OspfNode): void {
   if (suppressNodeClickId.value === node.id) {
     suppressNodeClickId.value = null;
+    return;
+  }
+  if (linkConnectMode.value) {
+    if (!linkConnectFirstNodeId.value) {
+      linkConnectFirstNodeId.value = node.id;
+      linkDraftFrom.value = node.id;
+      linkDraftTo.value = nodes.value.find((item) => item.id !== node.id)?.id ?? "";
+      linkDraftError.value = `已选择 ${node.name}，请再选择一个不同节点`;
+      return;
+    }
+    if (linkConnectFirstNodeId.value === node.id) {
+      linkDraftError.value = "请选择另一个节点，不能创建自连接";
+      return;
+    }
+    linkDraftFrom.value = linkConnectFirstNodeId.value;
+    linkDraftTo.value = node.id;
+    linkDraftLocalInterface.value = "";
+    linkDraftRemoteInterface.value = "";
+    linkDraftError.value = "已选择两端节点，请确认自动发现的接口后创建链路";
+    linkConnectMode.value = false;
     return;
   }
   selectNode(node);
@@ -1495,12 +1746,16 @@ async function loadNodeInterfaces(): Promise<void> {
   const currentNodes = dashboard.value?.inventory.nodes ?? [];
   const entries = await Promise.all(
     currentNodes.map(async (node) => {
+      const cached = interfaceDiscoveryCache.get(node.id);
+      if (cached && cached.expiresAt > Date.now()) return [node.id, cached.interfaces] as const;
       try {
         const response = await api<{ interfaces: string[] }>(
           `/api/nodes/${encodeURIComponent(node.id)}/interfaces`,
           { signal: controller.signal },
         );
-        return [node.id, response.interfaces] as const;
+        const interfaces = [...new Set(response.interfaces.filter((item) => /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(item)))];
+        interfaceDiscoveryCache.set(node.id, { expiresAt: Date.now() + 30_000, interfaces });
+        return [node.id, interfaces] as const;
       } catch {
         return [node.id, []] as const;
       }
@@ -1574,9 +1829,11 @@ async function loadOspfDomains(): Promise<void> {
         layout: Record<string, { x: number; y: number }>;
       }>;
       layout: Record<string, { x: number; y: number }>;
+      inventoryRevision?: number | null;
     }>("/api/ospf", { signal: controller.signal });
     if (requestGeneration !== domainRequestGeneration || controller.signal.aborted) return;
     ospfDomainsState.value = "ready";
+    inventoryRevision.value = response.inventoryRevision ?? null;
     ospfDomains.value = response.domains;
     const selectedId = ospfDomainId.value;
     const domain = response.domains.find((item) => item.id === selectedId) ?? response.domains[0];
@@ -1695,36 +1952,29 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="ospf-workspace" aria-labelledby="ospfTitle">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">INTERIOR GATEWAY PROTOCOL</p>
-        <h2 id="ospfTitle">OSPF 管理</h2>
-        <p class="section-note">
-          在拓扑中建立链路并配置双方接口，拖动节点布局，拖动空白区域平移画布；按节点管理 OSPFv2/OSPFv3 实例。
-        </p>
-      </div>
-      <div v-if="ospfDomainsState === 'loading'" class="ospf-load-status" role="status" aria-live="polite">正在加载 OSPF 域…</div>
-      <div v-else-if="ospfDomainsState === 'error'" class="ospf-load-status error" role="alert">
-        <span>OSPF 域加载失败：{{ ospfLoadError }}</span>
-        <button class="secondary-button compact-button" type="button" @click="loadOspfDomains">重试</button>
-      </div>
-      <div class="ospf-actions" :aria-busy="ospfActionPending !== null">
-        <label class="ospf-domain-picker">OSPF 域
-          <select :value="ospfDomainId ?? ''" :disabled="ospfActionPending !== null || !ospfDomainsReady" @change="handleDomainSelection($event.currentTarget as HTMLSelectElement)">
-            <option value="" disabled>选择域</option>
-            <option v-for="domain in ospfDomains" :key="domain.id" :value="domain.id">{{ domain.name }}</option>
-          </select>
-        </label>
-        <input v-model.trim="ospfDomainName" class="ospf-domain-name" :disabled="ospfActionPending !== null || !ospfDomainsReady" aria-label="OSPF 域名称" placeholder="OSPF 域名称" />
-        <button class="secondary-button compact-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady" @click="newOspfDomain">新建域</button>
-        <button v-if="ospfDomainId" class="danger-button compact-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady" @click="deleteOspfDomain">删除域</button>
-        <button class="secondary-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady || !nodes.length" @click="previewOspf">
-          {{ ospfActionPending === "preview" ? "正在预检" : "预检配置" }}</button
-        ><button class="primary-button" type="button" :disabled="ospfActionPending !== null || !ospfDomainsReady || !nodes.length" @click="saveOspf">
-          {{ ospfActionPending === "save" ? "正在保存并应用" : "保存并应用" }}
-        </button>
-      </div>
-    </div>
+    <OspfOverview
+      :domains="ospfDomains"
+      :domain-id="ospfDomainId"
+      :domain-name="ospfDomainName"
+      :loading-state="ospfDomainsState"
+      :load-error="ospfLoadError"
+      :node-count="domainMemberCount"
+      :link-count="topologyLinks.length"
+      :nodes="overviewNodes"
+      :action-pending="ospfActionPending"
+      :ready="ospfDomainsReady"
+      :dirty="hasUnsavedDomainChanges"
+      @update:domain-name="ospfDomainName = $event"
+      @select="handleDomainSelectionById"
+      @new="newOspfDomain"
+      @remove="deleteOspfDomain"
+      @retry="loadOspfDomains"
+      @preview="previewOspf"
+      @runtime="focusRuntime"
+      @draft="saveDraftOspf"
+      @save="saveOspf"
+    />
+    <div class="ospf-workbench">
     <section class="ospf-topology-panel" :inert="ospfActionPending !== null">
       <div class="panel-head">
         <div>
@@ -1770,6 +2020,7 @@ onBeforeUnmount(() => {
         ref="topologyCanvas"
         class="ospf-topology-canvas"
         @wheel.prevent="handleTopologyWheel"
+        @click="handleTopologyClick"
         @pointerdown="startTopologyPan"
         @pointermove="moveTopologyPan"
         @pointerup="stopTopologyPan"
@@ -1825,11 +2076,13 @@ onBeforeUnmount(() => {
           type="button"
           class="ospf-link-hit-button"
           :aria-label="`编辑 ${link.from} 到 ${link.to} 的 OSPF 链路`"
+          :data-link-id="link.id"
           :style="{
             left: `${((linkGeometry(link).x1 + linkGeometry(link).x2) / 2 / TOPOLOGY_WIDTH) * 100}%`,
             top: `${((linkGeometry(link).y1 + linkGeometry(link).y2) / 2 / TOPOLOGY_HEIGHT) * 100}%`,
           }"
-          @click="selectLink(link)"
+          @pointerdown.stop
+          @click.stop.prevent="selectLink(link)"
         />
         <button
           v-for="node in nodes"
@@ -1837,12 +2090,13 @@ onBeforeUnmount(() => {
           type="button"
           class="ospf-topology-node"
           :draggable="false"
-          :class="{ selected: selectedNodeId === node.id, dragging: dragging?.id === node.id }"
+          :class="{ selected: selectedNodeId === node.id, dragging: dragging?.id === node.id, 'connect-source': linkConnectFirstNodeId === node.id }"
           :style="{
             left: `${(linkPosition(node.id).x / TOPOLOGY_WIDTH) * 100}%`,
             top: `${(linkPosition(node.id).y / TOPOLOGY_HEIGHT) * 100}%`,
           }"
           @pointerdown.stop="startNodeDrag($event, node)"
+          @pointermove.stop="dragNode"
           @pointerup.stop.prevent="stopNodeDrag"
           @pointercancel.stop.prevent="stopNodeDrag"
           @dragstart.prevent
@@ -1872,6 +2126,8 @@ onBeforeUnmount(() => {
             ×
           </button>
         </div>
+        <p v-if="linkConnectMode" class="ospf-connect-hint">连接模式：在拓扑上点击第一个节点，再点击第二个节点。也可以直接使用下方选择器。</p>
+        <p v-else class="ospf-connect-hint">已选择两端节点。接口列表来自自动发现，发现失败时可手动输入。</p>
         <div class="ospf-add-link-grid">
           <div class="field">
             <label>本端节点</label
@@ -1927,6 +2183,78 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+
+    </section>
+    <aside id="ospf-inspector" class="ospf-inspector" :inert="ospfActionPending !== null">
+      <div class="ospf-inspector-head">
+        <div>
+          <p class="eyebrow">当前编辑对象</p>
+          <h3>{{ inspectorTarget.kind === 'link' ? '链路配置' : inspectorTarget.kind === 'node' ? '节点配置' : inspectorTarget.kind === 'area' ? 'Area 配置' : 'OSPF 域' }}</h3>
+          <small v-if="hasUnsavedDomainChanges" class="ospf-draft-badge">有未保存修改</small>
+          <small v-else class="ospf-saved-badge">已保存</small>
+        </div>
+        <div class="ospf-inspector-head-actions">
+          <button class="secondary-button compact-button" type="button" :disabled="!displayedConfigPreview" @click="openOspfPreview">全屏查看</button>
+          <button v-if="inspectorTarget.kind !== 'domain'" class="icon-button" type="button" title="返回域摘要" aria-label="返回 OSPF 域摘要" @click="selectDomainInspector">×</button>
+        </div>
+      </div>
+      <nav class="ospf-inspector-nav" aria-label="OSPF 对象导航">
+        <button type="button" :class="{ active: inspectorTarget.kind === 'domain' }" @click="selectDomainInspector">域摘要</button>
+        <button type="button" :class="{ active: inspectorTarget.kind === 'node' }" @click="nodes[0] && selectNode(nodes[0])">节点</button>
+        <button type="button" :class="{ active: inspectorTarget.kind === 'link' }" @click="topologyLinks[0] && selectLink(topologyLinks[0])">链路</button>
+        <button type="button" :class="{ active: inspectorTarget.kind === 'area' }" @click="selectAreaInspector(configuredAreas[0] ?? '0.0.0.0')">Area</button>
+      </nav>
+      <div v-if="selectedNode" class="ospf-inspector-runtime-summary" aria-label="当前节点运行态摘要">
+        <button type="button" class="runtime-summary-card" @click="openRuntimeDetails('neighbors')"><strong>{{ selectedRuntime.neighbors }}</strong><span>邻居</span></button>
+        <button type="button" class="runtime-summary-card" @click="openRuntimeDetails('routes')"><strong>{{ selectedRuntime.routes }}</strong><span>OSPF 路由</span></button>
+        <button type="button" class="runtime-summary-card" @click="openRuntimeDetails('areas')"><strong>{{ selectedAreaDetails.length }}</strong><span>Area</span></button>
+      </div>
+      <div class="ospf-inspector-body">
+      <section v-if="inspectorTarget.kind === 'domain' || inspectorTarget.kind === 'area'" class="ospf-domain-inspector">
+        <div class="ospf-domain-health-strip"><strong>{{ domainMemberCount }} 个节点</strong><span>{{ topologyLinks.length }} 条链路 · {{ configuredAreas.length }} 个 Area</span></div>
+        <div v-if="inspectorTarget.kind === 'domain'" class="ospf-setup-card">
+          <div class="ospf-setup-card-head">
+            <div><p class="eyebrow">配置向导</p><h4>{{ setupTitle }}</h4></div>
+            <span class="ospf-setup-progress" aria-label="配置进度">{{ setupCompletedSteps }}/4</span>
+          </div>
+          <p>{{ setupDescription }}</p>
+          <ol class="ospf-setup-steps" aria-label="OSPF 配置步骤">
+            <li :class="{ done: setupNodeReady, active: setupCurrentStep === 'node' }">选择节点</li>
+            <li :class="{ done: setupLinkReady, active: setupCurrentStep === 'link' }">添加连接</li>
+            <li :class="{ done: setupAreaReady, active: setupCurrentStep === 'area' }">检查 Area</li>
+            <li :class="{ done: previewValidated, active: setupCurrentStep === 'preview' }">预检并应用</li>
+          </ol>
+          <button class="primary-button" type="button" :disabled="ospfActionPending !== null" @click="startNextOspfStep">{{ setupActionLabel }}</button>
+        </div>
+        <p v-if="!nodes.length" class="ospf-empty-state">当前库存没有可用节点。添加节点后即可从拓扑开始配置 OSPF。</p>
+        <p v-else-if="!topologyLinks.length" class="ospf-empty-state">还没有连接。点击拓扑上的“添加链路”，然后在画布中选择两个节点。</p>
+        <div class="ospf-area-inspector">
+          <div class="ospf-subheading"><div><h4>Area 管理</h4><small>Area 属于域级配置，链路只引用 Area。</small></div><button class="secondary-button compact-button" type="button" @click="addArea">＋ 添加 Area</button></div>
+          <div v-for="area in configuredAreas" :key="`inspector-area-${area}`" class="ospf-area-card" :class="{ selected: selectedAreaId === area }" @click="selectAreaInspector(area)">
+            <div class="ospf-subheading"><strong>Area {{ area }}</strong><span class="field-hint">{{ links.filter((link) => link.area === area).length }} 条链路</span><button v-if="area !== '0.0.0.0'" class="danger-button compact-button" type="button" @click.stop="removeArea(area)">删除</button></div>
+            <div class="ospf-area-summary"><span>{{ ensureAreaOptions(area).stub ? 'Stub' : ensureAreaOptions(area).nssa ? 'NSSA' : 'Normal' }}</span><span>{{ new Set(links.filter((link) => link.area === area).flatMap((link) => [link.from, link.to])).size }} 个节点</span><span>{{ (ensureAreaOptions(area).networks ?? []).length }} Networks</span></div>
+            <div v-if="selectedAreaId === area" class="ospf-area-compact-fields">
+              <label class="checkbox-inline"><input v-model="ensureAreaOptions(area).stub" type="checkbox" /> Stub</label><label class="checkbox-inline"><input v-model="ensureAreaOptions(area).nssa" type="checkbox" /> NSSA</label><label class="checkbox-inline"><input v-model="ensureAreaOptions(area).translator" type="checkbox" /> Translator</label><label class="field">Default Cost<input v-model.number="ensureAreaOptions(area).defaultCost" type="number" min="1" /></label>
+              <label class="field area-wide">Networks<input :value="areaListText(area, 'networks')" placeholder="192.0.2.0/24，多个前缀用逗号分隔" @input="setAreaListText(area, 'networks', ($event.currentTarget as HTMLInputElement).value)" /></label>
+            </div>
+          </div>
+          <details v-if="selectedAreaId" class="ospf-area-advanced-details" open>
+            <summary>Area 高级选项 · {{ selectedAreaId }}</summary>
+            <div class="ospf-advanced-grid">
+              <label class="checkbox-inline"><input v-model="ensureAreaOptions(selectedAreaId!).defaultNssa" type="checkbox" /> Default NSSA</label>
+              <label class="field">Summary<select v-model="ensureAreaOptions(selectedAreaId!).summary"><option :value="null">默认</option><option :value="true">启用</option><option :value="false">禁用</option></select></label>
+              <label class="field">Default Cost2<input v-model.number="ensureAreaOptions(selectedAreaId!).defaultCost2" type="number" min="1" /></label>
+              <label class="field">Translator Stability<input v-model.number="ensureAreaOptions(selectedAreaId!).translatorStability" type="number" min="1" /></label>
+            </div>
+            <div class="ospf-area-entry-groups">
+              <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>External</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(selectedAreaId!, 'external')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(selectedAreaId!).external ?? []" :key="`inspector-external-${index}`" class="ospf-area-entry-row external-entry"><input v-model="item.prefix" placeholder="198.51.100.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><input v-model.number="item.tag" type="number" min="0" max="4294967295" placeholder="Tag" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(selectedAreaId!, 'external', index)">×</button></div></div>
+              <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>Stubnet</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(selectedAreaId!, 'stubnets')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(selectedAreaId!).stubnets ?? []" :key="`inspector-stubnet-${index}`" class="ospf-area-entry-row stubnet-entry"><input v-model="item.prefix" placeholder="203.0.113.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><label class="checkbox-inline"><input v-model="item.summary" type="checkbox" /> Summary</label><input v-model.number="item.cost" type="number" min="1" max="16777215" placeholder="Cost" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(selectedAreaId!, 'stubnets', index)">×</button></div></div>
+            </div>
+            <div class="ospf-virtual-links"><div class="ospf-subheading"><h4>Virtual Link</h4><button class="secondary-button compact-button" type="button" @click="addVirtualLink">＋ 添加</button></div><div v-for="(item, index) in virtualLinks" :key="`inspector-vlink-${index}`" class="ospf-virtual-link-row"><input v-model="item.id" placeholder="对端 Router ID" /><input v-model="item.area" placeholder="传输 Area" /><input v-model.number="item.hello" type="number" min="1" placeholder="Hello" /><input v-model.number="item.dead" type="number" min="1" placeholder="Dead" /><select v-model="item.authentication"><option value="none">无认证</option><option value="simple">Simple</option><option value="cryptographic">Cryptographic</option></select><input v-model="item.password" type="password" placeholder="Password" /><button class="icon-button" type="button" title="删除" @click="virtualLinks.splice(index, 1)">×</button></div></div>
+          </details>
+          <p v-if="!configuredAreas.length" class="field-hint">尚未创建 Area。创建后可在此配置类型、前缀、默认 Cost 和 Virtual Link。</p>
+        </div>
+      </section>
       <div v-if="selectedLink" class="ospf-link-editor">
         <div class="ospf-link-endpoints">
           <div>
@@ -1935,7 +2263,7 @@ onBeforeUnmount(() => {
                 nodes.find((node) => node.id === selectedLink?.from)?.name
               }}
               · 接口</small
-            ><select v-model="selectedLink.localInterface">
+            ><select v-model="selectedLink.localInterface" @change="selectedLink.localInterfaceSource = 'discovered'">
               <option value="">请选择接口</option>
               <option
                 v-for="item in interfacesForNode(
@@ -1955,14 +2283,14 @@ onBeforeUnmount(() => {
                     : ""
                 }}
               </option>
-            </select>
+            </select><small class="field-hint">{{ selectedLink.localInterfaceSource === 'discovered' ? '已自动发现' : '手动指定或回退输入' }}</small><input v-model="selectedLink.localInterface" @input="selectedLink.localInterfaceSource = 'manual'" class="ospf-interface-manual" placeholder="手动输入接口名" autocomplete="off" />
           </div>
           <span>↔</span>
           <div>
             <small
               >{{ nodes.find((node) => node.id === selectedLink?.to)?.name }} ·
               接口</small
-            ><select v-model="selectedLink.remoteInterface">
+            ><select v-model="selectedLink.remoteInterface" @change="selectedLink.remoteInterfaceSource = 'discovered'">
               <option value="">请选择接口</option>
               <option
                 v-for="item in interfacesForNode(
@@ -1982,7 +2310,7 @@ onBeforeUnmount(() => {
                     : ""
                 }}
               </option>
-            </select>
+            </select><small class="field-hint">{{ selectedLink.remoteInterfaceSource === 'discovered' ? '已自动发现' : '手动指定或回退输入' }}</small><input v-model="selectedLink.remoteInterface" @input="selectedLink.remoteInterfaceSource = 'manual'" class="ospf-interface-manual" placeholder="手动输入接口名" autocomplete="off" />
           </div>
         </div>
         <div class="ospf-endpoint-mode" role="group" aria-label="正在编辑的 OSPF 端点">
@@ -2076,12 +2404,12 @@ onBeforeUnmount(() => {
           class="icon-button"
           type="button"
           title="关闭编辑"
-          @click="selectedLinkId = null"
+          @click="selectDomainInspector"
         >
           ×
           </button>
         </div>
-    </section>
+
     <div class="ospf-layout" :inert="ospfActionPending !== null">
       <aside class="ospf-node-panel">
         <div class="panel-head">
@@ -2119,10 +2447,10 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </aside>
-      <section class="ospf-editor">
+      <section v-show="inspectorTarget.kind === 'node' || inspectorTarget.kind === 'domain'" class="ospf-editor">
         <div class="ospf-editor-head">
           <div>
-            <p class="eyebrow">NODE CONFIGURATION</p>
+            <p class="eyebrow">节点配置</p>
             <h3>{{ selectedNode?.name }}</h3>
             <span>{{ selectedNode?.routerId }}</span>
           </div>
@@ -2231,10 +2559,10 @@ onBeforeUnmount(() => {
             <label class="field">Graceful Restart<select v-model="protocolOptions.gracefulRestartMode"><option value="aware">仅辅助（默认）</option><option value="on">启用</option><option value="off">禁用</option></select></label>
             <label class="field">重启等待（秒）<input v-model.number="protocolOptions.gracefulRestartTime" type="number" min="1" placeholder="120" /></label>
           </div>
-          <div v-if="configuredAreas.length" class="ospf-area-advanced">
-            <h4>Area 高级属性</h4>
+          <div v-if="inspectorTarget.kind === 'node'" class="ospf-area-advanced">
+            <div class="ospf-subheading"><h4>Area 管理</h4><button class="secondary-button compact-button" type="button" @click="addArea">＋ 添加 Area</button></div>
             <div v-for="area in configuredAreas" :key="area" class="ospf-area-card">
-              <strong>Area {{ area }}</strong>
+              <div class="ospf-subheading"><strong>Area {{ area }}</strong><button v-if="area !== '0.0.0.0'" class="danger-button compact-button" type="button" @click="removeArea(area)">删除 Area</button></div>
               <label class="checkbox-inline"><input v-model="ensureAreaOptions(area).stub" type="checkbox" /> Stub</label>
               <label class="checkbox-inline"><input v-model="ensureAreaOptions(area).nssa" type="checkbox" /> NSSA</label>
               <label class="checkbox-inline"><input v-model="ensureAreaOptions(area).translator" type="checkbox" /> Translator</label>
@@ -2245,8 +2573,8 @@ onBeforeUnmount(() => {
               <label class="field">Translator Stability<input v-model.number="ensureAreaOptions(area).translatorStability" type="number" min="1" /></label>
               <div class="ospf-area-entry-groups">
                 <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>Networks</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(area, 'networks')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(area).networks ?? []" :key="`network-${index}`" class="ospf-area-entry-row"><input v-model="item.prefix" placeholder="192.0.2.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(area, 'networks', index)">×</button></div></div>
-                <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>External</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(area, 'external')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(area).external ?? []" :key="`external-${index}`" class="ospf-area-entry-row"><input v-model="item.prefix" placeholder="198.51.100.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><input v-model.number="item.tag" type="number" min="0" max="4294967295" placeholder="Tag" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(area, 'external', index)">×</button></div></div>
-                <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>Stubnet</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(area, 'stubnets')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(area).stubnets ?? []" :key="`stubnet-${index}`" class="ospf-area-entry-row"><input v-model="item.prefix" placeholder="203.0.113.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><label class="checkbox-inline"><input v-model="item.summary" type="checkbox" /> Summary</label><input v-model.number="item.cost" type="number" min="1" max="16777215" placeholder="Cost" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(area, 'stubnets', index)">×</button></div></div>
+                <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>External</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(area, 'external')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(area).external ?? []" :key="`external-${index}`" class="ospf-area-entry-row external-entry"><input v-model="item.prefix" placeholder="198.51.100.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><input v-model.number="item.tag" type="number" min="0" max="4294967295" placeholder="Tag" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(area, 'external', index)">×</button></div></div>
+                <div class="ospf-area-entry-group"><div class="ospf-subheading"><strong>Stubnet</strong><button class="secondary-button compact-button" type="button" @click="addAreaEntry(area, 'stubnets')">＋ 添加</button></div><div v-for="(item, index) in ensureAreaOptions(area).stubnets ?? []" :key="`stubnet-${index}`" class="ospf-area-entry-row stubnet-entry"><input v-model="item.prefix" placeholder="203.0.113.0/24" /><label class="checkbox-inline"><input v-model="item.hidden" type="checkbox" /> Hidden</label><label class="checkbox-inline"><input v-model="item.summary" type="checkbox" /> Summary</label><input v-model.number="item.cost" type="number" min="1" max="16777215" placeholder="Cost" /><button class="icon-button" type="button" title="删除" @click="removeAreaEntry(area, 'stubnets', index)">×</button></div></div>
               </div>
             </div>
           </div>
@@ -2312,36 +2640,28 @@ onBeforeUnmount(() => {
         <pre v-if="displayedConfigPreview" class="ospf-preview">{{ displayedConfigPreview }}</pre>
       </aside>
     </div>
-    <dialog ref="runtimeDialog" class="route-dialog ospf-runtime-dialog" aria-labelledby="ospfRuntimeDialogTitle" @cancel.prevent="closeRuntimeDetails">
-      <div class="route-dialog-shell">
-        <header class="route-dialog-head">
-          <div>
-            <p class="eyebrow">OSPF RUNTIME</p>
-            <h2 id="ospfRuntimeDialogTitle">{{ runtimeDetailTitle }}</h2>
-            <span>{{ selectedNode?.name }} · {{ selectedNode?.routerId }}</span>
-          </div>
-          <button class="icon-button" type="button" title="关闭" aria-label="关闭 OSPF 运行详情" @click="closeRuntimeDetails">×</button>
-        </header>
-        <div v-if="runtimeDetailKind === 'neighbors'" class="ospf-runtime-detail-body">
-          <div v-if="selectedRuntime.neighborDetails.length === 0" class="route-dialog-state">
-            {{ neighborDetailsUnavailable ? `运行状态显示 ${selectedRuntime.neighbors} 个邻居，但当前实例未返回明细，请刷新服务后重试` : "当前没有邻居信息" }}
-          </div>
-          <div v-else class="ospf-runtime-table-wrap">
-            <table class="ospf-runtime-table"><thead><tr><th>协议</th><th>Router ID</th><th>状态</th><th>接口</th><th>邻居地址</th><th>Dead</th></tr></thead><tbody><tr v-for="(neighbor, index) in selectedRuntime.neighborDetails" :key="`${neighbor.version}-${neighbor.routerId}-${neighbor.address}-${index}`"><td>{{ neighbor.version === 'ospfv2' ? 'OSPFv2' : 'OSPFv3' }}</td><td>{{ neighbor.routerId }}</td><td><span :class="neighbor.state.toLowerCase().startsWith('full') ? 'runtime-state-up' : 'runtime-state-warn'">{{ neighbor.state }}</span></td><td>{{ neighbor.interface }}</td><td>{{ neighbor.address }}</td><td>{{ neighbor.deadTime ?? '-' }}</td></tr></tbody></table>
-          </div>
-        </div>
-        <div v-else-if="runtimeDetailKind === 'routes'" class="ospf-runtime-detail-body">
-          <div v-if="selectedRuntime.routeDetails.length === 0" class="route-dialog-state">
-            {{ routeDetailsUnavailable ? `运行状态显示 ${selectedRuntime.routes} 条 OSPF 路由，但当前实例未返回明细，请刷新服务后重试` : "当前没有已导入的 OSPF 路由" }}
-          </div>
-          <div v-else class="ospf-runtime-route-list"><article v-for="(route, index) in selectedRuntime.routeDetails" :key="`${route.version}-${route.prefix}-${index}`"><header><strong>{{ route.prefix }}</strong><span>{{ route.version === 'ospfv2' ? 'OSPFv2 / IPv4' : 'OSPFv3 / IPv6' }}</span></header><p>{{ route.summary }}</p><pre v-if="route.details">{{ route.details }}</pre></article><p v-if="selectedRuntime.routesTruncated" class="field-hint">路由数量较多，仅显示前 200 条。</p></div>
-        </div>
-        <div v-else class="ospf-runtime-detail-body">
-          <div v-if="selectedAreaDetails.length === 0" class="route-dialog-state">当前节点未配置 Area</div>
-          <div v-else class="ospf-area-detail-list"><article v-for="item in selectedAreaDetails" :key="item.area"><header><strong>Area {{ item.area }}</strong><span>{{ item.links.length }} 条链路</span></header><div v-for="link in item.links" :key="link.id" class="ospf-area-detail-link"><span>{{ link.localInterface }} ↔ {{ link.remoteInterface }}</span><span>Cost {{ link.cost }} · Hello {{ link.hello }} · Dead {{ link.dead }}</span><span>类型：{{ link.options?.type ?? 'ptp' }}</span></div><p v-if="item.options.stub || item.options.nssa || item.options.networks?.length || item.options.external?.length || item.options.stubnets?.length" class="field-hint">{{ item.options.stub ? 'Stub ' : '' }}{{ item.options.nssa ? 'NSSA ' : '' }}{{ item.options.networks?.length ? `Networks ${item.options.networks.length} ` : '' }}{{ item.options.external?.length ? `External ${item.options.external.length} ` : '' }}{{ item.options.stubnets?.length ? `Stubnet ${item.options.stubnets.length}` : '' }}</p></article></div>
-        </div>
+
       </div>
-    </dialog>
+    </aside>
+
+    </div>
+    <OspfRuntimeDrawer
+      :open="runtimeDetailKind !== null"
+      :kind="runtimeDetailKind"
+      :node-name="selectedNode?.name ?? ''"
+      :router-id="selectedNode?.routerId ?? ''"
+      :neighbors="selectedRuntime.neighborDetails"
+      :routes="selectedRuntime.routeDetails"
+      :routes-truncated="selectedRuntime.routesTruncated"
+      :neighbor-count="selectedRuntime.neighbors"
+      :route-count="selectedRuntime.routes"
+      :neighbor-details-unavailable="neighborDetailsUnavailable"
+      :route-details-unavailable="routeDetailsUnavailable"
+      :areas="selectedAreaDetails"
+      :error="selectedRuntime.error"
+      @close="closeRuntimeDetails"
+      @select-node="selectNode(selectedNode ?? nodes[0]!)"
+    />
     <dialog ref="previewDialog" class="route-dialog ospf-preview-dialog" aria-labelledby="ospfPreviewDialogTitle" @cancel.prevent="closeOspfPreview">
       <div class="route-dialog-shell">
         <header class="route-dialog-head">
@@ -2349,8 +2669,31 @@ onBeforeUnmount(() => {
           <button class="icon-button" type="button" title="关闭" aria-label="关闭 OSPF 配置预览" @click="closeOspfPreview">×</button>
         </header>
         <pre class="ospf-preview-fullscreen">{{ displayedConfigPreview }}</pre>
+        <section v-if="previewValidated && Object.keys(previewDiffByNode).length" class="ospf-preview-diff-summary" aria-label="节点配置变更摘要">
+          <h3>节点变更摘要</h3>
+          <div v-for="node in nodes.filter((item) => previewDiffByNode[item.id])" :key="`preview-diff-${node.id}`" class="ospf-preview-diff-row">
+            <strong>{{ node.name }}</strong>
+            <span v-if="!previewDiffByNode[node.id]?.valid" class="field-error">预检失败：{{ previewDiffByNode[node.id]?.error }}</span>
+            <span v-else-if="previewDiffByNode[node.id]?.changed">+{{ previewDiffByNode[node.id]?.added }} / −{{ previewDiffByNode[node.id]?.removed }} 行</span>
+            <span v-else class="field-hint">无配置变化</span>
+          </div>
+        </section>
+        <div v-if="previewValidated" class="dialog-actions ospf-preview-actions">
+          <span class="field-hint">服务端已完成所有受影响节点的预检。</span>
+          <button class="primary-button" type="button" @click="prepareApplyDialog">查看应用计划</button>
+        </div>
       </div>
     </dialog>
+    <OspfApplyDialog
+      :open="applyDialogOpen"
+      :domain-name="ospfDomainName"
+      :nodes="applyNodes"
+      :pending="ospfActionPending === 'save'"
+      :error="applyDialogError"
+      @close="closeApplyDialog"
+      @confirm="applyOspf"
+      @retry="applyOspf"
+    />
     <dialog ref="routePathDialog" class="route-dialog ospf-path-dialog" aria-labelledby="ospfPathDialogTitle" @cancel.prevent="closeRoutePath">
       <div class="route-dialog-shell">
         <header class="route-dialog-head">

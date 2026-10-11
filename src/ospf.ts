@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import net from "node:net";
-import type { ChannelPolicy, OspfAreaOptions, OspfDomain, OspfInterfaceOptions, OspfLink, OspfNodeConfig, OspfPasswordOptions, OspfProtocolOptions, OspfVersion, OspfVirtualLink } from "../packages/contracts/src/inventory.js";
+import type { ChannelPolicy, OspfArea, OspfAreaOptions, OspfDomain, OspfInterfaceOptions, OspfLink, OspfLinkEndpoint, OspfNodeConfig, OspfPasswordOptions, OspfProtocolOptions, OspfVersion, OspfVirtualLink } from "../packages/contracts/src/inventory.js";
 import { assertValidation, normalizeId, normalizeLabel } from "./bird-normalize-common.js";
 
 type RecordValue = Record<string, unknown>;
@@ -106,6 +106,128 @@ function validatePasswordForVersion(options: OspfPasswordOptions, authentication
   if (versions.includes("ospfv3")) {
     assertValidation(options.algorithm == null || String(options.algorithm).startsWith("hmac-"), `${label} OSPFv3 只能使用 HMAC 算法`);
   }
+}
+
+/**
+ * Accept the topology-first OSPF shape at the service boundary. The renderer
+ * still consumes the compact nodeConfigs/links shape, so this adapter keeps
+ * both API generations deterministic while domains are assembled in the UI.
+ */
+function adaptStructuredDomain(input: RecordValue): RecordValue {
+  if (!Array.isArray(input.members) && !Array.isArray(input.areas)) return input;
+  const rawMembers = Array.isArray(input.members) ? input.members : [];
+  const rawAreas = Array.isArray(input.areas) ? input.areas : [];
+  const areaById = new Map<string, RecordValue>();
+  for (const [index, raw] of rawAreas.entries()) {
+    const area = record(raw, `OSPF Area ${index + 1}`);
+    const id = String(area.id ?? `area_${index + 1}`).trim();
+    assertValidation(id.length > 0, `OSPF Area ${index + 1} ID 不能为空`);
+    assertValidation(!areaById.has(id), `OSPF Area ID ${id} 重复`);
+    const type = area.type ?? "normal";
+    assertValidation(type === "normal" || type === "stub" || type === "nssa", `OSPF Area ${index + 1} 类型无效`);
+    areaById.set(id, area);
+  }
+  const memberVirtualLinks = new Map<string, OspfVirtualLink[]>();
+  for (const raw of rawAreas) {
+    const area = record(raw, "OSPF Area");
+    const areaName = String(area.area ?? "").trim();
+    assertValidation(net.isIP(areaName) === 4, `OSPF Area ${areaName} 必须是 IPv4 Area ID`);
+    for (const rawLink of Array.isArray(area.virtualLinks) ? area.virtualLinks : []) {
+      const link = record(rawLink, "OSPF 虚链路");
+      const nodeId = String(link.nodeId ?? "").trim();
+      if (!nodeId) continue;
+      const list = memberVirtualLinks.get(nodeId) ?? [];
+      list.push({ ...link, id: String(link.id ?? "").trim(), area: String(link.area ?? areaName).trim(), nodeId } as OspfVirtualLink);
+      memberVirtualLinks.set(nodeId, list);
+    }
+  }
+  const nodeConfigs = rawMembers.map((raw, index) => {
+    const member = record(raw, `OSPF 成员 ${index + 1}`);
+    const policies = member.policies && typeof member.policies === "object" && !Array.isArray(member.policies)
+      ? record(member.policies, `OSPF 成员 ${index + 1} 策略`)
+      : {};
+    const channel = (version: OspfVersion, direction: "import" | "export"): unknown => {
+      const versionPolicy = policies[version];
+      if (!versionPolicy || typeof versionPolicy !== "object" || Array.isArray(versionPolicy)) return undefined;
+      return (versionPolicy as RecordValue)[direction];
+    };
+    const define = (version: OspfVersion): unknown => {
+      const versionPolicy = policies[version];
+      return versionPolicy && typeof versionPolicy === "object" && !Array.isArray(versionPolicy)
+        ? (versionPolicy as RecordValue).exportDefineId
+        : undefined;
+    };
+    const areaOptions: Record<string, OspfAreaOptions> = {};
+    for (const rawArea of rawAreas) {
+      const area = record(rawArea, "OSPF Area");
+      const areaName = String(area.area ?? "").trim();
+      const options = area.options && typeof area.options === "object" && !Array.isArray(area.options) ? record(area.options, "OSPF Area options") : {};
+      const prefixes = Array.isArray(area.prefixes) ? area.prefixes.filter((item) => item && typeof item === "object") as RecordValue[] : [];
+      const prefixList = (kind: string) => prefixes.filter((item) => item.kind === kind).map((item) => ({ ...item, prefix: String(item.prefix ?? "").trim() }));
+      areaOptions[areaName] = {
+        ...options,
+        stub: area.type === "stub" || options.stub === true,
+        nssa: area.type === "nssa" || options.nssa === true,
+        networks: prefixList("network"),
+        external: prefixList("external"),
+        stubnets: prefixList("stubnet"),
+      } as OspfAreaOptions;
+    }
+    const nodeId = String(member.nodeId ?? "").trim();
+    return {
+      nodeId,
+      enabled: member.enabled !== false,
+      versions: member.versions,
+      routerId: member.routerId,
+      bfd: member.bfd === true,
+      gracefulRestart: member.gracefulRestart === true,
+      redistributeStatic: member.redistributeStatic === true,
+      protocolOptions: member.protocolOptions,
+      importPolicies: { ospfv2: channel("ospfv2", "import"), ospfv3: channel("ospfv3", "import") },
+      exportPolicies: { ospfv2: channel("ospfv2", "export"), ospfv3: channel("ospfv3", "export") },
+      exportDefineIds: { ospfv2: define("ospfv2"), ospfv3: define("ospfv3") },
+      areaOptions,
+      virtualLinks: memberVirtualLinks.get(nodeId) ?? [],
+    };
+  });
+  const links = (Array.isArray(input.links) ? input.links : []).map((raw, index) => {
+    const link = record(raw, `OSPF 链路 ${index + 1}`);
+    const endpoints = Array.isArray(link.endpoints) ? link.endpoints : [];
+    assertValidation(endpoints.length === 2, `OSPF 链路 ${index + 1} 必须配置两个端点`);
+    const first = record(endpoints[0], `OSPF 链路 ${index + 1} 本端`);
+    const second = record(endpoints[1], `OSPF 链路 ${index + 1} 对端`);
+    const areaId = String(link.areaId ?? "").trim();
+    const area = areaById.get(areaId);
+    assertValidation(area !== undefined, `OSPF 链路 ${index + 1} 引用了不存在的 Area`);
+    const endpointValue = (endpoint: RecordValue): OspfLinkEndpoint => ({
+      nodeId: String(endpoint.nodeId ?? "").trim(),
+      interfaceName: String(endpoint.interfaceName ?? "").trim(),
+      interfaceSource: endpoint.interfaceSource === "discovered" ? "discovered" : "manual",
+      options: endpoint.options && typeof endpoint.options === "object" && !Array.isArray(endpoint.options) ? endpoint.options as OspfInterfaceOptions : {},
+    });
+    const left = endpointValue(first); const right = endpointValue(second);
+    const authInput = link.authentication;
+    const auth = typeof authInput === "string"
+      ? authInput
+      : authInput && typeof authInput === "object" && !Array.isArray(authInput)
+        ? String((authInput as RecordValue).mode ?? (authInput as RecordValue).type ?? (authInput as RecordValue).method ?? "none")
+        : "none";
+    return {
+      ...link,
+      area: String(area!.area ?? "").trim(),
+      fromNodeId: left.nodeId,
+      toNodeId: right.nodeId,
+      localInterface: left.interfaceName,
+      remoteInterface: right.interfaceName,
+      localOptions: left.options,
+      remoteOptions: right.options,
+      authentication: auth,
+      localInterfaceSource: left.interfaceSource,
+      remoteInterfaceSource: right.interfaceSource,
+      endpoints: [left, right],
+    };
+  });
+  return { ...input, nodeConfigs, links };
 }
 
 export function ospfLinkOptions(link: OspfLink, nodeId: string): OspfInterfaceOptions {
@@ -234,7 +356,7 @@ function nodeConfig(value: unknown, index: number): OspfNodeConfig {
 }
 
 export function normalizeOspfDomain(inputValue: unknown): OspfDomain {
-  const input = record(inputValue, "OSPF 域参数不能为空");
+  const input = adaptStructuredDomain(record(inputValue, "OSPF 域参数不能为空"));
   const nodeConfigs = (Array.isArray(input.nodeConfigs) ? input.nodeConfigs : []).map(nodeConfig);
   assertValidation(new Set(nodeConfigs.map((item) => item.nodeId)).size === nodeConfigs.length, "OSPF 域节点配置不能重复");
   const links: OspfLink[] = (Array.isArray(input.links) ? input.links : []).map((value, index) => {
@@ -315,6 +437,13 @@ export function normalizeOspfDomain(inputValue: unknown): OspfDomain {
       options: localOptions,
       localOptions,
       remoteOptions,
+      ...(item.areaId == null ? {} : { areaId: String(item.areaId).trim() }),
+      ...(Array.isArray(item.endpoints) && item.endpoints.length === 2 ? { endpoints: ([
+        { nodeId: String((item.endpoints[0] as RecordValue).nodeId ?? ""), interfaceName: String((item.endpoints[0] as RecordValue).interfaceName ?? ""), interfaceSource: (item.endpoints[0] as RecordValue).interfaceSource === "discovered" ? "discovered" as const : "manual" as const, options: localOptions },
+        { nodeId: String((item.endpoints[1] as RecordValue).nodeId ?? ""), interfaceName: String((item.endpoints[1] as RecordValue).interfaceName ?? ""), interfaceSource: (item.endpoints[1] as RecordValue).interfaceSource === "discovered" ? "discovered" as const : "manual" as const, options: remoteOptions },
+      ]) } : {}),
+      ...(item.localInterfaceSource === "discovered" ? { localInterfaceSource: "discovered" as const } : item.localInterfaceSource === "manual" ? { localInterfaceSource: "manual" as const } : {}),
+      ...(item.remoteInterfaceSource === "discovered" ? { remoteInterfaceSource: "discovered" as const } : item.remoteInterfaceSource === "manual" ? { remoteInterfaceSource: "manual" as const } : {}),
     };
   });
   const areasByNode = new Map<string, Set<string>>();
@@ -377,7 +506,63 @@ export function normalizeOspfDomain(inputValue: unknown): OspfDomain {
       assertValidation(sharedInterfaceOptionsSignature(previousOptions) === sharedInterfaceOptionsSignature(currentOptions), `OSPF 接口 ${key} 的共享链路高级参数必须一致`);
     }
   }
-  return { id: normalizeId(input.id, "OSPF 域 ID"), name: normalizeLabel(input.name, "OSPF 域名称"), nodeConfigs, links, layout };
+  const normalized = { id: normalizeId(input.id, "OSPF 域 ID"), name: normalizeLabel(input.name, "OSPF 域名称"), nodeConfigs, links, layout };
+  if (Array.isArray(input.members) || Array.isArray(input.areas)) {
+    return toOspfDomainModel({ ...normalized, areas: Array.isArray(input.areas) ? input.areas as unknown as OspfArea[] : undefined });
+  }
+  return normalized;
+}
+
+/** Project the renderer-friendly record into the topology-first API shape. */
+export function toOspfDomainModel(domain: OspfDomain): OspfDomain {
+  const suppliedAreas = domain.areas ?? [];
+  const areaNames = [...new Set([
+    ...domain.links.map((link) => link.area),
+    ...domain.nodeConfigs.flatMap((config) => Object.keys(config.areaOptions ?? {})),
+    ...domain.nodeConfigs.flatMap((config) => (config.virtualLinks ?? []).map((link) => link.area)),
+    ...suppliedAreas.map((area) => area.area),
+  ])].filter(Boolean);
+  const areas = areaNames.map((area) => {
+    const supplied = suppliedAreas.find((item) => item.area === area);
+    const source = supplied?.options ?? domain.nodeConfigs.find((config) => config.areaOptions?.[area])?.areaOptions?.[area] ?? {};
+    const prefixes = [
+      ...(source.networks ?? []).map((item) => ({ prefix: item.prefix, kind: "network" as const })),
+      ...(source.external ?? []).map((item) => ({ prefix: item.prefix, kind: "external" as const })),
+      ...(source.stubnets ?? []).map((item) => ({ prefix: item.prefix, kind: "stubnet" as const })),
+    ];
+    return {
+      id: supplied?.id ?? `area_${area.replace(/[^A-Za-z0-9]+/g, "_")}`,
+      area,
+      type: supplied?.type ?? (source.nssa ? "nssa" as const : source.stub ? "stub" as const : "normal" as const),
+      options: { ...source },
+      prefixes: supplied?.prefixes?.length ? supplied.prefixes : prefixes,
+      virtualLinks: supplied?.virtualLinks?.length ? supplied.virtualLinks : domain.nodeConfigs.flatMap((config) => (config.virtualLinks ?? []).filter((link) => link.area === area).map((link) => ({ ...link, nodeId: config.nodeId }))),
+    };
+  });
+  const areaIds = new Map(areas.map((area) => [area.area, area.id]));
+  const members = domain.nodeConfigs.map((config) => ({
+    nodeId: config.nodeId,
+    enabled: config.enabled,
+    routerId: config.routerId,
+    versions: config.versions,
+    bfd: config.bfd,
+    gracefulRestart: config.gracefulRestart,
+    redistributeStatic: config.redistributeStatic,
+    protocolOptions: config.protocolOptions ?? {},
+    policies: {
+      ospfv2: { import: config.importPolicies.ospfv2, export: config.exportPolicies.ospfv2, exportDefineId: config.exportDefineIds.ospfv2 },
+      ospfv3: { import: config.importPolicies.ospfv3, export: config.exportPolicies.ospfv3, exportDefineId: config.exportDefineIds.ospfv3 },
+    },
+  }));
+  const links = domain.links.map((link) => ({
+    ...link,
+    areaId: areaIds.get(link.area) ?? `area_${link.area.replace(/[^A-Za-z0-9]+/g, "_")}`,
+    endpoints: [
+      { nodeId: link.fromNodeId, interfaceName: link.localInterface, interfaceSource: link.localInterfaceSource ?? "manual" as const, options: link.localOptions ?? link.options ?? {} },
+      { nodeId: link.toNodeId, interfaceName: link.remoteInterface, interfaceSource: link.remoteInterfaceSource ?? "manual" as const, options: link.remoteOptions ?? link.options ?? {} },
+    ] as [OspfLinkEndpoint, OspfLinkEndpoint],
+  }));
+  return { ...domain, members, areas, links };
 }
 
 export function ospfDomainNodeIds(domain: OspfDomain): string[] {

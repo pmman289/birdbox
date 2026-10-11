@@ -179,7 +179,7 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
       }
       return { nodeId, name: node.name, runtime: await inspectOspfRuntimeBounded(node, protocolNames, options.ospfRuntimeTimeoutMs ?? OSPF_RUNTIME_NODE_TIMEOUT_MS, options.inspectOspfRuntime) };
     }));
-    return jsonReply(reply, 200, { domainId: domain.id, nodes: results });
+    return jsonReply(reply, 200, { domainId: domain.id, lastCheckedAt: new Date().toISOString(), nodes: results });
   });
 
   app.get<{

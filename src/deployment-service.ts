@@ -189,12 +189,13 @@ export class DeploymentService {
           }
           const state = await this.#options.store.replace(current, inventory);
           committed = true;
+          const transactionId = journal?.id ?? `deployment_${randomUUID()}`;
           if (journal) {
             await this.clearJournal(journal);
             journal = null;
           }
           logger.info("部署变更已提交", { nodeCount: nodes.length, nodeIds: nodeIds.join(",") });
-          return { state, result: mutation, deployment: this.#report(inventory, nodeIds) };
+          return { state, result: mutation, deployment: this.#report(inventory, nodeIds, transactionId) };
         } catch (error) {
           const code = (error as Partial<{ code: unknown }>).code;
           const retryableConflict = code === "STATE_CONFLICT" && attempt + 1 < INVENTORY_COMMIT_RETRIES;
@@ -322,12 +323,15 @@ export class DeploymentService {
     };
   }
 
-  #report(inventory: Inventory, nodeIds: string[]): DeploymentReport {
+  #report(inventory: Inventory, nodeIds: string[], transactionId = `deployment_${randomUUID()}`): DeploymentReport {
     const ids = uniqueNodeIds(nodeIds);
     return {
       applied: true,
+      transactionId,
       nodeIds: ids,
       nodes: inventory.nodes.filter((node) => ids.includes(node.id)).map((node) => ({ id: node.id, name: node.name })),
+      nodeResults: ids.map((nodeId) => ({ nodeId, status: "success" as const, error: null })),
+      rollback: { attempted: false, succeeded: true, error: null },
       sessions: inventory.sessions
         .filter((session) => ids.includes(session.nodeId))
         .map((session) => ({ id: session.id, nodeId: session.nodeId, protocolName: session.protocolName })),

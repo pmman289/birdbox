@@ -8,6 +8,7 @@ import type {
   ManagedNode,
   Peer,
   PolicyDefine,
+  OspfDomain,
 } from "../packages/contracts/src/inventory.js";
 
 import {
@@ -369,6 +370,11 @@ export class InventoryStore {
     return this.#track(normalizeStoredInventory(record.value), record.revision);
   }
 
+  /** Return the CAS revision associated with a snapshot returned by read(). */
+  revisionOf(value: Inventory): number | null {
+    return this.revisions.get(value) ?? null;
+  }
+
   async #readNormalized(): Promise<Inventory> {
     for (let attempt = 0; attempt < NORMALIZATION_RETRIES; attempt += 1) {
       let record = await this.database.readState<unknown>(this.stateKey);
@@ -510,6 +516,26 @@ export class InventoryStore {
       }
       throw error;
     }
+  }
+
+  /** Candidate drafts live separately from active inventory, so unrelated
+   * deployments cannot accidentally publish an unapplied OSPF change. */
+  async readOspfDrafts(): Promise<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>> {
+    return (await this.database.readState<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>>(`${this.stateKey}_ospf_drafts`))?.value ?? {};
+  }
+
+  async saveOspfDraft(domain: OspfDomain, inventoryRevision: number | null): Promise<void> {
+    await this.database.mutateState<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>, void>(`${this.stateKey}_ospf_drafts`, {}, (drafts) => ({
+      value: { ...drafts, [domain.id]: { domain, inventoryRevision, savedAt: new Date().toISOString() } },
+    }));
+  }
+
+  async deleteOspfDraft(domainId: string): Promise<void> {
+    await this.database.mutateState<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>, void>(`${this.stateKey}_ospf_drafts`, {}, (drafts) => {
+      const next = { ...drafts };
+      delete next[domainId];
+      return { value: next };
+    });
   }
 
   async mutate<Result>(mutator: (draft: Inventory) => Promise<Result> | Result): Promise<{ state: Inventory; result: Result | undefined }> {

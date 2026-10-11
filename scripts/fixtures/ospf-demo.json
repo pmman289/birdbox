@@ -1,0 +1,931 @@
+{
+  "version": 28,
+  "nodes": [
+    {
+      "id": "core_a",
+      "kind": "managed-node",
+      "name": "Core Router A",
+      "transport": "agent",
+      "sshHost": null,
+      "sshPort": null,
+      "sshUser": null,
+      "sshIdentity": "default",
+      "deploymentMode": "include",
+      "mainConfigPath": "/etc/bird/bird.conf",
+      "generatedConfigPath": "/var/lib/birdbox/generated.conf",
+      "socketPath": "/run/bird/bird.ctl",
+      "routerId": "192.0.2.11",
+      "igpAddress": "10.10.0.11",
+      "listenPort": 179
+    },
+    {
+      "id": "core_b",
+      "kind": "managed-node",
+      "name": "Core Router B",
+      "transport": "agent",
+      "sshHost": null,
+      "sshPort": null,
+      "sshUser": null,
+      "sshIdentity": "default",
+      "deploymentMode": "include",
+      "mainConfigPath": "/etc/bird/bird.conf",
+      "generatedConfigPath": "/var/lib/birdbox/generated.conf",
+      "socketPath": "/run/bird/bird.ctl",
+      "routerId": "192.0.2.12",
+      "igpAddress": "10.10.0.12",
+      "listenPort": 179
+    },
+    {
+      "id": "edge_c",
+      "kind": "managed-node",
+      "name": "Edge Router C",
+      "transport": "agent",
+      "sshHost": null,
+      "sshPort": null,
+      "sshUser": null,
+      "sshIdentity": "default",
+      "deploymentMode": "include",
+      "mainConfigPath": "/etc/bird/bird.conf",
+      "generatedConfigPath": "/var/lib/birdbox/generated.conf",
+      "socketPath": "/run/bird/bird.ctl",
+      "routerId": "192.0.2.13",
+      "igpAddress": "10.10.0.13",
+      "listenPort": 179
+    }
+  ],
+  "peers": [],
+  "defines": [
+    {
+      "id": "ospf_demo_v4",
+      "nodeIds": null,
+      "label": "OSPF IPv4 Export",
+      "name": "OSPF_DEMO_V4",
+      "type": "cidr4",
+      "entries": [
+        "198.51.100.0/24"
+      ],
+      "enabled": true,
+      "entrySource": {
+        "kind": "manual"
+      },
+      "sync": {
+        "status": "never",
+        "lastAttemptAt": null,
+        "lastSuccessAt": null,
+        "nextRefreshAt": null,
+        "error": null,
+        "contentHash": null
+      }
+    },
+    {
+      "id": "ospf_demo_v6",
+      "nodeIds": null,
+      "label": "OSPF IPv6 Export",
+      "name": "OSPF_DEMO_V6",
+      "type": "cidr6",
+      "entries": [
+        "2001:db8:10::/48"
+      ],
+      "enabled": true,
+      "entrySource": {
+        "kind": "manual"
+      },
+      "sync": {
+        "status": "never",
+        "lastAttemptAt": null,
+        "lastSuccessAt": null,
+        "nextRefreshAt": null,
+        "error": null,
+        "contentHash": null
+      }
+    }
+  ],
+  "functions": [],
+  "filters": [],
+  "rpki": [],
+  "staticProtocols": [],
+  "directProtocols": [],
+  "kernelProtocols": [],
+  "sourcePolicies": [],
+  "sessions": [],
+  "ibgpDomains": [],
+  "ospfDomains": [
+    {
+      "id": "ospf_demo",
+      "name": "Demo · 双栈骨干与 NSSA",
+      "members": [
+        {
+          "nodeId": "core_a",
+          "enabled": true,
+          "routerId": "192.0.2.11",
+          "versions": [
+            "ospfv2",
+            "ospfv3"
+          ],
+          "bfd": true,
+          "gracefulRestart": true,
+          "redistributeStatic": false,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        },
+        {
+          "nodeId": "core_b",
+          "enabled": true,
+          "routerId": "192.0.2.12",
+          "versions": [
+            "ospfv2",
+            "ospfv3"
+          ],
+          "bfd": true,
+          "gracefulRestart": true,
+          "redistributeStatic": false,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        },
+        {
+          "nodeId": "edge_c",
+          "enabled": true,
+          "routerId": "192.0.2.13",
+          "versions": [
+            "ospfv2"
+          ],
+          "bfd": false,
+          "gracefulRestart": true,
+          "redistributeStatic": true,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        }
+      ],
+      "areas": [
+        {
+          "id": "area_0_0_0_0",
+          "area": "0.0.0.0",
+          "type": "normal",
+          "options": {
+            "summary": null
+          },
+          "prefixes": [
+            {
+              "prefix": "10.10.0.0/24",
+              "kind": "network"
+            },
+            {
+              "prefix": "192.0.2.0/24",
+              "kind": "network"
+            }
+          ],
+          "virtualLinks": []
+        },
+        {
+          "id": "area_0_0_0_10",
+          "area": "0.0.0.10",
+          "type": "nssa",
+          "options": {
+            "summary": true,
+            "defaultNssa": true,
+            "defaultCost": 20,
+            "translator": true,
+            "translatorStability": 300
+          },
+          "prefixes": [
+            {
+              "prefix": "10.20.0.0/24",
+              "kind": "network"
+            },
+            {
+              "prefix": "198.51.100.0/24",
+              "kind": "external"
+            },
+            {
+              "prefix": "10.20.10.0/24",
+              "kind": "stubnet"
+            }
+          ],
+          "virtualLinks": []
+        }
+      ],
+      "links": [
+        {
+          "id": "link_core",
+          "areaId": "area_0_0_0_0",
+          "endpoints": [
+            {
+              "nodeId": "core_a",
+              "interfaceName": "eth1",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 120
+              }
+            },
+            {
+              "nodeId": "core_b",
+              "interfaceName": "eth1",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 110
+              }
+            }
+          ],
+          "cost": 10,
+          "hello": 10,
+          "dead": 40,
+          "authentication": {
+            "method": "none"
+          }
+        },
+        {
+          "id": "link_edge",
+          "areaId": "area_0_0_0_10",
+          "endpoints": [
+            {
+              "nodeId": "core_b",
+              "interfaceName": "eth2",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "broadcast",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 100,
+                "password": "link-demo-secret",
+                "passwordOptions": {
+                  "id": 2,
+                  "algorithm": "hmac-sha256"
+                }
+              }
+            },
+            {
+              "nodeId": "edge_c",
+              "interfaceName": "wan0",
+              "interfaceSource": "manual",
+              "options": {
+                "type": "nbma",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [
+                  {
+                    "address": "10.20.0.1",
+                    "eligible": true
+                  }
+                ],
+                "password": "edge-demo",
+                "passwordOptions": {
+                  "id": 3,
+                  "algorithm": "hmac-sha256"
+                }
+              }
+            }
+          ],
+          "cost": 25,
+          "hello": 5,
+          "dead": 20,
+          "authentication": {
+            "method": "md5",
+            "password": "link-demo-secret",
+            "passwordOptions": {
+              "id": 2,
+              "algorithm": "hmac-sha256"
+            }
+          }
+        },
+        {
+          "id": "link_parallel",
+          "areaId": "area_0_0_0_0",
+          "endpoints": [
+            {
+              "nodeId": "core_a",
+              "interfaceName": "eth2",
+              "interfaceSource": "manual",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": []
+              }
+            },
+            {
+              "nodeId": "core_b",
+              "interfaceName": "eth3",
+              "interfaceSource": "manual",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": []
+              }
+            }
+          ],
+          "cost": 10,
+          "hello": 10,
+          "dead": 40,
+          "authentication": {
+            "method": "none"
+          }
+        }
+      ],
+      "layout": {
+        "core_a": {
+          "x": 800,
+          "y": 600,
+          "locked": false
+        },
+        "core_b": {
+          "x": 1200,
+          "y": 600,
+          "locked": false
+        },
+        "edge_c": {
+          "x": 1500,
+          "y": 800,
+          "locked": false
+        }
+      }
+    },
+    {
+      "id": "ospf_lab",
+      "name": "Demo · Virtual Link 实验室",
+      "members": [
+        {
+          "nodeId": "core_a",
+          "enabled": true,
+          "routerId": "192.0.2.11",
+          "versions": [
+            "ospfv2",
+            "ospfv3"
+          ],
+          "bfd": true,
+          "gracefulRestart": true,
+          "redistributeStatic": false,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        },
+        {
+          "nodeId": "core_b",
+          "enabled": true,
+          "routerId": "192.0.2.12",
+          "versions": [
+            "ospfv2",
+            "ospfv3"
+          ],
+          "bfd": true,
+          "gracefulRestart": true,
+          "redistributeStatic": false,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        },
+        {
+          "nodeId": "edge_c",
+          "enabled": true,
+          "routerId": "192.0.2.13",
+          "versions": [
+            "ospfv2"
+          ],
+          "bfd": false,
+          "gracefulRestart": true,
+          "redistributeStatic": true,
+          "protocolOptions": {
+            "rfc1583compat": false,
+            "rfc5838": true,
+            "instanceId": null,
+            "stubRouter": false,
+            "tick": null,
+            "ecmp": true,
+            "ecmpLimit": 4,
+            "mergeExternal": true,
+            "gracefulRestartMode": "aware",
+            "gracefulRestartTime": 120
+          },
+          "policies": {
+            "ospfv2": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v4"
+            },
+            "ospfv3": {
+              "import": {
+                "mode": "combined",
+                "formAction": "all",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "export": {
+                "mode": "combined",
+                "formAction": "cidr",
+                "filterId": null,
+                "steps": [
+                  {
+                    "type": "form"
+                  }
+                ]
+              },
+              "exportDefineId": "ospf_demo_v6"
+            }
+          }
+        }
+      ],
+      "areas": [
+        {
+          "id": "area_0_0_0_0",
+          "area": "0.0.0.0",
+          "type": "normal",
+          "options": {
+            "summary": null
+          },
+          "prefixes": [
+            {
+              "prefix": "10.10.0.0/24",
+              "kind": "network"
+            },
+            {
+              "prefix": "192.0.2.0/24",
+              "kind": "network"
+            }
+          ],
+          "virtualLinks": []
+        },
+        {
+          "id": "area_0_0_0_10",
+          "area": "0.0.0.10",
+          "type": "normal",
+          "options": {},
+          "prefixes": [
+            {
+              "prefix": "10.20.0.0/24",
+              "kind": "network"
+            },
+            {
+              "prefix": "198.51.100.0/24",
+              "kind": "external"
+            },
+            {
+              "prefix": "10.20.10.0/24",
+              "kind": "stubnet"
+            }
+          ],
+          "virtualLinks": [
+            {
+              "id": "192.0.2.13",
+              "nodeId": "core_a",
+              "area": "0.0.0.10",
+              "hello": 10,
+              "dead": 40,
+              "authentication": "none",
+              "passwordOptions": {}
+            }
+          ]
+        }
+      ],
+      "links": [
+        {
+          "id": "lab_link_core",
+          "areaId": "area_0_0_0_0",
+          "endpoints": [
+            {
+              "nodeId": "core_a",
+              "interfaceName": "lab_eth1",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 120
+              }
+            },
+            {
+              "nodeId": "core_b",
+              "interfaceName": "lab_eth1",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "ptp",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 110
+              }
+            }
+          ],
+          "cost": 10,
+          "hello": 10,
+          "dead": 40,
+          "authentication": {
+            "method": "none"
+          }
+        },
+        {
+          "id": "lab_link_edge",
+          "areaId": "area_0_0_0_10",
+          "endpoints": [
+            {
+              "nodeId": "core_b",
+              "interfaceName": "lab_eth2",
+              "interfaceSource": "discovered",
+              "options": {
+                "type": "broadcast",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [],
+                "priority": 100,
+                "password": "link-demo-secret",
+                "passwordOptions": {
+                  "id": 2,
+                  "algorithm": "hmac-sha256"
+                }
+              }
+            },
+            {
+              "nodeId": "edge_c",
+              "interfaceName": "lab_wan0",
+              "interfaceSource": "manual",
+              "options": {
+                "type": "nbma",
+                "deadMode": "count",
+                "checkLink": true,
+                "ttlSecurity": "off",
+                "bfd": true,
+                "neighbors": [
+                  {
+                    "address": "10.20.0.1",
+                    "eligible": true
+                  }
+                ],
+                "password": "edge-demo",
+                "passwordOptions": {
+                  "id": 3,
+                  "algorithm": "hmac-sha256"
+                }
+              }
+            }
+          ],
+          "cost": 25,
+          "hello": 5,
+          "dead": 20,
+          "authentication": {
+            "method": "md5",
+            "password": "link-demo-secret",
+            "passwordOptions": {
+              "id": 2,
+              "algorithm": "hmac-sha256"
+            }
+          }
+        }
+      ],
+      "layout": {
+        "core_a": {
+          "x": 800,
+          "y": 600,
+          "locked": false
+        },
+        "core_b": {
+          "x": 1200,
+          "y": 600,
+          "locked": false
+        },
+        "edge_c": {
+          "x": 1500,
+          "y": 800,
+          "locked": false
+        }
+      }
+    }
+  ],
+  "ospfLayout": {}
+}
