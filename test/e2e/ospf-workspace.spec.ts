@@ -120,8 +120,12 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
     if (route.request().method() === "GET") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ domains: [domain], layout: domain.layout, inventory }) });
     return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ domain, inventory, deployment: { applied: true, nodeIds: nodes.map((node) => node.id), nodes, sessions: [] }, events: [] }) });
   });
+  await page.route("**/api/ospf/ospf_e2e", async (route) => {
+    if (route.request().method() === "PUT") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ domain, inventory, deployment: { applied: true, nodeIds: nodes.map((node) => node.id), nodes, sessions: [], nodeResults: nodes.map((node) => ({ nodeId: node.id, status: "success" })), transactionId: "tx_e2e" }, events: [] }) });
+    return route.continue();
+  });
   await page.route("**/api/ospf/*/runtime", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(runtime) }));
-  await page.route("**/api/ospf/preview", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ valid: true, domain, configs: nodes.map((node) => ({ nodeId: node.id, config: `protocol ospf v2 ospf_e2e_v2 {\n  router id ${node.routerId};\n}`, validation: { ok: true, stdout: "", stderr: "" } })) }) }));
+  await page.route("**/api/ospf/preview", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ valid: true, previewId: "preview_e2e", candidateHash: "hash_e2e", domain, configs: nodes.map((node) => ({ nodeId: node.id, config: `protocol ospf v2 ospf_e2e_v2 {\n  router id ${node.routerId};\n}`, validation: { ok: true, stdout: "", stderr: "" } })) }) }));
   await page.route("**/api/ospf/layout", async (route) => await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ layout: domain.layout, inventory }) }));
   await page.route("**/api/nodes/*/interfaces", async (route) => {
     const id = new URL(route.request().url()).pathname.split("/").at(-2) as NodeId;
@@ -155,6 +159,7 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await expect(page.locator(".ospf-link-label").first()).toContainText("Cost 30");
 
   await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Beta" }).click();
+  await expect(page.locator(".ospf-link-editor")).toHaveCount(0);
   await expect(page.locator(".ospf-editor")).toContainText("E2E Router Beta");
   const policyFunction = page.locator('.policy-block').first().getByLabel("可用 Function");
   await policyFunction.selectOption("fn_accept");
@@ -162,6 +167,9 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await expect(page.locator('.policy-block').first().locator('.function-step.selected').filter({ hasText: "接受 OSPF" })).toHaveCount(1);
   await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Alpha" }).click();
   await expect(page.locator('.policy-block').first().locator('.function-step.selected').filter({ hasText: "接受 OSPF" })).toHaveCount(0);
+  await page.locator(".ospf-topology-node").filter({ hasText: "E2E Router Gamma" }).click();
+  await expect(page.locator(".ospf-editor")).toContainText("E2E Router Gamma");
+  await expect(page.locator(".ospf-link-editor")).toHaveCount(0);
 
   await page.getByRole("button", { name: "全屏查看" }).click();
   await expect(page.locator(".ospf-preview-dialog")).toBeVisible();
@@ -170,6 +178,15 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await page.getByRole("button", { name: "预检配置" }).click();
   await expect(page.locator("#toastRegion .toast")).toContainText("OSPF 配置预检通过");
   await page.getByRole("button", { name: "关闭 OSPF 配置预览" }).click();
+  await page.getByRole("button", { name: "保存并应用" }).click();
+  await expect(page.locator(".ospf-apply-dialog")).toBeVisible();
+  const applyRequest = page.waitForRequest((request) => request.url().includes("/api/ospf") && ["POST", "PUT"].includes(request.method()));
+  await page.getByRole("button", { name: "确认应用" }).click();
+  const applyPayload = (await applyRequest).postDataJSON() as { previewId?: string; candidateHash?: string };
+  expect(applyPayload.previewId).toBe("preview_e2e");
+  expect(applyPayload.candidateHash).toBe("hash_e2e");
+  await expect(page.locator("#toastRegion .toast.success").filter({ hasText: "OSPF 配置已保存并应用" })).toBeVisible();
+  await page.getByRole("button", { name: "关闭 OSPF 应用确认" }).click();
 
   await page.locator(".runtime-summary-card").nth(0).click();
   await expect(page.locator(".ospf-runtime-dialog")).toBeVisible();
@@ -195,11 +212,12 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await topologyNode.scrollIntoViewIfNeeded();
   const nodeBefore = await topologyNode.boundingBox();
   if (!nodeBefore) throw new Error("OSPF node is not visible");
+  const layoutPatchesBeforeDrag = requests.filter((item) => item === "PATCH /api/ospf/layout").length;
   await page.mouse.move(nodeBefore.x + 20, nodeBefore.y + 20);
   await page.mouse.down();
   await page.mouse.move(nodeBefore.x + 90, nodeBefore.y + 60, { steps: 4 });
   await page.mouse.up();
-  await expect.poll(() => requests.filter((item) => item === "PATCH /api/ospf/layout").length).toBe(1);
+  await expect.poll(() => requests.filter((item) => item === "PATCH /api/ospf/layout").length).toBe(layoutPatchesBeforeDrag + 1);
   await expect(page.locator(".ospf-topology-node").first()).toBeVisible();
   expect(pageErrors).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -255,7 +273,7 @@ test("OSPF Area 与节点草稿独立，重复选择节点保留未保存参数"
   await page.route("**/api/nodes/*/interfaces", (route) => route.fulfill({ json: { interfaces: ["bbtest23", "bbtest24"] } }));
   await page.route("**/api/ospf/preview", (route) => {
     submitted = route.request().postDataJSON();
-    return route.fulfill({ json: { valid: true, configs: [] } });
+    return route.fulfill({ json: { valid: true, previewId: "preview_area", candidateHash: "hash_area", configs: [] } });
   });
   await authenticate(page);
   await openOspfWorkspace(page);

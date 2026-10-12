@@ -17,7 +17,7 @@ import type {
 } from "@birdbox/contracts/inventory";
 import { resourceAppliesToNode, type NodeScopedResource } from "@birdbox/contracts/resource-scope";
 import { loadDashboard, useDashboardStore } from "../dashboard/dashboard-store";
-import { api } from "../shared/api-client";
+import { api, ApiError } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
 import type { RoutePathResponse } from "@birdbox/contracts/api";
 
@@ -100,6 +100,8 @@ const previewError = ref("");
 const previewLoading = ref(false);
 const previewValidated = ref(false);
 const previewDraftSignature = ref("");
+const previewId = ref("");
+const previewCandidateHash = ref("");
 function makeDraftDomainId(): string {
   return `ospf_${Array.from(crypto.getRandomValues(new Uint32Array(4)), (value) => value.toString(16).padStart(8, "0")).join("")}`;
 }
@@ -1123,7 +1125,12 @@ async function applyOspf(): Promise<void> {
   applyNodes.value = applyNodes.value.map((node) => ({ ...node, status: "applying", detail: undefined }));
   serverPreviewByNode.value = {};
   try {
-    const payload = { ...domainPayload(), mode: "apply" as const, candidateHash: previewDraftSignature.value };
+    const payload = {
+      ...domainPayload(),
+      mode: "apply" as const,
+      previewId: previewId.value,
+      candidateHash: previewCandidateHash.value,
+    };
     const response = await api<{ domain: { id: string; name?: string }; inventoryRevision?: number | null; deployment?: { transactionId?: string; nodeResults?: Array<{ nodeId?: string; status?: string; error?: string | null }> } }>(
       ospfDomainId.value ? `/api/ospf/${ospfDomainId.value}` : "/api/ospf",
       {
@@ -1150,7 +1157,12 @@ async function applyOspf(): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : "保存并应用 OSPF 配置失败";
     applyDialogError.value = message;
-    applyNodes.value = applyNodes.value.map((node) => ({ ...node, status: "failed", detail: message }));
+    const outcomeUnknown = error instanceof ApiError && error.unknownOutcome;
+    applyNodes.value = applyNodes.value.map((node) => ({
+      ...node,
+      status: outcomeUnknown ? "unknown" : "failed",
+      detail: message,
+    }));
     dispatchToast(message, "error");
   } finally {
     ospfActionPending.value = null;
@@ -1162,6 +1174,8 @@ async function previewOspf(): Promise<void> {
   cancelDraftPreview();
   previewValidated.value = false;
   previewDraftSignature.value = "";
+  previewId.value = "";
+  previewCandidateHash.value = "";
   previewError.value = "";
   serverPreviewByNode.value = {};
   stabilizeDraftForSerialization();
@@ -1172,6 +1186,8 @@ async function previewOspf(): Promise<void> {
   try {
     const result = await api<{
       valid: boolean;
+      previewId?: string;
+      candidateHash?: string;
       diagnostics?: Array<{ nodeId: string; message?: string }>;
       configs?: Array<{ nodeId: string; config?: string; diff?: { changed?: boolean; added?: number; removed?: number; unified?: string }; validation?: { ok?: boolean; stderr?: string; stdout?: string } }>;
     }>("/api/ospf/preview", {
@@ -1190,6 +1206,10 @@ async function previewOspf(): Promise<void> {
       dispatchToast("预检期间草稿已变化，已保留当前草稿预览");
       return;
     }
+    if (!result.previewId || !result.candidateHash) {
+      dispatchToast("服务端预检未返回应用凭证，请重新预检", "error");
+      return;
+    }
     serverPreviewByNode.value = Object.fromEntries(
       (result.configs ?? []).filter((item): item is { nodeId: string; config: string } => typeof item.config === "string")
         .map((item) => [item.nodeId, item.config]),
@@ -1204,6 +1224,8 @@ async function previewOspf(): Promise<void> {
     }]));
     previewValidated.value = true;
     previewDraftSignature.value = submittedDraft;
+    previewId.value = result.previewId ?? "";
+    previewCandidateHash.value = result.candidateHash ?? "";
     previewDialog.value?.showModal();
     dispatchToast("OSPF 配置预检通过", "success");
   } catch (error) {
@@ -1321,6 +1343,8 @@ watch([serializedDraft, ospfDomainsReady], () => {
   previewError.value = "";
   previewValidated.value = false;
   previewDraftSignature.value = "";
+  previewId.value = "";
+  previewCandidateHash.value = "";
   scheduleDraftPreview();
 }, { immediate: true });
 
@@ -1330,9 +1354,13 @@ function selectNode(node: OspfNode): void {
   invalidateRoutePathQuery(true);
   saveSelectedNodeConfig();
   selectedNodeId.value = node.id;
+  // An Inspector can show exactly one object editor at a time. Leaving the
+  // previous link selected here caused the link editor to stay mounted below
+  // the node editor, which made the sidebar overflow or appear to disappear
+  // after clicking a topology node.
+  selectedLinkId.value = null;
   inspectorTarget.value = { kind: "node", nodeId: node.id };
   selectedAreaId.value = null;
-  if (selectedLink.value) selectedLinkEndpoint.value = selectedLink.value.to === node.id ? "to" : "from";
   routerId.value = node.routerId;
   loadNodeConfig(node.id);
 }
@@ -1348,7 +1376,12 @@ function removeSelectedNodeFromDomain(): void {
   const next = { ...nodeConfigs.value };
   delete next[nodeId];
   nodeConfigs.value = next;
-  loadNodeConfig(nodeId);
+  // Do not leave the Inspector pointing at a node that was just removed.
+  // Keeping that stale id made the header and draft controls look empty until
+  // the user manually selected another node.
+  selectedNodeId.value = nodes.value.find((item) => next[item.id])?.id ?? nodes.value[0]?.id ?? "";
+  if (selectedNodeId.value) loadNodeConfig(selectedNodeId.value);
+  selectDomainInspector();
 }
 function linkPosition(id: string): { x: number; y: number } {
   return nodePosition.value[id] ?? { x: 0, y: 0 };
@@ -1430,6 +1463,10 @@ function handleTopologyClick(event: MouseEvent): void {
 }
 function selectLink(link: OspfLink): void {
   if (ospfActionPending.value) return;
+  // Node fields live in the inspector refs until the next node is selected.
+  // Persist them before switching to a link editor so a user can move through
+  // the topology without silently losing the current node draft.
+  saveSelectedNodeConfig();
   ensureLinkEndpointOptions(link);
   selectedLinkEndpoint.value = selectedNodeId.value === link.to ? "to" : "from";
   selectedLinkId.value = link.id;
@@ -1438,12 +1475,14 @@ function selectLink(link: OspfLink): void {
 }
 function selectDomainInspector(): void {
   if (ospfActionPending.value) return;
+  saveSelectedNodeConfig();
   selectedLinkId.value = null;
   selectedAreaId.value = null;
   inspectorTarget.value = { kind: "domain" };
 }
 function selectAreaInspector(area: string): void {
   if (ospfActionPending.value) return;
+  saveSelectedNodeConfig();
   selectedLinkId.value = null;
   selectedAreaId.value = area;
   inspectorTarget.value = { kind: "area", areaId: area };
@@ -2255,7 +2294,7 @@ onBeforeUnmount(() => {
           <p v-if="!configuredAreas.length" class="field-hint">尚未创建 Area。创建后可在此配置类型、前缀、默认 Cost 和 Virtual Link。</p>
         </div>
       </section>
-      <div v-if="selectedLink" class="ospf-link-editor">
+      <div v-if="inspectorTarget.kind === 'link' && selectedLink" class="ospf-link-editor">
         <div class="ospf-link-endpoints">
           <div>
             <small
