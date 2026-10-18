@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import Fastify from "fastify";
+import { mutationRoutes } from "../src/http/mutation-routes.js";
 
 import {
   NodeOnboardingService,
@@ -203,6 +205,119 @@ test("keeps the existing node ID in an Agent upgrade script", async () => {
   assert.equal(response.payload.nodeId, legacyNode.id);
   assert.match(response.payload.script, /BIRDBOX_NODE_ID='legacy_upgrade_node'/);
   assert.doesNotMatch(response.payload.script, /BIRDBOX_NODE_ID='node_onboarding'/);
+});
+
+for (const transport of ["agent", "ssh"]) {
+  test(`retrieves an existing ${transport} installer without changing inventory or disconnecting the node`, async () => {
+    const broker = new AgentBroker({ database: new MemoryDatabase() });
+    await broker.initialize();
+    const nodeId = "existing_router";
+    const node = {
+      id: nodeId, name: "Reinstalled router", transport,
+      routerId: "192.0.2.20", sshHost: "192.0.2.20", sshUser: "birdbox",
+      sshIdentity: "managed", deploymentMode: "include",
+      mainConfigPath: "/etc/bird.conf", generatedConfigPath: "/etc/birdbox/generated.conf", socketPath: "/var/run/bird.ctl",
+    };
+    const inventory = validateInventory({
+      ...inventoryWithRpki([]), nodes: [node],
+      ospfDomains: [normalizeOspfDomain({
+        id: "preserved_ospf", name: "Preserved OSPF",
+        nodeConfigs: [{ nodeId, enabled: true, versions: ["ospfv2", "ospfv3"] }], links: [],
+      })],
+      defines: [{ id: "preserved_define", name: "PRESERVED_PREFIXES", nodeIds: [nodeId], type: "cidr4", entries: ["198.51.100.0/24"], enabled: true }],
+    });
+    const snapshot = structuredClone(inventory);
+    const oldToken = await broker.issueToken(nodeId);
+    let lockEntries = 0;
+    const service = new NodeOnboardingService({
+      store: { read: async () => inventory },
+      deploymentService: {},
+      withDeploymentLock: async (operation) => { lockEntries += 1; return operation(); },
+      controllerPublicKey: () => "ssh-ed25519 test-controller-key birdbox",
+      makeId: () => { throw new Error("must reuse existing identity"); },
+      addEvent: () => ({ timestamp: "", level: "warning", message: "", nodeId }), getEvents: () => [],
+      agentBroker: broker, agentControllerUrl: "https://controller.example",
+    });
+    if (transport === "agent") {
+      await broker.register({ nodeId, token: oldToken, agentVersion: "test", protocolVersion: 1 });
+    }
+    const response = await service.createReinstallScript(nodeId);
+    if (transport === "agent") {
+      assert.equal(broker.authenticate(nodeId, oldToken), true);
+      assert.equal(broker.status(nodeId).connected, true);
+    }
+    assert.equal(response.status, 200);
+    assert.match(response.payload.script, /MAIN_CONFIG='\/etc\/bird.conf'/);
+    assert.match(response.payload.script, /GENERATED_CONFIG='\/etc\/birdbox\/generated.conf'/);
+    assert.doesNotMatch(response.payload.script, /wrong_node|wrong.conf/);
+    assert.deepEqual(inventory, snapshot);
+    assert.ok(lockEntries > 0);
+    assert.equal((await shellSyntax(response.payload.script)).code, 0);
+    const deliveryToken = response.payload.setupScriptUrl.split("/").pop();
+    assert.equal(await service.getSetupScript(deliveryToken), response.payload.script);
+    if (transport === "agent") {
+      assert.equal(response.payload.nodeId, nodeId);
+      assert.notEqual(response.payload.agentToken, oldToken);
+      assert.match(response.payload.script, /BIRDBOX_NODE_ID='existing_router'/);
+      await broker.register({ nodeId, token: oldToken, agentVersion: "test", protocolVersion: 1 });
+      await broker.register({ nodeId, token: response.payload.agentToken, agentVersion: "test", protocolVersion: 1 });
+      assert.equal(broker.status(nodeId).connected, true);
+    }
+  });
+}
+
+test("reinstall refuses unknown and local nodes before issuing credentials", async () => {
+  const inventory = validateInventory({ ...inventoryWithRpki([]), nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1" }] });
+  const service = new NodeOnboardingService({
+    store: { read: async () => inventory }, deploymentService: {},
+    withDeploymentLock: async (operation) => operation(), controllerPublicKey: () => "",
+    makeId: () => { throw new Error("must not generate a new identity"); },
+    addEvent: () => { throw new Error("must not record success"); }, getEvents: () => [],
+  });
+  await assert.rejects(() => service.createReinstallScript("missing"), (error) => error.status === 404);
+  await assert.rejects(() => service.createReinstallScript("local"), /本地节点无需重新安装/);
+});
+
+test("reinstall API requires login and delivers a script without replacing working credentials", async (context) => {
+  const broker = new AgentBroker({ database: new MemoryDatabase() });
+  await broker.initialize();
+  const nodeId = "api_reinstall";
+  const inventory = validateInventory({ ...inventoryWithRpki([]), nodes: [{ id: nodeId, name: "API router", transport: "agent", routerId: "192.0.2.1" }] });
+  const oldToken = await broker.issueToken(nodeId);
+  await broker.register({ nodeId, token: oldToken, agentVersion: "test", protocolVersion: 1 });
+  const service = new NodeOnboardingService({
+    store: { read: async () => inventory }, deploymentService: {},
+    withDeploymentLock: async (operation) => operation(), controllerPublicKey: () => "",
+    makeId: () => { throw new Error("must reuse identity"); },
+    addEvent: () => ({ timestamp: "", level: "info", message: "", nodeId }), getEvents: () => [],
+    agentBroker: broker, agentControllerUrl: "https://controller.example",
+  });
+  let authenticated = false;
+  const app = Fastify();
+  context.after(() => app.close());
+  await app.register(mutationRoutes, {
+    authStore: { isAuthenticated: async () => authenticated }, secureCookieSetting: false,
+    agentBroker: broker,
+    service: {
+      createNodeReinstallScript: (id) => service.createReinstallScript(id),
+      getNodeSetupScript: (token) => service.getSetupScript(token),
+    },
+  });
+  const url = `/api/nodes/${nodeId}/reinstall-script`;
+  assert.equal((await app.inject({ method: "POST", url })).statusCode, 401);
+  authenticated = true;
+  const response = await app.inject({ method: "POST", url });
+  assert.equal(response.statusCode, 200, response.body);
+  assert.match(response.headers["cache-control"], /no-store/);
+  const result = response.json();
+  assert.equal(result.nodeId, nodeId);
+  assert.equal(broker.authenticate(nodeId, oldToken), true);
+  assert.equal(broker.authenticate(nodeId, result.agentToken), true);
+  assert.equal(broker.status(nodeId).connected, true);
+  authenticated = false;
+  const delivery = await app.inject({ method: "GET", url: new URL(result.setupScriptUrl).pathname });
+  assert.equal(delivery.statusCode, 200);
+  assert.equal(delivery.body, result.script);
 });
 
 test("maps a missing global RPKI file validation error to its resource and remedy", () => {

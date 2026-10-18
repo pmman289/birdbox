@@ -605,7 +605,7 @@ function agentSetupScript(node: ManagedAgentNode, controllerUrl: string, token: 
     "#!/bin/sh", "set -eu", "umask 077", `[ "$(id -u)" -eq 0 ] || { echo '请使用 root 身份执行此脚本' >&2; exit 1; }`, "mkdir -p /etc/birdbox /usr/local/bin",
     "detect_agent_arch() {", "  machine=$(uname -m)", "  if [ -r /etc/openwrt_release ]; then . /etc/openwrt_release 2>/dev/null || true; case \"${DISTRIB_ARCH:-}\" in mipsel_*) echo mipsle; return;; mips_*) echo mips; return;; mips64el_*) echo mips64le; return;; mips64_*) echo mips64; return;; aarch64_*) echo arm64; return;; riscv64_*) echo riscv64; return;; esac; fi", "  elf_data() { if command -v od >/dev/null 2>&1; then od -An -tx1 -j5 -N1 /bin/sh | tr -d ' \\n'; elif command -v hexdump >/dev/null 2>&1; then hexdump -s 5 -n 1 -e '1/1 \"%02x\"' /bin/sh; fi; }", "  case \"$machine\" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; armv7*|armv8l) echo arm;; armv6*) echo armv6;; armv5*) echo armv5;; riscv64) echo riscv64;; mips|mipsel) [ \"$(elf_data)\" = 01 ] && echo mipsle || echo mips;; mips64|mips64el) [ \"$(elf_data)\" = 01 ] && echo mips64le || echo mips64;; *) echo ''; esac", "}", "AGENT_ARCH=$(detect_agent_arch)", "[ -n \"$AGENT_ARCH\" ] || { echo \"不支持的 Agent 架构：$(uname -m)\" >&2; exit 1; }", "TMP=/usr/local/bin/birdbox-agent.tmp.$$.${AGENT_ARCH}", `AGENT_URL=${shellSingleQuote(`${baseUrl}/api/agent/releases/latest/download`)}?arch=$AGENT_ARCH`, `if command -v curl >/dev/null 2>&1; then curl -fsSL --retry 3 "$AGENT_URL" -o "$TMP"; elif command -v wget >/dev/null 2>&1; then wget -q -O "$TMP" "$AGENT_URL"; else echo '缺少 curl 或 wget' >&2; exit 1; fi`,
     "chmod 0755 \"$TMP\"; mv -f \"$TMP\" /usr/local/bin/birdbox-agent", `MAIN_CONFIG=${shellSingleQuote(node.mainConfigPath)}`, `GENERATED_CONFIG=${shellSingleQuote(node.generatedConfigPath)}`, `test -f "$MAIN_CONFIG" || { echo "主配置不存在：$MAIN_CONFIG" >&2; exit 1; }`, `mkdir -p "$(dirname "$GENERATED_CONFIG")"`, `test -e "$GENERATED_CONFIG" || : > "$GENERATED_CONFIG"`, `has_active_include() { awk -v target="$GENERATED_CONFIG" '${ACTIVE_BIRD_INCLUDE_AWK}' "$MAIN_CONFIG"; }`, `MAIN_BACKUP=''`, `if ! has_active_include; then MAIN_BACKUP=$(mktemp "$MAIN_CONFIG.birdbox.XXXXXX"); cp -p "$MAIN_CONFIG" "$MAIN_BACKUP"; printf '\\n%s\\n' ${shellSingleQuote(includeLine)} >> "$MAIN_CONFIG"; fi`, "if ! birdc -s "+shellSingleQuote(node.socketPath)+" 'configure check' || ! birdc -s "+shellSingleQuote(node.socketPath)+" configure; then [ -z \"$MAIN_BACKUP\" ] || cp -p \"$MAIN_BACKUP\" \"$MAIN_CONFIG\"; echo 'BIRD 配置检查/加载失败，主配置已恢复' >&2; exit 1; fi", "[ -z \"$MAIN_BACKUP\" ] || rm -f \"$MAIN_BACKUP\"", "cat > /etc/birdbox/agent.env <<'BIRDBOX_AGENT_ENV'", env, `BIRDBOX_ALLOWED_MAIN_CONFIG=${shellSingleQuote(node.mainConfigPath)}`, `BIRDBOX_ALLOWED_GENERATED_CONFIG=${shellSingleQuote(node.generatedConfigPath)}`, `BIRDBOX_ALLOWED_SOCKET=${shellSingleQuote(node.socketPath)}`, "BIRDBOX_AGENT_LEGACY_EXEC=disabled", "BIRDBOX_AGENT_ENV", "chmod 0600 /etc/birdbox/agent.env",
-    "if command -v systemctl >/dev/null 2>&1 && [ ! -r /etc/openwrt_release ]; then", "  cat > /etc/systemd/system/birdbox-agent.service <<'BIRDBOX_AGENT_UNIT'", "[Unit]", "Description=Birdbox Agent", "After=network-online.target", "[Service]", "EnvironmentFile=/etc/birdbox/agent.env", "ExecStart=/usr/local/bin/birdbox-agent", "Restart=always", "RestartSec=5", "User=root", "[Install]", "WantedBy=multi-user.target", "BIRDBOX_AGENT_UNIT", "  systemctl daemon-reload; systemctl enable --now birdbox-agent", "else",
+    "if command -v systemctl >/dev/null 2>&1 && [ ! -r /etc/openwrt_release ]; then", "  cat > /etc/systemd/system/birdbox-agent.service <<'BIRDBOX_AGENT_UNIT'", "[Unit]", "Description=Birdbox Agent", "After=network-online.target", "[Service]", "EnvironmentFile=/etc/birdbox/agent.env", "ExecStart=/usr/local/bin/birdbox-agent", "Restart=always", "RestartSec=5", "User=root", "[Install]", "WantedBy=multi-user.target", "BIRDBOX_AGENT_UNIT", "  systemctl daemon-reload", "  systemctl enable birdbox-agent", "  systemctl restart birdbox-agent", "  systemctl is-active --quiet birdbox-agent || { echo 'Birdbox Agent 启动失败，请执行 systemctl status birdbox-agent 和 journalctl -u birdbox-agent 查看原因' >&2; exit 1; }", "else",
     "  cat > /etc/init.d/birdbox-agent <<'BIRDBOX_PROCD'", "#!/bin/sh /etc/rc.common", "START=95", "USE_PROCD=1", `start_service() { . /etc/birdbox/agent.env; procd_open_instance; procd_set_param command /usr/local/bin/birdbox-agent; procd_set_param env BIRDBOX_CONTROLLER_URL="$BIRDBOX_CONTROLLER_URL" BIRDBOX_NODE_ID="$BIRDBOX_NODE_ID" BIRDBOX_AGENT_TOKEN="$BIRDBOX_AGENT_TOKEN" BIRDBOX_AGENT_REQUIRE_HTTPS="$BIRDBOX_AGENT_REQUIRE_HTTPS" BIRDBOX_ALLOWED_MAIN_CONFIG="$BIRDBOX_ALLOWED_MAIN_CONFIG" BIRDBOX_ALLOWED_GENERATED_CONFIG="$BIRDBOX_ALLOWED_GENERATED_CONFIG" BIRDBOX_ALLOWED_SOCKET="$BIRDBOX_ALLOWED_SOCKET" BIRDBOX_AGENT_LEGACY_EXEC="$BIRDBOX_AGENT_LEGACY_EXEC"; procd_set_param respawn; procd_close_instance; }`, "BIRDBOX_PROCD", "  chmod 0755 /etc/init.d/birdbox-agent", "  /etc/init.d/birdbox-agent enable", "  if /etc/init.d/birdbox-agent running >/dev/null 2>&1; then /etc/init.d/birdbox-agent restart; else /etc/init.d/birdbox-agent start; fi", "  AGENT_RUNNING=0", "  ATTEMPT=0", "  while [ \"$ATTEMPT\" -lt 10 ]; do", "    if /etc/init.d/birdbox-agent running >/dev/null 2>&1; then AGENT_RUNNING=1; break; fi", "    ATTEMPT=$((ATTEMPT + 1)); sleep 1", "  done", "  [ \"$AGENT_RUNNING\" -eq 1 ] || { echo 'Birdbox Agent 启动失败，请执行 /etc/init.d/birdbox-agent status 和 logread 查看原因' >&2; exit 1; }", "fi", "echo 'Birdbox Agent 已启动，等待主控注册'",
   ];
   const installIndex = lines.findIndex((line) => line.startsWith("chmod 0755"));
@@ -712,11 +712,11 @@ export class NodeOnboardingService {
     return delivery.script;
   }
 
-  async createSetupScript(body: Record<string, unknown>) {
+  async createSetupScript(body: Record<string, unknown>, { preserveCredential = false }: { preserveCredential?: boolean } = {}) {
     const setupId = (body.transport === "agent" || body.transport === undefined)
       ? (typeof body.id === "string" && body.id ? body.id : this.#options.makeId("node"))
       : undefined;
-    const node = normalizeOnboardingNode(body, setupId ?? "node_onboarding");
+    const node = normalizeOnboardingNode(body, setupId ?? (typeof body.id === "string" ? body.id : "node_onboarding"));
     logger.info("开始生成节点准备脚本", { nodeId: node.id, transport: node.transport });
     const inventory = await this.#options.store.read();
     const rpkiRequirements = globalRpkiFileRequirements(inventory);
@@ -724,10 +724,10 @@ export class NodeOnboardingService {
       if (!this.#options.agentBroker) fail(503, "Agent 通信服务尚未初始化");
       ensureAgentControllerUrl(this.#options.agentControllerUrl ?? "http://127.0.0.1:3000");
       const existing = inventory.nodes.find((item) => item.id === node.id);
-      if (existing?.transport === "agent" && body.rotateCredential !== true) {
+      if (existing?.transport === "agent" && body.rotateCredential !== true && !preserveCredential) {
         fail(409, `节点 ${existing.name} 已存在；重新生成准备脚本会使当前 Agent 凭据失效。如确需重装，请明确选择重置 Agent 凭据`, "AGENT_CREDENTIAL_EXISTS");
       }
-      const token = await this.#options.agentBroker.issueToken(node.id);
+      const token = await this.#options.agentBroker.issueToken(node.id, { preserveExisting: preserveCredential });
       const script = agentSetupScript(node, this.#options.agentControllerUrl ?? "http://127.0.0.1:3000", token, rpkiRequirements);
       const setupScriptUrl = this.#publishScript(script.script);
       logger.info("节点 Agent 准备脚本已生成", { nodeId: node.id });
@@ -745,6 +745,22 @@ export class NodeOnboardingService {
     };
     logger.info("节点 SSH 准备脚本已生成", { nodeId: node.id });
     return payload;
+  }
+
+  async createReinstallScript(nodeId: string) {
+    return this.#options.withDeploymentLock(async () => {
+      const inventory = await this.#options.store.read();
+      const node = findNode(inventory, nodeId);
+      if (node.transport !== "agent" && node.transport !== "ssh") fail(409, "本地节点无需重新安装接入服务");
+      if (node.transport === "ssh" && (node.deploymentMode !== "include" || node.sshIdentity !== "managed")) {
+        fail(409, "此旧 SSH 节点不使用托管密钥和 Include 部署，请使用“升级为 Agent 管理”恢复接入");
+      }
+      // Use only the saved identity and paths; generating a script never edits
+      // inventory or deploys routing configuration to the old or new host.
+      const result = await this.createSetupScript({ ...node }, { preserveCredential: true });
+      this.#options.addEvent("info", `已生成节点 ${node.name} 的重新安装脚本`, node.id);
+      return result;
+    });
   }
 
   async createAgentUpgradeScript(nodeId: string) {
@@ -812,7 +828,9 @@ export class NodeOnboardingService {
     const verification = await this.#options.withDeploymentLock(async () => {
       const current = await this.#options.store.read();
       const candidate = structuredClone(current);
-      candidate.nodes.push(node);
+      const existingIndex = candidate.nodes.findIndex((item) => item.id === node.id);
+      if (existingIndex >= 0) candidate.nodes[existingIndex] = node;
+      else candidate.nodes.push(node);
       const inventory = validateInventory(candidate);
       return verifyOnboardingNode(
         node,

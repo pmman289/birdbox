@@ -90,6 +90,7 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
     }).send(script);
   });
   app.post("/api/nodes/setup-script", async (request, reply) => jsonReply(reply, await options.service.createNodeSetupScript(jsonBody(request))));
+  app.post<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/reinstall-script", async (request, reply) => jsonReply(reply, await options.service.createNodeReinstallScript(validId(request.params.nodeId))));
   app.post<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/agent-upgrade-script", async (request, reply) => jsonReply(reply, await options.service.createNodeAgentUpgradeScript(validId(request.params.nodeId))));
   app.post<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/promote-agent", async (request, reply) => jsonReply(reply, await options.service.promoteNodeToAgent(validId(request.params.nodeId))));
   app.post("/api/nodes/test", async (request, reply) => jsonReply(reply, await options.service.testNode(jsonBody(request))));

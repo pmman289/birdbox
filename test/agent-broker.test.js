@@ -39,6 +39,7 @@ test("Agent credential persistence failure leaves the working token and connecti
   await broker.register({ nodeId: "durable_agent", token, agentVersion: "test", protocolVersion: 1 });
   database.failWrites = true;
   await assert.rejects(broker.rotateToken("durable_agent"), /database unavailable/);
+  await assert.rejects(broker.issueToken("durable_agent", { preserveExisting: true }), /database unavailable/);
   await assert.rejects(broker.revoke("durable_agent"), /database unavailable/);
   assert.equal(broker.authenticate("durable_agent", token), true);
   assert.equal(broker.status("durable_agent")?.connected, true);
@@ -46,6 +47,35 @@ test("Agent credential persistence failure leaves the working token and connecti
   const reloaded = new AgentBroker({ database });
   await reloaded.initialize();
   assert.equal(reloaded.authenticate("durable_agent", token), true);
+});
+
+test("installation credentials preserve existing connections and survive restart until explicit revocation", async () => {
+  const database = new MemoryDatabase();
+  const broker = new AgentBroker({ database });
+  await broker.initialize();
+  const nodeId = "reinstalled_agent";
+  const oldToken = await broker.issueToken(nodeId);
+  await broker.register({ nodeId, token: oldToken, agentVersion: "test", protocolVersion: 1 });
+  const pending = broker.dispatch(nodeId, "bird.apply", {}, 2000);
+  const task = await broker.poll(nodeId, oldToken, 1000);
+  const installToken = await broker.issueToken(nodeId, { preserveExisting: true });
+  const anotherInstallToken = await broker.issueToken(nodeId, { preserveExisting: true });
+  assert.equal(broker.authenticate(nodeId, oldToken), true);
+  assert.equal(broker.status(nodeId).connected, true);
+  broker.result({ taskId: task.taskId, nodeId, ok: true }, oldToken);
+  assert.equal((await pending).ok, true);
+  const reloaded = new AgentBroker({ database });
+  await reloaded.initialize();
+  for (const token of [oldToken, installToken, anotherInstallToken]) assert.equal(reloaded.authenticate(nodeId, token), true);
+  const persisted = JSON.stringify(await database.readState("agent_credentials"));
+  for (const token of [oldToken, installToken, anotherInstallToken]) assert.equal(persisted.includes(token), false);
+  await reloaded.revoke(nodeId);
+  for (const token of [oldToken, installToken, anotherInstallToken]) assert.equal(reloaded.authenticate(nodeId, token), false);
+  const newToken = await reloaded.issueToken(nodeId, { preserveExisting: true });
+  const extraToken = await reloaded.issueToken(nodeId, { preserveExisting: true });
+  const rotatedToken = await reloaded.rotateToken(nodeId);
+  for (const token of [oldToken, newToken, extraToken]) assert.equal(reloaded.authenticate(nodeId, token), false);
+  assert.equal(reloaded.authenticate(nodeId, rotatedToken), true);
 });
 
 test("rotating Agent credentials closes old polls and cancels tasks before delivering new work", async () => {

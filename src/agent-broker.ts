@@ -10,7 +10,7 @@ export interface AgentBrokerOptions {
   onEvent?: (level: string, message: string, nodeId?: string | null) => void;
 }
 
-interface CredentialRecord { nodeId: string; tokenHash: string; createdAt: string; revokedAt: string | null; }
+interface CredentialRecord { nodeId: string; tokenHash: string; additionalTokenHashes?: string[]; createdAt: string; revokedAt: string | null; }
 interface AgentState {
   nodeId: string;
   connected: boolean;
@@ -132,15 +132,19 @@ export class AgentBroker {
     }
   }
 
-  async issueToken(nodeId: string): Promise<string> {
+  async issueToken(nodeId: string, { preserveExisting = false }: { preserveExisting?: boolean } = {}): Promise<string> {
     const token = randomBytes(32).toString("base64url");
     const record: CredentialRecord = { nodeId, tokenHash: hashToken(token), createdAt: new Date().toISOString(), revokedAt: null };
     await this.#writeCredential(async () => {
+      const previous = this.#credentials.get(nodeId);
+      const next = preserveExisting && previous && !previous.revokedAt
+        ? { ...previous, additionalTokenHashes: [...(previous.additionalTokenHashes ?? []), record.tokenHash] }
+        : record;
       await this.#database.mutateState<CredentialRecord[], void>(CREDENTIALS_KEY, [], (current) => ({
-        value: [...current.filter((item) => item.nodeId !== nodeId), record],
+        value: [...current.filter((item) => item.nodeId !== nodeId), next],
       }));
-      this.#credentials.set(nodeId, record);
-      this.#disconnect(nodeId);
+      this.#credentials.set(nodeId, next);
+      if (!preserveExisting) this.#disconnect(nodeId);
     });
     return token;
   }
@@ -166,7 +170,8 @@ export class AgentBroker {
   authenticate(nodeId: string, token: string): boolean {
     if (!nodeId || typeof token !== "string" || token.length < 20) return false;
     const record = this.#credentials.get(nodeId);
-    return Boolean(record && !record.revokedAt && sameHash(record.tokenHash, hashToken(token)));
+    const hash = hashToken(token);
+    return Boolean(record && !record.revokedAt && [record.tokenHash, ...(record.additionalTokenHashes ?? [])].some((item) => sameHash(item, hash)));
   }
 
   async register(input: AgentRegistration): Promise<{ heartbeatIntervalSeconds: number; protocolVersion: number }> {

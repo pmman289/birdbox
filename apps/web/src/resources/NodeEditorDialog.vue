@@ -216,7 +216,7 @@ function close(): void {
 function onboardingPayload(): NodeMutationRequest {
   const value = toRaw(draft);
   return {
-    ...(isAgent.value && onboardingAgentId.value ? { id: onboardingAgentId.value } : {}),
+    ...(editingId.value ? { id: editingId.value } : isAgent.value && onboardingAgentId.value ? { id: onboardingAgentId.value } : {}),
     name: String(value.name),
     transport: value.transport,
     sshHost: isSsh.value ? String(value.sshHost || "") || null : null,
@@ -284,6 +284,33 @@ async function generateAgentUpgradeScript(): Promise<void> {
     onboardingState.value = "error";
     presentFormError(form.value, error, fieldMappings);
   } finally { pending.value = false; }
+}
+
+async function generateReinstallScript(): Promise<void> {
+  const nodeId = editingId.value;
+  if (!nodeId || pending.value) return;
+  pending.value = true;
+  setupScript.value = "";
+  setupScriptUrl.value = "";
+  includeLine.value = "";
+  onboardingStatus.value = "正在生成重新安装脚本";
+  onboardingState.value = "";
+  try {
+    const result = await api<NodeSetupScriptResponse>(`/api/nodes/${encodeURIComponent(nodeId)}/reinstall-script`, {
+      method: "POST",
+    });
+    setupScript.value = result.script;
+    setupScriptUrl.value = result.setupScriptUrl ?? "";
+    includeLine.value = result.includeLine;
+    onboardingStatus.value = "重新安装脚本已生成";
+    dispatchToast("重新安装脚本已生成，请在目标节点以 root 执行", "success");
+  } catch (error) {
+    onboardingStatus.value = "生成失败";
+    onboardingState.value = "error";
+    dispatchToast(error instanceof Error ? error.message : "生成重新安装脚本失败", "error");
+  } finally {
+    pending.value = false;
+  }
 }
 
 async function promoteToAgent(): Promise<void> {
@@ -444,7 +471,7 @@ onBeforeUnmount(() => {
           <div class="field"><label for="nodeEditorSshUser">SSH 用户</label><input id="nodeEditorSshUser" v-model.trim="draft.sshUser" placeholder="birdbox" required :disabled="editing"></div>
           <div class="field"><label for="nodeEditorSshPort">SSH 端口</label><input id="nodeEditorSshPort" v-model.number="draft.sshPort" type="number" min="1" max="65535" required><small v-if="editing">可修改为公网 SSH 服务端口。</small></div>
         </template>
-        <div v-if="isAgent" class="field full-width"><div class="node-rpki-warning"><strong>Agent 模式</strong><p>节点将主动连接主控，不需要公网 SSH 地址。请生成脚本，在目标节点以 root 执行并等待 Agent 注册后再测试连接。</p></div></div>
+        <div v-if="isAgent" class="field full-width"><div class="node-rpki-warning"><strong>Agent 模式</strong><p>{{ editing ? "节点主动连接主控。系统重装或迁移后，使用下方“重新安装”恢复接入，无需删除节点。" : "节点将主动连接主控，不需要公网 SSH 地址。请生成脚本，在目标节点以 root 执行并等待 Agent 注册后再测试连接。" }}</p></div></div>
         <div class="field"><label for="nodeEditorRouterId">Router ID</label><input id="nodeEditorRouterId" v-model.trim="draft.routerId" required></div>
         <div class="field"><label for="nodeEditorIgpAddress">IGP 地址（BGP 建邻）</label><input id="nodeEditorIgpAddress" v-model.trim="draft.igpAddress" placeholder="例如 10.0.0.1 或 2001:db8::1"><small>新建 iBGP/eBGP 会话会使用此地址；留空时需要在会话中手动选择本地地址。</small></div>
         <div class="field"><label for="nodeEditorPort">默认会话端口</label><input id="nodeEditorPort" v-model.number="draft.listenPort" type="number" min="1" max="65535" required></div>
@@ -467,10 +494,17 @@ onBeforeUnmount(() => {
           <p>新节点接入时会自动下发这些 BIRD 映射和系统 ip rule。若映射仍包含旧 SSH 节点，请先升级该节点为 Agent，旧节点不会被自动执行规则。</p>
           <ul><li v-for="resource in globalSourcePolicies" :key="resource.id"><strong>{{ resource.label }}</strong><div><span>规模</span><code>{{ resource.groups.length }} 个出口组 · {{ resource.groups.reduce((count, group) => count + group.sources.length, 0) }} 条源 CIDR</code></div><p class="node-rpki-action"><span>处理</span>不适用于该节点时，请先把映射集作用域改为指定节点。</p></li></ul>
         </section>
-        <section v-if="!editing" id="nodeOnboardingPanel" class="node-onboarding full-width">
-          <div class="node-onboarding-head"><strong>节点接入</strong><span :class="onboardingState">{{ onboardingStatus }}</span></div>
+        <section v-if="!editing || isAgent || isSsh" id="nodeOnboardingPanel" class="node-onboarding full-width">
+          <div class="node-onboarding-head"><strong>{{ editing ? "重新安装" : "节点接入" }}</strong><span :class="onboardingState" role="status">{{ onboardingStatus }}</span></div>
+          <template v-if="editing">
+            <p class="dialog-note">① 生成脚本，在重装或迁移后的节点以 root 执行。脚本沿用已保存的节点身份和 BIRD 路径；请先安装并启动 BIRD 2。</p>
+            <p v-if="isAgent" class="dialog-note">可以随时重新获取脚本，原 Agent 凭据继续有效。迁移时请停止旧主机上的 Agent，避免两台主机同时使用同一节点身份。</p>
+            <p class="dialog-note">② 执行成功后测试连接。③ 点击“保存节点”，预检并重新下发已有配置。节点、会话、策略及 OSPF 配置均会保留；生成脚本不会自动下发这些配置。</p>
+            <p v-if="isSsh" class="dialog-note">迁移后可修改上方 SSH 地址和端口，再测试连接并保存；会话地址和 IGP 地址需自行核对。</p>
+          </template>
           <div class="node-onboarding-actions">
-            <button id="generateNodeSetupButton" class="secondary-button" type="button" :disabled="pending" @click="generateScript">{{ pending && onboardingStatus === "正在生成" ? "正在生成" : "生成准备脚本" }}</button>
+            <button v-if="editing" id="reinstallNodeButton" class="secondary-button" type="button" :disabled="pending" @click="generateReinstallScript">生成重新安装脚本</button>
+            <button v-else id="generateNodeSetupButton" class="secondary-button" type="button" :disabled="pending" @click="generateScript">{{ pending && onboardingStatus === "正在生成" ? "正在生成" : "生成准备脚本" }}</button>
             <button id="testNodeConnectionButton" class="secondary-button" type="button" :disabled="pending" @click="testConnection">测试连接</button>
           </div>
           <div v-if="setupScript" id="nodeSetupGuide" class="node-setup-guide">
@@ -484,7 +518,6 @@ onBeforeUnmount(() => {
           <div class="node-onboarding-head"><strong>升级为 Agent 管理</strong><span :class="onboardingState">{{ onboardingStatus }}</span></div>
           <p class="dialog-note">先生成并在节点上执行升级脚本，确认 Agent 已连接后，再点击切换。旧 SSH 配置在切换前不会改变。</p>
           <div class="node-onboarding-actions"><button class="secondary-button" type="button" :disabled="pending" @click="generateAgentUpgradeScript">生成升级脚本</button><button class="primary-button" type="button" :disabled="pending" @click="promoteToAgent">切换为 Agent</button></div>
-          <div v-if="setupScript" class="node-setup-guide"><div class="setup-command"><div class="setup-guide-heading"><span>直接粘贴到目标节点 Shell（URL 15 分钟内有效，最多下载 3 次）</span><button class="compact-command" type="button" @click="copyDirectSetupCommand">复制执行命令</button></div><code>{{ directSetupCommand() }}</code></div><div class="setup-guide-heading"><span>完整脚本（离线执行）</span><button class="compact-command" type="button" @click="copyScript">复制完整脚本</button></div><pre>{{ setupScript }}</pre></div>
         </section>
         <section v-if="editing && isAgent" id="nodeAgentSelfUpgradePanel" class="node-onboarding full-width">
           <div class="node-onboarding-head"><strong>Agent 版本</strong><span :class="agentStatus?.connected ? 'ready' : 'error'">{{ agentStatus?.connected ? `在线 · ${agentStatus.agentVersion}` : "未连接" }}</span></div>

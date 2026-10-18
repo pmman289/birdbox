@@ -13,6 +13,57 @@ async function authenticate(page: import("@playwright/test").Page): Promise<void
   await expect(page.locator("#appMain")).toBeVisible();
 }
 
+for (const transport of ["agent", "ssh"]) {
+  test(`已有 ${transport} 节点可离线生成重新安装脚本并保留编辑草稿`, async ({ page }) => {
+    const writes: string[] = [];
+    let generations = 0;
+    let confirmations = 0;
+    page.on("dialog", (dialog) => { confirmations += 1; return dialog.dismiss(); });
+    await page.route("**/api/dashboard**", async (route) => {
+      const response = await route.fetch();
+      const dashboard = await response.json();
+      const node = dashboard.inventory.nodes.find((item: { id: string }) => item.id === "edge");
+      Object.assign(node, { transport, sshIdentity: "managed", deploymentMode: "include" });
+      await route.fulfill({ response, json: dashboard });
+    });
+    await page.route("**/api/agent/status", (route) => route.fulfill({ json: { agents: [] } }));
+    await page.route("**/api/nodes/edge/reinstall-script", (route) => {
+      generations += 1;
+      expect(route.request().postData()).toBeNull();
+      if (generations === 1) return route.fulfill({ status: 503, json: { error: "脚本服务暂不可用" } });
+      return route.fulfill({ json: {
+        nodeId: "edge", script: "#!/bin/sh\n# reinstall edge with saved paths", includeLine: 'include "/etc/birdbox/generated.conf";',
+        setupScriptUrl: "https://controller.example/api/nodes/setup-script/reinstall_token", publicKey: "", rpkiRequirements: [],
+      } });
+    });
+    page.on("request", (request) => {
+      if (["POST", "PUT", "DELETE"].includes(request.method()) && /\/api\/nodes(?:\/edge)?$/.test(new URL(request.url()).pathname)) writes.push(request.url());
+    });
+    await authenticate(page);
+    await page.locator("#resourceWorkspaceTab").click();
+    await page.getByRole("button", { name: "编辑节点 E2E Edge" }).click();
+    const panel = page.locator("#nodeOnboardingPanel");
+    await expect(panel).toContainText("重新安装");
+    await expect(panel).toContainText("配置均会保留");
+    await page.locator("#nodeEditorName").fill("尚未保存的节点名称");
+    const generate = page.locator("#reinstallNodeButton");
+    await generate.click();
+    await expect(page.locator("#toastRegion")).toContainText("脚本服务暂不可用");
+    await expect(generate).toBeEnabled();
+    await generate.click();
+    await expect(page.locator("#nodeSetupScript")).toContainText("reinstall edge with saved paths");
+    await expect(page.locator("#nodeSetupCommand")).toContainText("https://controller.example/api/nodes/setup-script/reinstall_token");
+    await expect(page.locator("#copyNodeSetupButton")).toBeVisible();
+    await expect(page.locator("#copyNodeSetupCommandButton")).toBeVisible();
+    await expect(page.locator("#nodeEditorName")).toHaveValue("尚未保存的节点名称");
+    expect(writes).toEqual([]);
+    expect(confirmations).toBe(0);
+    await page.locator('#nodeDialog [data-close="nodeDialog"]').click();
+    await page.getByRole("button", { name: "编辑节点 E2E Edge" }).click();
+    await expect(page.locator("#nodeSetupGuide")).toHaveCount(0);
+  });
+}
+
 test("源地址出口保存后继续编辑保留分配，删除结果不被旧预览覆盖", async ({ page }) => {
   test.setTimeout(75_000);
   let resource: SourcePolicyEgress | null = null;

@@ -475,6 +475,7 @@ export function createResourceApplicationService(
 
   return {
     createNodeSetupScript: (body) => options.nodeOnboarding.createSetupScript(body),
+    createNodeReinstallScript: (nodeId) => options.nodeOnboarding.createReinstallScript(nodeId),
     getNodeSetupScript: (deliveryToken) => options.nodeOnboarding.getSetupScript(deliveryToken),
     createNodeAgentUpgradeScript: (nodeId) => options.nodeOnboarding.createAgentUpgradeScript(nodeId),
     promoteNodeToAgent: (nodeId) => options.nodeOnboarding.promoteToAgent(nodeId),

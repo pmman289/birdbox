@@ -248,6 +248,14 @@ docker compose ps
 
 不要使用 `docker compose down -v`，除非确定要删除全部数据库和控制器数据。
 
+## 重装或迁移已有节点
+
+在“资源管理 → 受管节点”中编辑原节点，在“重新安装”区域点击“生成重新安装脚本”，复制执行命令或完整脚本，在新主机的 root Shell 中执行。目标主机需先安装并启动 BIRD 2，并准备好原节点使用的 BIRD 主配置、Socket 路径及 ROA 文件等依赖。
+
+脚本沿用已保存的节点 ID 和配置路径，生成时不修改库存、不下发路由配置，原有会话、策略及 OSPF 配置会保留。再次获取脚本不会让原 Agent 凭据失效，也不会断开原 Agent。迁移时应停止旧主机的 Agent，避免两台主机同时使用同一节点身份。Agent 主动回连主控，迁移后无需修改 SSH 地址。
+
+执行成功后回到原节点编辑页，点击“测试连接”，再点击“保存节点”预检并重新下发已有配置。SSH 节点可先更新连接地址和端口；会话地址、接口名和 IGP 地址需要按新主机的实际情况核对。托管密钥和 Include 模式的 SSH 节点可以重新生成准备脚本，其它旧 SSH 节点请使用“升级为 Agent 管理”入口。
+
 ## 删除节点
 
 在线节点的删除会先部署空的 Birdbox Include，再从库存删除节点。系统 BIRD 主配置中的 Include 行和目标用户 `authorized_keys` 中的控制器公钥仍需要人工删除。
@@ -284,5 +292,14 @@ npm start
 ```bash
 BIRDBOX_TEST_MYSQL_URL='mysql://用户:密码@主机:3306/测试库' npm test
 ```
+
+节点安装脚本实测（需要 Docker、网络访问及运行特权容器的权限，用于启动真实 systemd；只操作临时容器，不修改宿主机服务）：
+
+```bash
+bash scripts/node-installer-e2e.sh
+BIRD_VERSION=2.19.0 bash scripts/node-installer-e2e.sh
+```
+
+测试从当前源码编译 Agent，在 Debian 12 容器中执行接口返回的安装脚本和复制命令，检查首次安装、重复安装后的进程凭据、旧凭据继续可用、迁移到全新主机及已有静态路由的预检和恢复下发。测试结束自动删除测试容器、网络和凭据，构建镜像保留作缓存。
 
 更多运维说明见 [docs/README.md](docs/README.md)。

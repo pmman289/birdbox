@@ -70,6 +70,7 @@ function mutationWaitPresentation(path: string, method: string): MutationWaitPre
   else if (/^\/api\/agent\/nodes\/[A-Za-z_][A-Za-z0-9_]*\/upgrade$/.test(pathname)) title = "正在升级 Agent";
   else if (pathname === "/api/agent/upgrades/batch") title = "正在启动 Agent 批量升级";
   else if (pathname === "/api/nodes/setup-script") title = "正在生成节点准备脚本";
+  else if (/^\/api\/nodes\/[^/]+\/reinstall-script$/.test(pathname)) title = "正在生成节点安装脚本";
   else if (/^\/api\/nodes(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除节点" : "正在保存节点";
   else if (/^\/api\/peers(?:\/|$)/.test(pathname) || /\/peers$/.test(pathname)) title = method === "DELETE" ? "正在删除 Peer" : "正在保存 Peer";
   else if (/^\/api\/statics(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Static" : "正在应用 Static 变更";
