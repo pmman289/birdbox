@@ -29,7 +29,7 @@ docker build --build-arg "BIRD_VERSION=${BIRD_VERSION:-2.17.5}" -t "$TEST_IMAGE"
 }
 mkdir -p "$TEST_DIRECTORY/bin"
 docker run --rm -v "$PROJECT_ROOT/agent:/src:ro" -v "$TEST_DIRECTORY/bin:/out" -w /src \
-  -e CGO_ENABLED=0 golang:1.24 \
+  -e CGO_ENABLED=0 golang:1.24@sha256:d2d2bc1c84f7e60d7d2438a3836ae7d0c847f4888464e7ec9ba3a1339a1ee804 \
   sh -c 'agent_arch=$(go env GOARCH); go build -trimpath -ldflags="-s -w -X main.version=installer-e2e -X main.buildArch=$agent_arch" -o "/out/birdbox-agent-$agent_arch" .'
 cp "$FIXTURES/verify.mjs" "$TEST_DIRECTORY/verify.mjs"
 docker network create "$TEST_ID" >/dev/null
@@ -39,7 +39,7 @@ docker run -d --name "$CONTROLLER" --network "$TEST_ID" \
   -e BIRDBOX_NODES_FILE=/verification/no-nodes.json -e BIRDBOX_HOST=0.0.0.0 -e BIRDBOX_PORT=3000 \
   -e "BIRDBOX_PUBLIC_URL=http://$CONTROLLER:3000" -e BIRDBOX_SECURE_COOKIE=false \
   -e BIRDBOX_AGENT_BINARY_PATH=/verification/bin \
-  node:24-bookworm node --import=tsx src/server.ts >/dev/null
+  node:24-bookworm@sha256:7b559cf7f77d837192392499a850abb1a3d1f49fbc2bd0692d54b212c9e38f6d node --import=tsx src/server.ts >/dev/null
 docker exec "$CONTROLLER" node -e '
   for(let i=0;i<100;i++){try{if((await fetch("http://127.0.0.1:3000/api/health")).ok)process.exit(0)}catch{}
   await new Promise(r=>setTimeout(r,200))}process.exit(1)'

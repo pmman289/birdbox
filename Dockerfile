@@ -1,4 +1,4 @@
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS web-build
+FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d AS web-build
 
 WORKDIR /app
 COPY package*.json ./
@@ -21,7 +21,7 @@ RUN set -eux; go vet ./...; go test ./...; mkdir -p /out; \
     build amd64 GOARCH=amd64; build arm64 GOARCH=arm64; build arm GOARCH=arm GOARM=7; build armv6 GOARCH=arm GOARM=6; build armv5 GOARCH=arm GOARM=5; \
     build mips GOARCH=mips GOMIPS=softfloat; build mipsle GOARCH=mipsle GOMIPS=softfloat; build mips64 GOARCH=mips64 GOMIPS64=softfloat; build mips64le GOARCH=mips64le GOMIPS64=softfloat; build riscv64 GOARCH=riscv64
 
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS bgpq4-build
+FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d AS bgpq4-build
 
 ARG BGPQ4_VERSION=1.12
 ARG BGPQ4_COMMIT=95d3a4c12b18dce45a1fbb62a2327ed302a8f046
@@ -34,7 +34,7 @@ RUN apk add --no-cache autoconf automake build-base git libtool \
     && make -j"$(getconf _NPROCESSORS_ONLN)" \
     && strip bgpq4
 
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+FROM node:24-alpine@sha256:6a1c190e17215d844926b0677f4bf87273ff7d5e54db06d3b5b5863ab0b09a3d
 
 ARG BIRDBOX_VERSION=dev
 ARG VCS_REF=unknown

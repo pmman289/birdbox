@@ -1,4 +1,4 @@
-FROM node:24-bookworm
+FROM node:24-bookworm@sha256:7b559cf7f77d837192392499a850abb1a3d1f49fbc2bd0692d54b212c9e38f6d
 
 ARG BIRD_VERSION=2.17.5
 ENV container=docker

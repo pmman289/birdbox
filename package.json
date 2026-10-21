@@ -20,18 +20,18 @@
     "node": ">=24"
   },
   "dependencies": {
-    "fastify": "^5.11.3",
-    "mysql2": "^3.23.2"
+    "fastify": "5.12.7",
+    "mysql2": "3.24.6"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "1.64.1",
     "@types/node": "24.13.3",
     "@vitejs/plugin-vue": "5.2.4",
-    "tsx": "4.23.11",
+    "tsx": "4.23.15",
     "typescript": "5.9.3",
-    "vite": "6.4.3",
-    "vue": "3.5.41",
-    "vue-tsc": "3.3.9",
+    "vite": "6.4.5",
+    "vue": "3.5.44",
+    "vue-tsc": "3.3.13",
     "pinyin-pro": "3.28.2"
   }
 }
