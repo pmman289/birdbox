@@ -151,7 +151,7 @@ export function createSessionDraft(dashboard: DashboardResponse): SessionDraft |
   const node = dashboard.node;
   if (!peer || !node) return null;
   if (peer.session) {
-    const { id: _id, ...session } = cloneReactive(peer.session);
+    const { id: _id, managedBy: _managedBy, ...session } = cloneReactive(peer.session);
     for (const family of ["ipv4", "ipv6"] as const) {
       for (const direction of ["importPolicy", "exportPolicy"] as const) {
         const policy = session.channels[family][direction];

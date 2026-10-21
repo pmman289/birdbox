@@ -5,6 +5,7 @@ import type {
   AddressFamily,
   BgpChannel,
   BgpOptions,
+  ChannelPolicy,
   Peer,
   PolicyDefine,
   PolicyFilter,
@@ -16,7 +17,7 @@ import OptionalTextInput from "../shared/OptionalTextInput.vue";
 import PolicyEditor from "./PolicyEditor.vue";
 import { channelRequiresExtendedNextHop } from "./session-draft";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   family: AddressFamily;
   peer: Peer;
   bgp: BgpOptions;
@@ -24,7 +25,8 @@ const props = defineProps<{
   filters: PolicyFilter[];
   defines: PolicyDefine[];
   active: boolean;
-}>();
+  compactPolicies?: boolean;
+}>(), { compactPolicies: false });
 
 const emit = defineEmits<{
   "open-policy-action": [direction: "import" | "export"];
@@ -37,6 +39,12 @@ const capabilitiesEnabled = computed(() => props.bgp.capabilities !== "off");
 const multihop = computed(() => props.bgp.connectionMode === "multihop");
 const automaticExtendedNextHop = computed(() => model.value.enabled && channelRequiresExtendedNextHop(props.peer, props.family));
 const extendedNextHopLabel = computed(() => automaticExtendedNextHop.value ? "Extended Next Hop · 自动" : "Extended Next Hop");
+function policySummary(policy: ChannelPolicy, direction: "import" | "export"): string {
+  if (policy.mode === "custom") return `Filter · ${props.filters.find(f => f.id === policy.filterId)?.name ?? '尚未选择'}`;
+  const count = policy.steps.filter(s => s.type === "function").length;
+  const action = policy.formAction === "none" ? (direction === "import" ? "禁止接收" : "禁止发布") : policy.formAction === "cidr" ? `指定前缀 · ${props.defines.find(d => d.id === model.value.exportDefineId)?.name ?? '尚未选择'}` : (direction === "import" ? "接收全部" : "发布全部");
+  return count ? `${count} 个 Function · ${action}` : action;
+}
 
 watch(automaticExtendedNextHop, (automatic) => {
   if (automatic) model.value.extendedNextHop = true;
@@ -63,9 +71,11 @@ watch(() => props.bgp.disableAfterError, (disabledAfterError) => {
   <section class="afi-channel-panel" :class="{ active }" :data-family="family" role="tabpanel" :hidden="!active">
     <div class="channel-enable-row">
       <div><span>{{ label }}</span><h3>{{ label }} Channel</h3></div>
-      <label class="compact-toggle"><span>启用</span><input v-model="model.enabled" type="checkbox"><i aria-hidden="true"></i></label>
+      <label class="compact-toggle"><span>启用</span><input v-model="model.enabled" type="checkbox" :aria-label="`启用 ${label} Channel`"><i aria-hidden="true"></i></label>
     </div>
     <div class="channel-content" :class="{ disabled }">
+      <component :is="compactPolicies ? 'details' : 'div'" :class="{ 'channel-policy-disclosure': compactPolicies }">
+      <summary v-if="compactPolicies"><strong>导入策略（Import）</strong><span>{{ policySummary(model.importPolicy, 'import') }}</span></summary>
       <PolicyEditor
         :family="family"
         direction="import"
@@ -78,6 +88,9 @@ watch(() => props.bgp.disableAfterError, (disabledAfterError) => {
         @update:policy="model.importPolicy = $event"
         @open-policy-action="emit('open-policy-action', 'import')"
       />
+      </component>
+      <component :is="compactPolicies ? 'details' : 'div'" :class="{ 'channel-policy-disclosure': compactPolicies }">
+      <summary v-if="compactPolicies"><strong>导出策略（Export）</strong><span>{{ policySummary(model.exportPolicy, 'export') }}</span></summary>
       <PolicyEditor
         :family="family"
         direction="export"
@@ -91,7 +104,10 @@ watch(() => props.bgp.disableAfterError, (disabledAfterError) => {
         @update:export-define-id="model.exportDefineId = $event"
         @open-policy-action="emit('open-policy-action', 'export')"
       />
+      </component>
 
+      <component :is="compactPolicies ? 'details' : 'div'" :class="{ 'channel-policy-disclosure': compactPolicies }">
+      <summary v-if="compactPolicies"><strong>路由数量限制</strong><span>{{ model.importLimit.value === null && model.exportLimit.value === null ? 'Import / Export 均无上限' : `Import ${model.importLimit.value ?? '无上限'} / Export ${model.exportLimit.value ?? '无上限'}` }}</span></summary>
       <section class="session-options">
         <div class="option-heading"><span>{{ label }}</span><h3>Channel 限制</h3></div>
         <div class="limit-grid">
@@ -101,6 +117,7 @@ watch(() => props.bgp.disableAfterError, (disabledAfterError) => {
           <div class="field"><label>动作</label><select v-model="model.exportLimit.action" :disabled="disabled"><option value="disable">disable</option><option value="restart">restart</option><option value="block">block</option><option value="warn">warn</option></select></div>
         </div>
       </section>
+      </component>
 
       <details class="channel-advanced-settings">
         <summary><span>{{ label }} 高级配置</span><small>Address family</small></summary>

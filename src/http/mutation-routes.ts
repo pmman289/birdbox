@@ -147,29 +147,47 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.put<{ Params: { peerId: string } }>("/api/peers/:peerId", async (request, reply) => jsonReply(reply, await options.service.updatePeer(validId(request.params.peerId), jsonBody(request))));
   app.delete<{ Params: { peerId: string } }>("/api/peers/:peerId", async (request, reply) => jsonReply(reply, await options.service.deletePeer(validId(request.params.peerId))));
 
+  app.post("/api/statics/preview", async (request, reply) => jsonReply(reply, await options.service.previewStatic(jsonBody(request))));
   app.post("/api/statics", async (request, reply) => jsonReply(reply, await options.service.createStatic(jsonBody(request))));
   app.put<{ Params: { resourceId: string } }>("/api/statics/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateStatic(validId(request.params.resourceId), jsonBody(request))));
   app.delete<{ Params: { resourceId: string } }>("/api/statics/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteStatic(validId(request.params.resourceId))));
+  for (const kind of ["directs", "kernels"] as const) {
+    app.get<{ Querystring: { id?: string } }>(`/api/${kind}/editor-context`, async (request, reply) => jsonReply(reply, await options.service.getSystemProtocolContext(kind, request.query.id ? validId(request.query.id) : null)));
+    app.post(`/api/${kind}/preview`, async (request, reply) => jsonReply(reply, await options.service.previewSystemProtocol(kind, jsonBody(request))));
+  }
   app.post("/api/directs", async (request, reply) => jsonReply(reply, await options.service.createDirect(jsonBody(request))));
   app.put<{ Params: { resourceId: string } }>("/api/directs/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateDirect(validId(request.params.resourceId), jsonBody(request))));
-  app.delete<{ Params: { resourceId: string } }>("/api/directs/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteDirect(validId(request.params.resourceId))));
+  app.delete<{ Params: { resourceId: string } }>("/api/directs/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteDirect(validId(request.params.resourceId), jsonBody(request))));
+  app.post("/api/pipes/preview", async (request, reply) => jsonReply(reply, await options.service.previewPipe(jsonBody(request))));
+  app.post("/api/pipes", async (request, reply) => jsonReply(reply, await options.service.createPipe(jsonBody(request))));
+  app.put<{ Params: { resourceId: string } }>("/api/pipes/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updatePipe(validId(request.params.resourceId), jsonBody(request))));
+  app.delete<{ Params: { resourceId: string } }>("/api/pipes/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deletePipe(validId(request.params.resourceId))));
   app.post("/api/kernels", async (request, reply) => jsonReply(reply, await options.service.createKernel(jsonBody(request))));
   app.put<{ Params: { resourceId: string } }>("/api/kernels/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateKernel(validId(request.params.resourceId), jsonBody(request))));
-  app.delete<{ Params: { resourceId: string } }>("/api/kernels/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteKernel(validId(request.params.resourceId))));
+  app.delete<{ Params: { resourceId: string } }>("/api/kernels/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteKernel(validId(request.params.resourceId), jsonBody(request))));
 
+  app.get<{ Querystring: { id?: string } }>("/api/rpki/editor-context", async (request, reply) => jsonReply(reply, await options.service.getRpkiContext(request.query.id ? validId(request.query.id) : null)));
+  app.post("/api/rpki/preview", async (request, reply) => jsonReply(reply, await options.service.previewRpki(jsonBody(request))));
   app.post("/api/rpki", async (request, reply) => jsonReply(reply, await options.service.createRpki(jsonBody(request))));
   app.put<{ Params: { resourceId: string } }>("/api/rpki/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateRpki(validId(request.params.resourceId), jsonBody(request))));
-  app.delete<{ Params: { resourceId: string } }>("/api/rpki/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteRpki(validId(request.params.resourceId))));
+  app.delete<{ Params: { resourceId: string } }>("/api/rpki/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteRpki(validId(request.params.resourceId), jsonBody(request))));
 
   app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string } }>("/api/source-policies/:resourceId/plan", async (request, reply) => jsonReply(reply, await options.service.getSourcePolicyPlan(validId(request.params.resourceId), typeof request.query.nodeId === "string" ? request.query.nodeId : null)));
+  app.get<{ Querystring: { id?: string } }>("/api/source-policies/editor-context", async (request, reply) => jsonReply(reply, await options.service.getSourcePolicyContext(typeof request.query.id === "string" ? validId(request.query.id) : undefined)));
   app.post("/api/source-policies/preview", async (request, reply) => jsonReply(reply, await options.service.previewSourcePolicy(jsonBody(request))));
   app.post("/api/source-policies", async (request, reply) => jsonReply(reply, await options.service.createSourcePolicy(jsonBody(request))));
   app.put<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updateSourcePolicy(validId(request.params.resourceId), jsonBody(request))));
-  app.delete<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteSourcePolicy(validId(request.params.resourceId))));
+  app.delete<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deleteSourcePolicy(validId(request.params.resourceId), jsonBody(request))));
 
+  for (const collection of ["functions", "filters"] as const) {
+    app.get<{ Querystring: { id?: string } }>(`/api/${collection}/editor-context`, async (request, reply) => jsonReply(reply, await options.service.getPolicyContext(collection, request.query.id ? validId(request.query.id) : null)));
+    app.post(`/api/${collection}/preview`, async (request, reply) => jsonReply(reply, await options.service.previewPolicy(collection, jsonBody(request))));
+  }
+  app.get<{ Querystring: { id?: string } }>("/api/defines/editor-context", async (request, reply) => jsonReply(reply, await options.service.getDefineContext(request.query.id ? validId(request.query.id) : null)));
+  app.post("/api/defines/preview", async (request, reply) => jsonReply(reply, await options.service.previewDefine(jsonBody(request))));
   app.post<{ Params: { collection: string } }>("/api/:collection(defines|functions|filters)", async (request, reply) => jsonReply(reply, await options.service.createPolicy(policyCollection(request.params.collection), jsonBody(request))));
   app.post("/api/defines/irr/resolve", async (request, reply) => jsonReply(reply, await options.service.resolveIrrDefine(jsonBody(request))));
-  app.post<{ Params: { resourceId: string } }>("/api/defines/:resourceId/sync", async (request, reply) => jsonReply(reply, await options.service.syncIrrDefine(validId(request.params.resourceId))));
+  app.post<{ Params: { resourceId: string } }>("/api/defines/:resourceId/sync", async (request, reply) => jsonReply(reply, await options.service.syncIrrDefine(validId(request.params.resourceId), jsonBody(request))));
   app.post<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions)/:resourceId/move", async (request, reply) => {
     const body = jsonBody(request);
     const direction = String(body.direction ?? "");
@@ -179,17 +197,18 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
     return jsonReply(reply, await options.service.movePolicy(collection, validId(request.params.resourceId), direction));
   });
   app.put<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions|filters)/:resourceId", async (request, reply) => jsonReply(reply, await options.service.updatePolicy(policyCollection(request.params.collection), validId(request.params.resourceId), jsonBody(request))));
-  app.delete<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions|filters)/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deletePolicy(policyCollection(request.params.collection), validId(request.params.resourceId))));
+  app.delete<{ Params: { collection: string; resourceId: string } }>("/api/:collection(defines|functions|filters)/:resourceId", async (request, reply) => jsonReply(reply, await options.service.deletePolicy(policyCollection(request.params.collection), validId(request.params.resourceId), jsonBody(request))));
 
+  app.get<{ Querystring: { nodeId?: string; peerId?: string } }>("/api/sessions/editor-context", async (request, reply) => jsonReply(reply, await options.service.getSessionContext(validId(request.query.nodeId ?? ""), validId(request.query.peerId ?? ""))));
   app.post("/api/sessions/preview", async (request, reply) => jsonReply(reply, await options.service.previewSession(jsonBody(request))));
   app.post("/api/sessions/apply", async (request, reply) => jsonReply(reply, await options.service.applySession(jsonBody(request))));
-  app.delete<{ Params: { sessionId: string } }>("/api/sessions/:sessionId", async (request, reply) => jsonReply(reply, await options.service.deleteSession(validId(request.params.sessionId))));
+  app.delete<{ Params: { sessionId: string } }>("/api/sessions/:sessionId", async (request, reply) => jsonReply(reply, await options.service.deleteSession(validId(request.params.sessionId), jsonBody(request))));
 
   app.get("/api/ibgp-domains", async (_request, reply) => jsonReply(reply, await options.service.listIbgpDomains()));
   app.post("/api/ibgp-domains/preview", async (request, reply) => jsonReply(reply, await options.service.previewIbgpDomain(jsonBody(request))));
   app.post("/api/ibgp-domains", async (request, reply) => jsonReply(reply, await options.service.createIbgpDomain(jsonBody(request))));
   app.put<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.updateIbgpDomain(validId(request.params.domainId), jsonBody(request))));
-  app.delete<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteIbgpDomain(validId(request.params.domainId))));
+  app.delete<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteIbgpDomain(validId(request.params.domainId), jsonBody(request))));
   app.patch<{ Params: { domainId: string } }>("/api/ibgp-domains/:domainId/layout", async (request, reply) => jsonReply(reply, await options.service.updateIbgpDomainLayout(validId(request.params.domainId), jsonBody(request))));
 
   app.get("/api/ospf", async (_request, reply) => jsonReply(reply, await options.service.listOspfDomains()));
@@ -198,6 +217,6 @@ export const mutationRoutes: FastifyPluginAsync<MutationRoutesOptions> = async (
   app.post("/api/ospf/render", async (request, reply) => jsonReply(reply, await options.service.renderOspfDomain(jsonBody(request))));
   app.post("/api/ospf", async (request, reply) => jsonReply(reply, await options.service.createOspfDomain(jsonBody(request))));
   app.put<{ Params: { domainId: string } }>("/api/ospf/:domainId", async (request, reply) => jsonReply(reply, await options.service.updateOspfDomain(validId(request.params.domainId), jsonBody(request))));
-  app.delete<{ Params: { domainId: string } }>("/api/ospf/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteOspfDomain(validId(request.params.domainId))));
+  app.delete<{ Params: { domainId: string } }>("/api/ospf/:domainId", async (request, reply) => jsonReply(reply, await options.service.deleteOspfDomain(validId(request.params.domainId), jsonBody(request))));
   app.patch<{ Params: { domainId: string } }>("/api/ospf/:domainId/layout", async (request, reply) => jsonReply(reply, await options.service.updateOspfDomainLayout(validId(request.params.domainId), jsonBody(request))));
 };

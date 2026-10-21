@@ -1,3 +1,5 @@
+import { normalizePipeProtocol, pipeManagedTables } from "./bird-pipe.js";
+import { assertExplicitProtocolResources } from "./inventory-safety.js";
 import net from "node:net";
 import type {
   AddressFamily,
@@ -20,7 +22,7 @@ import { normalizeDefine, normalizePolicyFilter, normalizePolicyFunction } from 
 import { isExactPrefix } from "./bird-prefix.js";
 import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
-import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
+import { normalizeStaticProtocol } from "./bird-static.js";
 import {
   MAX_SOURCE_POLICY_SOURCES_PER_GROUP,
   normalizeSourcePolicyEgress,
@@ -34,6 +36,7 @@ import { normalizeOspfDomain, ospfDomainNodeIds, ospfNodeHasAreas, ospfProtocolN
 import { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
 import {
   resourceAppliesToNode,
+  resourceScopeContains,
   scopedNodeIds,
 } from "../packages/contracts/src/resource-scope.js";
 
@@ -96,6 +99,8 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   let staticProtocols = list(input, "staticProtocols").map(normalizeStaticProtocol);
   const directProtocols = list(input, "directProtocols").map((item) => normalizeDirectProtocol(item));
   const kernelProtocols = list(input, "kernelProtocols").map((item) => normalizeKernelProtocol(item));
+  const pipeProtocols = list(input, "pipeProtocols").map(normalizePipeProtocol);
+  assertValidation(new Set(pipeProtocols.map((item) => item.id)).size === pipeProtocols.length, "Pipe 资源 ID 重复");
   const sourcePolicies = list(input, "sourcePolicies").map(normalizeSourcePolicyEgress);
   const sessions = list(input, "sessions").map(normalizeSession);
   const ibgpDomains = list(input, "ibgpDomains").map(normalizeIbgpDomain);
@@ -130,6 +135,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   assertValidation(new Set(normalizedKernelProtocols.map((item) => item.id)).size === normalizedKernelProtocols.length, "Kernel 资源 ID 重复");
   for (const resource of normalizedDirectProtocols) assertValidation(nodeMap.has(resource.nodeId), `Direct 资源 ${resource.name} 引用了不存在的节点`);
   for (const resource of normalizedKernelProtocols) for (const nodeId of resource.nodeIds ?? []) assertValidation(nodeMap.has(nodeId), `Kernel 资源 ${resource.name} 引用了不存在的节点`);
+  for (const resource of pipeProtocols) for (const nodeId of resource.nodeIds ?? []) assertValidation(nodeMap.has(nodeId), `Pipe 资源 ${resource.name} 引用了不存在的节点`);
   const peerMap = new Map(peers.map((item) => [item.id, item]));
   const defineMap = new Map(defines.map((item) => [item.id, item]));
   const functionMap = new Map(functions.map((item) => [item.id, item]));
@@ -137,7 +143,7 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   for (const resource of normalizedKernelProtocols) {
     const targetNodeIds = resource.nodeIds ?? nodes.map((node) => node.id);
     const exportPolicies = Object.values(resource.exportPolicies ?? {}).filter((item) => item.mode === "visual").map((item) => item.policy);
-    for (const policy of [resource.importPolicy, ...exportPolicies]) {
+    for (const policy of [...Object.values(resource.importPolicies ?? { legacy: resource.importPolicy }), ...exportPolicies]) {
       for (const step of policy.steps.filter((item) => item.type === "function")) {
         const fn = functionMap.get(step.functionId);
         assertValidation(fn && fn.enabled && fn.callable && targetNodeIds.every((nodeId) => resourceAppliesToNode(fn, nodeId)), `Kernel 资源 ${resource.name} 引用了不可用的 Function`);
@@ -145,6 +151,18 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
       if (policy.filterId !== null) {
         const filter = filterMap.get(policy.filterId);
         assertValidation(filter && filter.enabled && targetNodeIds.every((nodeId) => resourceAppliesToNode(filter, nodeId)), `Kernel 资源 ${resource.name} 引用了不可用的 Filter`);
+      }
+    }
+  }
+  for (const pipe of [...pipeProtocols, ...staticProtocols]) {
+    for (const policy of ("peerTable" in pipe ? [pipe.importPolicy, pipe.exportPolicy] : [pipe.importPolicy]).filter((item): item is NonNullable<typeof item> => Boolean(item))) {
+      for (const step of policy.steps.filter((item) => item.type === "function")) {
+        const fn = functionMap.get(step.functionId);
+        assertValidation(fn && fn.enabled && fn.callable && resourceScopeContains(fn, pipe), `协议 ${pipe.name} 引用了不可用的 Function`);
+      }
+      if (policy.filterId !== null) {
+        const filter = filterMap.get(policy.filterId);
+        assertValidation(filter && filter.enabled && resourceScopeContains(filter, pipe), `协议 ${pipe.name} 引用了不可用的 Filter`);
       }
     }
   }
@@ -332,7 +350,38 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
     const nodeSourcePolicies = sourcePolicies.filter((item) => resourceAppliesToNode(item, node.id));
     assertValidation(new Set(nodeSessions.map((item) => item.peerId)).size === nodeSessions.length, `节点 ${node.name} 对同一 Peer 存在多个会话`);
     assertValidation(new Set(nodeSessions.map((item) => item.protocolName)).size === nodeSessions.length, `节点 ${node.name} 的协议名称重复`);
+    const nodePipes = pipeProtocols.filter((item) => resourceAppliesToNode(item, node.id));
+    const nodeKernels = normalizedKernelProtocols.filter(item => resourceAppliesToNode(item, node.id));
+    const managedPipeTables = pipeManagedTables(nodePipes, nodeStaticProtocols, nodeKernels);
+    const kernelBirdTables = new Set<string>(), kernelLinuxTables = new Set<string>();
+    for (const kernel of nodeKernels) for (const family of FAMILIES) {
+      if (!kernel[family]) continue;
+      const ref = kernel.tables?.[family], name = ref?.name ?? (family === "ipv4" ? "master4" : "master6");
+      for (const session of nodeSessions) for (const other of FAMILIES) assertValidation(session.channels[other].table !== name || other === family, `Kernel 路由表 ${name} 与 BGP Channel 地址族冲突`);
+      assertValidation(!nodeSourcePolicies.some(item => item.groups.some(group => sourcePolicyNames(item, group).table === name)) || family === "ipv4", `Kernel 路由表 ${name} 的地址族冲突`);
+      if (!kernel.enabled) continue;
+      const birdKey = `${family}:${name}`, linuxKey = `${family}:${kernel.table ?? 254}`;
+      assertValidation(!kernelBirdTables.has(birdKey), `节点 ${node.name} 的 BIRD 表 ${name} 已有 Kernel 同步协议，请选择独立 BIRD 表`);
+      assertValidation(!kernelLinuxTables.has(linuxKey), `节点 ${node.name} 的 Linux ${family} 表 ${kernel.table ?? "main"} 已有 Kernel 同步协议`);
+      assertValidation(family !== "ipv4" || !nodeSourcePolicies.some(item => item.enabled && item.groups.some(group => group.kernelTable === (kernel.table ?? 254) || sourcePolicyNames(item, group).table === name)), `节点 ${node.name} 的 Kernel 路由表与源地址出口映射冲突`);
+      kernelBirdTables.add(birdKey); kernelLinuxTables.add(linuxKey);
+    }
+    for (const pipe of nodePipes) for (const ref of [pipe.table, pipe.peerTable]) {
+      const sourceTable = nodeSourcePolicies.some((item) => item.groups.some((group) => sourcePolicyNames(item, group).table === ref.name));
+      assertValidation(!sourceTable || pipe.family === "ipv4", `源地址出口映射表 ${ref.name} 只能用于 IPv4 Pipe`);
+    }
+    for (const pipe of nodePipes) for (const ref of [pipe.table, pipe.peerTable]) {
+      for (const session of nodeSessions) for (const family of FAMILIES) {
+        assertValidation(session.channels[family].table !== ref.name || family === pipe.family, `Pipe 路由表 ${ref.name} 与 BGP Channel 地址族冲突`);
+      }
+    }
+    for (const item of nodeStaticProtocols) for (const name of [item.table?.name, item.igpTable].filter(Boolean)) {
+      assertValidation(!nodeSourcePolicies.some(resource => resource.groups.some(group => sourcePolicyNames(resource, group).table === name)) || item.family === "ipv4", "Static 路由表地址族冲突");
+      for (const session of nodeSessions) for (const family of FAMILIES) assertValidation(session.channels[family].table !== name || family === item.family, "Static 路由表与 BGP Channel 地址族冲突");
+    }
     const symbols = [
+      ...nodePipes.filter((item) => item.enabled).map((item) => item.name),
+      ...managedPipeTables.map((item) => item.name),
       ...nodeDefines.map((item) => item.name),
       ...nodeFunctions.map((item) => item.name),
       ...nodeFilters.map((item) => item.name),
@@ -359,23 +408,6 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
       })),
     ];
     assertValidation(new Set(symbols).size === symbols.length, `节点 ${node.name} 的 BIRD 全局标识符冲突`);
-    for (const family of FAMILIES) {
-      const routeDefinitions = new Map<string, string>();
-      for (const resource of nodeStaticProtocols) {
-        if (!resource.enabled || resource.family !== family || resource.defineId === null) continue;
-        const staticDefine = defineMap.get(resource.defineId);
-        if (!staticDefine || staticDefine.type === "expression") continue;
-        for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
-          const action = resource.routeActions[prefix] ?? resource.action;
-          if (action === null) continue;
-          const routeFilter = resource.routeFilters[prefix] ?? { operations: [], custom: "" };
-          const signature = staticRouteDefinitionSignature(action, routeFilter);
-          const existing = routeDefinitions.get(prefix);
-          assertValidation(!existing || existing === signature, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由定义`);
-          routeDefinitions.set(prefix, signature);
-        }
-      }
-    }
     const activeSourcePolicies = nodeSourcePolicies.filter((item) => item.enabled);
     const sourceRoutes: Array<{ policy: typeof activeSourcePolicies[number]; group: typeof activeSourcePolicies[number]["groups"][number]; source: string; range: [number, number] }> = [];
     for (const policy of activeSourcePolicies) {
@@ -422,11 +454,11 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
   }
 
   if (!options.allowInvalidResourceDependencies) {
-    validateResourceDependencyGraph({ defines, functions, filters, rpki, staticProtocols, sourcePolicies, ospfDomains });
+    validateResourceDependencyGraph({ defines, functions, filters, rpki, staticProtocols, sourcePolicies, ospfDomains, pipeProtocols });
   }
 
-  return {
-    version: 28,
+  const inventory: Inventory = {
+    version: 31,
     nodes,
     peers,
     defines,
@@ -436,10 +468,13 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
     staticProtocols,
     directProtocols: normalizedDirectProtocols,
     kernelProtocols: normalizedKernelProtocols,
+    pipeProtocols,
     sourcePolicies,
     sessions,
     ibgpDomains,
     ospfDomains,
     ospfLayout,
   };
+  assertExplicitProtocolResources(input, inventory);
+  return inventory;
 }

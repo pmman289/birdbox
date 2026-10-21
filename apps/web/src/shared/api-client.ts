@@ -42,8 +42,8 @@ export class ApiError extends Error {
 function isDeploymentMutation(path: string, method: string): boolean {
   const query = new URLSearchParams(path.split("?", 2)[1]?.split("#", 1)[0] ?? "");
   path = path.split(/[?#]/, 1)[0] ?? path;
-  if (method === "GET") return false;
-  if (/^\/api\/(defines|functions|filters|rpki|statics|directs|kernels|source-policies)(?:\/|$)/.test(path)) return true;
+  if (method === "GET" || /^\/api\/(pipes|statics|defines|directs|kernels|rpki)\/preview$/.test(path)) return false;
+  if (/^\/api\/(defines|functions|filters|rpki|statics|directs|kernels|pipes|source-policies)(?:\/|$)/.test(path)) return true;
   if (/^\/api\/sessions\/(?:preview|apply)$/.test(path)) return true;
   if (method === "DELETE" && /^\/api\/sessions\//.test(path)) return true;
   if (path === "/api/nodes/test" || (path === "/api/nodes" && method === "POST")) return true;
@@ -73,6 +73,7 @@ function mutationWaitPresentation(path: string, method: string): MutationWaitPre
   else if (/^\/api\/nodes\/[^/]+\/reinstall-script$/.test(pathname)) title = "正在生成节点安装脚本";
   else if (/^\/api\/nodes(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除节点" : "正在保存节点";
   else if (/^\/api\/peers(?:\/|$)/.test(pathname) || /\/peers$/.test(pathname)) title = method === "DELETE" ? "正在删除 Peer" : "正在保存 Peer";
+  else if (/^\/api\/pipes(?:\/|$)/.test(pathname)) title = pathname.endsWith("/preview") ? "正在预检 Pipe 配置" : method === "DELETE" ? "正在删除 Pipe" : "正在应用 Pipe 配置";
   else if (/^\/api\/statics(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Static" : "正在应用 Static 变更";
   else if (/^\/api\/directs(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Direct" : "正在应用 Direct 变更";
   else if (/^\/api\/kernels(?:\/|$)/.test(pathname)) title = method === "DELETE" ? "正在删除 Kernel" : "正在应用 Kernel 变更";

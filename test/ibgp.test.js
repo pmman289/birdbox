@@ -22,7 +22,7 @@ test("lists newly managed nodes in legacy iBGP domains without creating adjacenc
     version: 28, nodes: [...nodes, { id: "new", kind: "managed-node", name: "New", transport: "ssh", sshHost: "192.0.2.3", sshUser: "bird", routerId: "192.0.2.3", igpAddress: "10.0.0.3", listenPort: 179 }],
     peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [legacyDomain], ospfDomains: [], ospfLayout: {},
   };
-  const store = { read: async () => state };
+  const store = { read: async () => state, revisionOf: () => 1 };
   const service = createResourceApplicationService({
     store, deploymentService: { mutateAndApply: async () => { throw new Error("unused"); } }, nodeOnboarding: {}, sessions: {}, withDeploymentLock: async (operation) => operation(), makeId: (prefix) => `${prefix}_test`, addEvent: () => ({}), getEvents: () => [],
   });

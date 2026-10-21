@@ -14,6 +14,7 @@ import SessionControlButton from "../dashboard/SessionControlButton.vue";
 import { clearDashboard, loadDashboard, refreshDashboardRuntime, useDashboardStore } from "../dashboard/dashboard-store";
 import ResourceWorkspace from "../resources/ResourceWorkspace.vue";
 import SessionEditor from "../sessions/SessionEditor.vue";
+import { confirmLeaveSession, useSessionStore } from "../sessions/session-store";
 import IbgpWorkspace from "../ibgp/IbgpWorkspace.vue";
 import OspfWorkspace from "../ospf/OspfWorkspace.vue";
 import { api } from "../shared/api-client";
@@ -29,6 +30,7 @@ interface ToastItem {
 const THEME_STORAGE_KEY = "birdbox-theme";
 const RUNTIME_REFRESH_INTERVAL_MS = 3_000;
 const authenticated = ref(false);
+const ibgpWorkspace = ref<InstanceType<typeof IbgpWorkspace> | null>(null);
 const activeWorkspace = ref<"sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace" | "ospfWorkspace">("sessionWorkspace");
 const accountDialog = ref<HTMLDialogElement | null>(null);
 const ospfWarningDialog = ref<HTMLDialogElement | null>(null);
@@ -227,6 +229,7 @@ async function showApplication(): Promise<void> {
 }
 
 async function logout(): Promise<void> {
+  if (!confirmLeaveSession() || !ibgpWorkspace.value?.confirmLeave()) return;
   try {
     await api("/api/auth/logout", { method: "POST" });
   } catch (error) {
@@ -237,6 +240,11 @@ async function logout(): Promise<void> {
 }
 
 function activateWorkspace(workspace: "sessionWorkspace" | "resourceWorkspace" | "ibgpWorkspace" | "ospfWorkspace", resourceTarget: ResourceWorkspaceTarget | null = null): void {
+  if (activeWorkspace.value === "ibgpWorkspace" && workspace !== "ibgpWorkspace" && !ibgpWorkspace.value?.confirmLeave()) return;
+  if (activeWorkspace.value === "sessionWorkspace" && workspace !== "sessionWorkspace") {
+    if (!confirmLeaveSession()) return;
+    useSessionStore().resetDraft();
+  }
   if (workspace === "ospfWorkspace" && !ospfWarningAcknowledged.value) {
     if (!ospfWarningDialog.value?.open) ospfWarningDialog.value?.showModal();
     return;
@@ -349,6 +357,8 @@ function handleWorkspaceResourceOpen(event: CustomEvent<{ target: ResourceWorksp
 }
 
 function handleDashboardSelection(event: CustomEvent<{ nodeId: string | null; peerId: string | null }>): void {
+  const { nodeId, peerId } = event.detail;
+  if ((nodeId !== dashboard.value?.node?.id || peerId !== dashboard.value?.selectedPeer?.id) && !confirmLeaveSession()) return;
   void refresh(event.detail.nodeId, event.detail.peerId);
 }
 
@@ -432,7 +442,7 @@ onBeforeUnmount(() => {
     </div>
 
     <section id="ibgpWorkspace" class="workspace-panel ibgp-workspace-panel" role="tabpanel" aria-labelledby="ibgpWorkspaceTab" :hidden="activeWorkspace !== 'ibgpWorkspace'">
-      <IbgpWorkspace />
+      <IbgpWorkspace ref="ibgpWorkspace" />
     </section>
     <section id="ospfWorkspace" class="workspace-panel ospf-workspace-panel" role="tabpanel" aria-labelledby="ospfWorkspaceTab" :hidden="activeWorkspace !== 'ospfWorkspace'">
       <OspfWorkspace />

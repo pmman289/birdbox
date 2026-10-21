@@ -8,7 +8,9 @@ import { createSessionDraft, toSessionMutationRequest, type SessionDraft } from 
 
 const { dashboard, loadGeneration } = useDashboardStore();
 const draft = ref<SessionDraft | null>(null);
-const dirty = ref(false);
+const savedSignature = ref<string | null>(null);
+const savedSourceSignature = ref<string | null>(null);
+const remoteChanged = ref(false);
 const previewPending = ref(false);
 const applyPending = ref(false);
 const previewConfig = ref<string | null>(null);
@@ -22,17 +24,22 @@ const contextKey = computed(() => {
 });
 
 const draftSignature = computed(() => draft.value ? JSON.stringify(draft.value) : null);
+const dirty = computed(() => draftSignature.value !== savedSignature.value);
+const sourceSignature = computed(() => dashboard.value && isEbgpDashboardPeer(dashboard.value.selectedPeer)
+  ? JSON.stringify(createSessionDraft(dashboard.value)) : null);
 
 function resetDraft(clearPreview = true): void {
   draft.value = dashboard.value && isEbgpDashboardPeer(dashboard.value.selectedPeer)
     ? createSessionDraft(dashboard.value)
     : null;
-  dirty.value = false;
+  savedSignature.value = draftSignature.value;
+  savedSourceSignature.value = sourceSignature.value;
+  remoteChanged.value = false;
   if (clearPreview) {
     previewConfig.value = null;
     previewContext.value = null;
   }
-  lastPreviewSignature.value = draftSignature.value;
+  lastPreviewSignature.value = null;
   lastPreviewFailureSignature.value = null;
 }
 
@@ -43,13 +50,19 @@ function setPreviewConfig(config: string | null, context = contextKey.value): vo
 
 function replaceDraft(next: SessionDraft | null, markDirty = true): void {
   draft.value = next;
-  dirty.value = markDirty;
+  if (!markDirty) savedSignature.value = draftSignature.value;
 }
 
 function mutateDraft(mutator: (value: SessionDraft) => void): void {
   if (!draft.value) return;
   mutator(draft.value);
-  dirty.value = true;
+}
+
+function rebaseDraft(): void {
+  savedSourceSignature.value = sourceSignature.value;
+  savedSignature.value = sourceSignature.value;
+  remoteChanged.value = false;
+  setPreviewConfig(null); lastPreviewSignature.value = null;
 }
 
 function sessionPayload(): SessionMutationRequest | null {
@@ -58,12 +71,21 @@ function sessionPayload(): SessionMutationRequest | null {
   return toSessionMutationRequest(draft.value, peer);
 }
 
-watch([contextKey, loadGeneration], () => resetDraft(), { immediate: true });
+watch([contextKey, loadGeneration, sourceSignature], ([key], previous) => {
+  if (key !== previous?.[0] || !dirty.value) resetDraft();
+  else remoteChanged.value = sourceSignature.value !== savedSourceSignature.value;
+}, { immediate: true });
+
+export function confirmLeaveSession(): boolean {
+  if (applyPending.value) return false;
+  return !dirty.value || window.confirm("当前 eBGP 会话有未应用修改，是否放弃这些修改？");
+}
 
 export function useSessionStore() {
   return {
     draft,
     dirty,
+    remoteChanged,
     previewPending,
     applyPending,
     previewConfig,
@@ -75,6 +97,7 @@ export function useSessionStore() {
     resetDraft,
     replaceDraft,
     mutateDraft,
+    rebaseDraft,
     sessionPayload,
     setPreviewConfig,
   };

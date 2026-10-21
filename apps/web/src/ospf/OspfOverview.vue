@@ -28,6 +28,7 @@ const props = defineProps<{
   actionPending: "preview" | "draft" | "save" | null;
   ready: boolean;
   dirty: boolean;
+  storedDraft?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -84,14 +85,14 @@ const statusLabel = computed(() => {
         />
         <button class="secondary-button compact-button" type="button" :disabled="actionPending !== null || !ready" @click="emit('new')">新建域</button>
         <button v-if="domainId" class="danger-button compact-button" type="button" :disabled="actionPending !== null || !ready" @click="emit('remove')">删除域</button>
-        <button class="secondary-button" type="button" aria-label="预检配置" :disabled="actionPending !== null || !ready || !nodeCount" @click="emit('preview')">
+        <button class="secondary-button" type="button" aria-label="预检配置" :disabled="actionPending !== null || !ready" @click="emit('preview')">
           {{ actionPending === "preview" ? "正在预检" : "预检并查看变更" }}
         </button>
         <button class="secondary-button" type="button" :disabled="!ready || !nodeCount" @click="emit('runtime')">查看运行态</button>
         <button class="secondary-button" type="button" :disabled="actionPending !== null || !ready" @click="emit('draft')">
           {{ actionPending === "draft" ? "正在保存草稿" : "保存草稿" }}
         </button>
-        <button class="primary-button" type="button" aria-label="保存并应用" :disabled="actionPending !== null || !ready || !nodeCount" @click="emit('save')">
+        <button class="primary-button" type="button" aria-label="保存并应用" :disabled="actionPending !== null || !ready" @click="emit('save')">
           {{ actionPending === "save" ? "正在应用" : dirty ? "应用 · 有未保存修改" : "应用" }}
         </button>
       </div>
@@ -103,7 +104,7 @@ const statusLabel = computed(() => {
       </article>
       <article class="ospf-health-card"><span>邻居</span><strong>{{ neighborCount }}</strong><small>当前运行态汇总</small></article>
       <article class="ospf-health-card"><span>OSPF 路由</span><strong>{{ routeCount }}</strong><small>v2/v3 合计</small></article>
-      <article class="ospf-health-card" :class="{ warning: dirty }"><span>配置状态</span><strong>{{ dirty ? "有待应用修改" : "已同步" }}</strong><small>{{ dirty ? "预检后再应用" : "与已保存配置一致" }}</small></article>
+      <article class="ospf-health-card" :class="{ warning: dirty || storedDraft }"><span>配置状态</span><strong>{{ dirty ? "有待应用修改" : storedDraft ? "草稿已保存，尚未应用" : "已同步" }}</strong><small>{{ dirty || storedDraft ? "预检后再应用" : "与已保存配置一致" }}</small></article>
     </div>
   </div>
 </template>

@@ -1,0 +1,24 @@
+import { expect, test } from '@playwright/test';
+test('iBGP real HTTP topology → independent endpoints → readonly preview → reviewed apply → edit/disable → delete', async ({ page }, info) => {
+  const errors: string[] = []; page.on('pageerror', e => errors.push(e.message)); page.on('dialog', d => d.accept());
+  await page.goto('/'); await page.locator('#authPassword').fill('demo-admin-password'); await page.locator('#authSubmitButton').click(); await expect(page.locator('#appMain')).toBeVisible();
+  await page.locator('#ibgpWorkspaceTab').click(); await expect(page.locator('#ibgpName')).toBeVisible();
+  await page.getByRole('button', { name: '新建域', exact: true }).click(); const name = `iBGP验收_${info.project.name}_${Date.now()}`; await page.locator('#ibgpName').fill(name);
+  await page.locator('.ibgp-node').filter({ hasText: 'Core Router A' }).click();
+  await page.locator('.quick-node').filter({ hasText: 'Core Router B' }).click();
+  await page.getByRole('button', { name: '同时查看双端', exact: true }).click();
+  const left = page.locator('.ibgp-side-editor').first(), right = page.locator('.ibgp-side-editor').nth(1);
+  await left.locator('input[pattern]').first().fill(`live_ibgp_${info.project.name}_left`); await right.locator('input[pattern]').first().fill(`live_ibgp_${info.project.name}_right`);
+  await left.locator('input[type=number]').first().fill('1179'); await right.locator('input[type=number]').first().fill('2179');
+  const before = await (await page.request.get('/api/ibgp-domains')).json();
+  const preflight = async () => { const b = page.getByRole('button', { name: '预检并查看变更', exact: true }); await expect(b).toBeEnabled(); await b.click(); await expect(page.locator('.ibgp-change-review > summary')).toHaveText(/· 通过$/); };
+  const apply = async () => { await page.getByRole('button', { name: '确认应用', exact: true }).click(); await expect(page.getByRole('button', { name: '保存域', exact: true })).toBeVisible(); };
+  await preflight(); const after = await (await page.request.get('/api/ibgp-domains')).json(); expect(after.inventory).toEqual(before.inventory); await apply();
+  let stored = await (await page.request.get('/api/ibgp-domains')).json(); const domain = stored.domains.find((d: any) => d.name === name); expect(domain).toBeTruthy(); let sessions = stored.inventory.sessions.filter((s: any) => s.managedBy?.domainId === domain.id); expect(sessions.map((s: any) => s.localPort)).toEqual([1179, 2179]);
+  await expect(left.locator('input[pattern]').first()).toHaveValue(`live_ibgp_${info.project.name}_left`);
+  await page.locator('label.compact-toggle').filter({ hasText: '启用当前连接' }).click(); await preflight(); await apply();
+  stored = await (await page.request.get('/api/ibgp-domains')).json(); sessions = stored.inventory.sessions.filter((s: any) => s.managedBy?.domainId === domain.id); expect(sessions.every((s: any) => !s.enabled)).toBe(true);
+  await Promise.all([page.waitForResponse(r => r.request().method() === 'DELETE' && r.url().endsWith(`/api/ibgp-domains/${domain.id}`) && r.ok()), page.locator('.ibgp-toolbar').getByRole('button', { name: '删除', exact: true }).click()]);
+  stored = await (await page.request.get('/api/ibgp-domains')).json(); expect(stored.domains.some((d: any) => d.id === domain.id)).toBe(false); expect(stored.inventory.sessions.some((s: any) => s.managedBy?.domainId === domain.id)).toBe(false); expect(errors).toEqual([]);
+  await page.request.post('/api/auth/logout');
+});

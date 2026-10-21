@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 
 test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testInfo) => {
   const pageErrors: string[] = [];
@@ -62,6 +63,7 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#dashboardRuntimeApp #localConfig")).toContainText("local 192.0.2.10");
   await page.locator("#sessionEditorApp .afi-tab").filter({ hasText: "IPv6" }).click();
   await expect(page.locator("#sessionEditorApp .afi-channel-panel.active")).toContainText("IPv6 Channel");
+  await page.locator('#sessionEditorApp .afi-channel-panel.active .channel-policy-disclosure').first().locator('summary').click();
   await page.locator("#sessionEditorApp .afi-channel-panel.active .compact-action-button").first().click();
   await expect(page.locator("#sessionEditorApp .policy-action-dialog")).toBeVisible();
   await page.locator("#sessionEditorApp .policy-action-dialog .secondary-button").click();
@@ -69,6 +71,7 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#dashboardRuntimeApp #eventLog")).toHaveClass(/active/);
   await page.locator("#dashboardRuntimeApp #localConfigTab").click();
   await expect(page.locator("#dashboardRuntimeApp #localConfig")).toHaveClass(/active/);
+  page.once("dialog", dialog => dialog.accept());
   await page.locator("#resourceWorkspaceTab").click();
   await expect(page.locator("#managementNodeRows")).toContainText("E2E Router");
   await page.getByRole("button", { name: "编辑节点 E2E Router" }).click();

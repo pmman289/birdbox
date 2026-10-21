@@ -30,7 +30,7 @@ export interface DashboardSelectionEventDetail {
   peerId: string | null;
 }
 
-export type ResourceWorkspaceTarget = "nodes" | "peers" | "defines" | "statics" | "directs" | "kernels" | "functions" | "filters" | "rpki" | "sourcePolicies";
+export type ResourceWorkspaceTarget = "nodes" | "peers" | "defines" | "statics" | "directs" | "kernels" | "pipes" | "functions" | "filters" | "rpki" | "sourcePolicies";
 export type ResourceEditKind = ResourceWorkspaceTarget;
 
 declare global {
@@ -45,6 +45,11 @@ declare global {
     "birdbox:dashboard-updated": CustomEvent<DashboardUpdatedEventDetail>;
     "birdbox:protocol-details-open": CustomEvent<{ peerId: string }>;
     "birdbox:routes-open": CustomEvent<{ peerId: string }>;
+    "birdbox:static-runtime-open": CustomEvent<{ id: string }>;
+    "birdbox:source-policy-runtime-open": CustomEvent<{ id: string }>;
+    "birdbox:system-runtime-open": CustomEvent<{ kind: "directs" | "kernels"; id: string }>;
+    "birdbox:rpki-runtime-open": CustomEvent<{ id: string }>;
+    "birdbox:pipe-runtime-open": CustomEvent<{ id: string }>;
     "birdbox:resource-edit": CustomEvent<{ kind: ResourceEditKind; id: string }>;
     "birdbox:resource-create": CustomEvent<{ kind: ResourceEditKind }>;
     "birdbox:resource-move": CustomEvent<{

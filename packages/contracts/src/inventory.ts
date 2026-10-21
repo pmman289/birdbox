@@ -133,6 +133,28 @@ export interface StaticRouteFilter {
   custom: string;
 }
 
+export interface StaticNextHop {
+  address: string | null;
+  interface: string | null;
+  weight: number;
+  bfd: boolean;
+  onlink: boolean;
+}
+
+export interface StaticRoute {
+  id: string;
+  prefix: string;
+  type: "via" | "recursive" | "blackhole" | "unreachable" | "prohibit";
+  nextHops: StaticNextHop[];
+  recursiveVia: string | null;
+  filter: StaticRouteFilter;
+  enabled: boolean;
+}
+
+/** Forwarding settings shared by direct routes and Define-generated prefixes. */
+export type StaticRouteForwarding = Pick<StaticRoute, "type" | "nextHops" | "recursiveVia" | "enabled">;
+export type StaticRouteAction = string | StaticRouteForwarding;
+
 export interface StaticProtocol {
   id: string;
   nodeId: string;
@@ -140,13 +162,19 @@ export interface StaticProtocol {
   name: string;
   family: AddressFamily;
   defineId: string | null;
-  action: string | null;
-  routeActions: Record<string, string>;
+  action: StaticRouteAction | null;
+  routeActions: Record<string, StaticRouteAction>;
   routeFilters: Record<string, StaticRouteFilter>;
   import: "all" | "none";
   export: "all" | "none";
   raw: string;
   enabled: boolean;
+  /** Optional on older clients; the server normalizes all defaults. */
+  table?: PipeTableReference;
+  igpTable?: string | null;
+  checkLink?: boolean;
+  routes?: StaticRoute[];
+  importPolicy?: ChannelPolicy;
 }
 
 export interface DirectProtocol {
@@ -158,6 +186,7 @@ export interface DirectProtocol {
   ipv4: boolean;
   ipv6: boolean;
   enabled: boolean;
+  checkLink?: boolean;
 }
 
 export interface KernelProtocol {
@@ -168,6 +197,9 @@ export interface KernelProtocol {
   ipv4: boolean;
   ipv6: boolean;
   importPolicy: ChannelPolicy;
+  importPolicies?: Record<AddressFamily, ChannelPolicy>;
+  /** BIRD tables, distinct from the numeric Linux routing table. */
+  tables?: Record<AddressFamily, PipeTableReference>;
   /** Legacy shared export policy; retained for backwards-compatible clients. */
   exportPolicy: ChannelPolicy;
   /** Per-address-family Kernel export behavior. */
@@ -175,6 +207,28 @@ export interface KernelProtocol {
   table: number | null;
   scanTime: number | null;
   persist: boolean;
+  learn?: boolean;
+  gracefulRestart?: boolean;
+  metric?: number | null;
+  mergePaths?: number | null;
+  enabled: boolean;
+}
+
+export interface PipeTableReference {
+  name: string;
+  source: "existing" | "managed";
+}
+
+export interface PipeProtocol {
+  id: string;
+  label: string;
+  name: string;
+  nodeIds: MultiNodeResourceScope;
+  family: AddressFamily;
+  table: PipeTableReference;
+  peerTable: PipeTableReference;
+  importPolicy: ChannelPolicy;
+  exportPolicy: ChannelPolicy;
   enabled: boolean;
 }
 
@@ -590,7 +644,7 @@ export interface OspfDomain {
 }
 
 export interface Inventory {
-  version: 28;
+  version: 31;
   nodes: ManagedNode[];
   peers: Peer[];
   defines: PolicyDefine[];
@@ -600,6 +654,7 @@ export interface Inventory {
   staticProtocols: StaticProtocol[];
   directProtocols: DirectProtocol[];
   kernelProtocols: KernelProtocol[];
+  pipeProtocols: PipeProtocol[];
   sourcePolicies: SourcePolicyEgress[];
   sessions: BgpSession[];
   ibgpDomains: IbgpDomain[];

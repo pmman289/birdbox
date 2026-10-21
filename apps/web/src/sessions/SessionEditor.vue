@@ -19,6 +19,7 @@ import { loadDashboard, refreshDashboardRuntime, setDashboardSnapshot, useDashbo
 import { isEbgpDashboardPeer } from "../dashboard/peer-kind";
 import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import OptionalTextInput from "../shared/OptionalTextInput.vue";
+import ProtocolWorkflow from "../shared/ProtocolWorkflow.vue";
 import { api, ApiError } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
 import BgpOptionsEditor from "./BgpOptionsEditor.vue";
@@ -39,6 +40,7 @@ const { dashboard, loading: dashboardLoading } = useDashboardStore();
 const {
   draft,
   dirty,
+  remoteChanged,
   previewPending,
   applyPending,
   setPreviewConfig,
@@ -47,6 +49,7 @@ const {
   lastPreviewFailureSignature,
   draftSignature,
   resetDraft,
+  rebaseDraft,
   sessionPayload,
 } = useSessionStore();
 const form = ref<HTMLFormElement | null>(null);
@@ -57,8 +60,15 @@ const policyActionDialog = ref<InstanceType<typeof PolicyActionDialog> | null>(n
 const policyActionContext = ref<{ family: AddressFamily; direction: "import" | "export" } | null>(null);
 const errorMessage = ref("");
 const errorField = ref<string | null>(null);
+const inventoryRevision = ref<number | null>(null);
+const contextPending = ref(false);
+const stateConflict = ref(false);
+const comparisonOpen = ref(false);
+const reviewedPreview = ref<SessionPreviewResponse | null>(null);
+let contextGeneration = 0;
 let autoPreviewTimer: number | null = null;
 let autoPreviewQueued = false;
+let previewTask: Promise<boolean> | null = null;
 
 const node = computed(() => dashboard.value?.node ?? null);
 const peer = computed(() => {
@@ -72,6 +82,56 @@ const pairLocal = computed(() => draft.value
   ? `${draft.value.localAddress || "自动选择"} · ${draft.value.localAsn ? `AS${draft.value.localAsn}` : "ASN 未设置"}`
   : "-");
 const pairRemote = computed(() => peer.value ? `${peer.value.address} · AS${peer.value.asn}` : "-");
+const hasConflict = computed(() => stateConflict.value || remoteChanged.value);
+const currentPreview = computed(() => reviewedPreview.value && lastPreviewSignature.value === currentPayloadSignature() ? reviewedPreview.value : null);
+const workflowSteps = computed(() => [
+  { id: "basics", title: "基础连接", detail: "确认地址与 ASN" },
+  { id: "channels", title: "路由策略", detail: families.filter(family => draft.value?.channels[family].enabled).map(family => family === "ipv4" ? "IPv4" : "IPv6").join(" / ") || "尚未启用通道" },
+  { id: "review", title: "预检与应用", detail: currentPreview.value ? "当前草稿已通过预检" : "检查变更后确认应用" },
+]);
+function focusWorkflowStep(id: string): void {
+  const target = form.value?.querySelector<HTMLElement>(`[data-workflow-section="${id}"]`);
+  target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  target?.focus({ preventScroll: true });
+}
+function comparisonSummary(value: BgpSession | typeof draft.value) {
+  return value ? JSON.stringify({ protocolName: value.protocolName, enabled: value.enabled, localAddress: value.localAddress, localAsn: value.localAsn, localPort: value.localPort, channels: value.channels, bgp: { connectionMode: value.bgp.connectionMode, authentication: value.bgp.authentication, bfd: value.bgp.bfd } }, null, 2) : "会话尚未配置";
+}
+
+async function loadEditorContext(compare = false): Promise<void> {
+  const key = contextKey.value, nodeId = node.value?.id, peerId = peer.value?.id;
+  if (!key || !nodeId || !peerId) return;
+  const request = ++contextGeneration;
+  if (!compare) inventoryRevision.value = null;
+  contextPending.value = true;
+  try {
+    if (compare) await loadDashboard(nodeId, peerId);
+    const result = await api<{ inventoryRevision: number | null; session: BgpSession | null }>(`/api/sessions/editor-context?nodeId=${encodeURIComponent(nodeId)}&peerId=${encodeURIComponent(peerId)}`);
+    if (request !== contextGeneration || key !== contextKey.value) return;
+    inventoryRevision.value = result.inventoryRevision;
+    if (compare && dashboard.value && isEbgpDashboardPeer(dashboard.value.selectedPeer)) {
+      const current = dashboard.value;
+      const sessions = current.inventory.sessions.filter(s => !(s.nodeId === nodeId && s.peerId === peerId));
+      if (result.session) sessions.push(result.session);
+      const peers = current.peers.map(p => p.id === peerId ? { ...p, session: result.session } : p);
+      setDashboardSnapshot({ ...current, inventory: { ...current.inventory, sessions }, peers, selectedPeer: peers.find(p => p.id === peerId) ?? null });
+      comparisonOpen.value = true;
+    } else if (JSON.stringify(result.session) !== JSON.stringify(existingSession.value)) {
+      stateConflict.value = true;
+      await presentError("编辑期间服务端会话已变化，请加载最新版本并对比。", false);
+    }
+  } catch (error) {
+    if (request === contextGeneration) await presentError(error instanceof Error ? error.message : "读取编辑版本失败", false);
+  } finally {
+    if (request === contextGeneration) { contextPending.value = false; if (!compare) scheduleAutoPreview(0, true); }
+  }
+}
+
+function resolveConflict(keep: boolean): void {
+  if (keep) rebaseDraft(); else resetDraft();
+  stateConflict.value = false; comparisonOpen.value = false; reviewedPreview.value = null;
+  clearError(); scheduleAutoPreview(0, true);
+}
 
 function visibleDefines(family: AddressFamily) {
   return dashboard.value?.cidrDefines[family] ?? [];
@@ -107,8 +167,17 @@ async function presentError(message: string, focus = true): Promise<void> {
   if (!focus || !errorField.value) return;
   await nextTick();
   const target = form.value?.querySelector<HTMLElement>(`[data-field="${errorField.value}"] input, [data-field="${errorField.value}"] select, [data-field="${errorField.value}"] textarea, [data-field="${errorField.value}"]`);
+  revealField(target ?? null);
   target?.scrollIntoView({ behavior: "smooth", block: "center" });
   target?.focus({ preventScroll: true });
+}
+
+function revealField(target: HTMLElement | null): void {
+  for (let element = target?.parentElement; element; element = element.parentElement) {
+    if (element instanceof HTMLDetailsElement) element.open = true;
+    const panel = element.dataset.family;
+    if (panel === "ipv4" || panel === "ipv6") activeFamily.value = panel;
+  }
 }
 
 function validateDraft(report: boolean): boolean {
@@ -117,10 +186,13 @@ function validateDraft(report: boolean): boolean {
   if (!form.value.checkValidity()) {
     if (report) {
       const invalid = form.value.querySelector<HTMLElement>(":invalid");
+      revealField(invalid);
       void presentError(invalid instanceof HTMLInputElement || invalid instanceof HTMLSelectElement || invalid instanceof HTMLTextAreaElement
         ? invalid.validationMessage
         : "请检查表单输入", true);
-      if (invalid instanceof HTMLInputElement || invalid instanceof HTMLSelectElement || invalid instanceof HTMLTextAreaElement) invalid.reportValidity();
+      if (invalid instanceof HTMLInputElement || invalid instanceof HTMLSelectElement || invalid instanceof HTMLTextAreaElement) {
+        void nextTick(() => { invalid.scrollIntoView({ block: "center" }); invalid.reportValidity(); });
+      }
     }
     return false;
   }
@@ -185,11 +257,9 @@ function updateDashboardPreview(
   if (!dashboard.value || (!config && !events && sessionConfig === undefined)) return;
   const selectedConfig = sessionConfig || (config ? extractBgpProtocolConfig(config, protocolName) : null);
   if (config || sessionConfig !== undefined) setPreviewConfig(selectedConfig, contextKey.value);
-  setDashboardSnapshot({
-    ...dashboard.value,
-    ...(config ? { config } : {}),
-    ...(events ? { events } : {}),
-  });
+  // A preview belongs to the draft; dashboard.config remains the saved config
+  // so invalidating the draft cannot expose an older preview as active config.
+  if (events) setDashboardSnapshot({ ...dashboard.value, events });
 }
 
 function currentPayloadSignature(): string | null {
@@ -291,11 +361,21 @@ function commitAppliedSession(result: SessionApplyResponse): void {
 }
 
 async function preview(silent = false): Promise<boolean> {
+  // Explicit actions must wait for an in-flight background check instead of
+  // losing the user's Apply click when a debounce fires at the same time.
+  if (previewTask) return previewTask;
+  const task = performPreview(silent);
+  previewTask = task;
+  try { return await task; }
+  finally { if (previewTask === task) previewTask = null; }
+}
+
+async function performPreview(silent = false): Promise<boolean> {
   if (previewPending.value) {
     autoPreviewQueued = true;
     return false;
   }
-  if (applyPending.value || !validateDraft(!silent)) return false;
+  if (applyPending.value || contextPending.value || hasConflict.value || inventoryRevision.value === null || !validateDraft(!silent)) return false;
   let payload;
   try {
     payload = sessionPayload();
@@ -305,6 +385,7 @@ async function preview(silent = false): Promise<boolean> {
   }
   if (!payload) return false;
   const signature = JSON.stringify(payload);
+  reviewedPreview.value = null;
   previewController.value?.abort();
   const controller = new AbortController();
   previewController.value = controller;
@@ -313,7 +394,7 @@ async function preview(silent = false): Promise<boolean> {
   try {
     const result = await api<SessionPreviewResponse>("/api/sessions/preview", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, inventoryRevision: inventoryRevision.value }),
       signal: controller.signal,
       mutationWait: !silent,
     });
@@ -324,8 +405,8 @@ async function preview(silent = false): Promise<boolean> {
     }
     updateDashboardPreview(result.config, result.events, result.session.protocolName, result.sessionConfig);
     lastPreviewSignature.value = signature;
+    reviewedPreview.value = result;
     lastPreviewFailureSignature.value = null;
-    dirty.value = false;
     if (!silent) dispatchToast("配置预检通过", "success");
     return true;
   } catch (error) {
@@ -335,6 +416,7 @@ async function preview(silent = false): Promise<boolean> {
       return false;
     }
     const data = error instanceof ApiError ? error.data as SessionErrorData : undefined;
+    if (error instanceof ApiError && error.code === "STATE_CONFLICT") stateConflict.value = true;
     updateDashboardPreview(data?.config, data?.events, draft.value?.protocolName, data?.sessionConfig);
     lastPreviewFailureSignature.value = signature;
     if (!silent) await presentError(error instanceof Error ? error.message : "配置预检失败");
@@ -355,15 +437,35 @@ function scheduleAutoPreview(delay = 500, force = false): void {
   if (autoPreviewTimer !== null) window.clearTimeout(autoPreviewTimer);
   autoPreviewTimer = window.setTimeout(() => {
     autoPreviewTimer = null;
-    const signature = draftSignature.value;
+    const signature = currentPayloadSignature();
     if (!signature || (!force && (signature === lastPreviewSignature.value || signature === lastPreviewFailureSignature.value))) return;
     if (dashboardLoading.value || applyPending.value || !validateDraft(false)) return;
     void preview(true);
   }, delay);
 }
 
-function openApplyDialog(): void {
-  if (validateDraft(true)) applyDialog.value?.showModal();
+async function openApplyDialog(): Promise<void> {
+  if (hasConflict.value) {
+    void presentError("服务端会话已变化，请先对比最新配置并确认保留或重新加载草稿。", false);
+    return;
+  }
+  if (!validateDraft(true)) return;
+  if (autoPreviewTimer !== null) { window.clearTimeout(autoPreviewTimer); autoPreviewTimer = null; }
+  const key = contextKey.value;
+  const signature = currentPayloadSignature();
+  if (!currentPreview.value?.valid) {
+    const joinedBackgroundCheck = previewTask !== null;
+    await preview(false);
+    // A draft edit or refresh may invalidate the background result. Complete
+    // one explicit check of the current candidate, with visible errors.
+    if (joinedBackgroundCheck && key === contextKey.value && signature === currentPayloadSignature() && !currentPreview.value?.valid && !hasConflict.value) await preview(false);
+  }
+  if (key === contextKey.value && signature === currentPayloadSignature() && currentPreview.value?.valid && !hasConflict.value) applyDialog.value?.showModal();
+}
+
+function reloadSavedSession(): void {
+  if (dirty.value && !window.confirm("重新加载将放弃当前 eBGP 草稿，是否继续？")) return;
+  resetDraft(); clearError(); stateConflict.value = false; comparisonOpen.value = false; void loadEditorContext();
 }
 
 function closeApplyDialog(): void {
@@ -371,7 +473,9 @@ function closeApplyDialog(): void {
 }
 
 async function applySession(): Promise<void> {
-  if (applyPending.value || !validateDraft(true)) return;
+  if (applyPending.value || hasConflict.value || !validateDraft(true)) return;
+  const reviewed = currentPreview.value;
+  if (!reviewed?.valid) { closeApplyDialog(); await preview(false); return; }
   const payload = sessionPayload();
   if (!payload || !node.value || !peer.value) return;
   previewController.value?.abort();
@@ -381,8 +485,10 @@ async function applySession(): Promise<void> {
   const nodeId = node.value.id;
   const peerId = peer.value.id;
   try {
-    const result = await api<SessionApplyResponse>("/api/sessions/apply", { method: "POST", body: JSON.stringify(payload) });
+    const result = await api<SessionApplyResponse>("/api/sessions/apply", { method: "POST", body: JSON.stringify({ ...reviewed.session, mode: "apply", inventoryRevision: reviewed.inventoryRevision, previewId: reviewed.previewId, candidateHash: reviewed.candidateHash }) });
     commitAppliedSession(result);
+    reviewedPreview.value = null;
+    await loadEditorContext();
     dispatchToast(result.enabled === false
       ? "会话已停用"
       : result.established ? "BGP 会话已建立" : "配置已应用，正在等待远端 Peer", result.enabled === false || result.established ? "success" : "");
@@ -392,13 +498,16 @@ async function applySession(): Promise<void> {
       dispatchToast(error.message);
       if (await reconcileAppliedSession(payload, nodeId, peerId)) {
         resetDraft();
+        reviewedPreview.value = null; await loadEditorContext();
         dispatchToast("会话变更已生效，最新运行状态已同步", "success");
       } else {
         await presentError("连接中断，暂时无法确认会话变更结果；后台状态刷新仍会继续", false);
       }
       return;
     }
-    await loadDashboard(nodeId, peerId);
+    reviewedPreview.value = null;
+    if (error instanceof ApiError && error.code === "STATE_CONFLICT") stateConflict.value = true;
+    await loadDashboard(nodeId, peerId).catch(() => {});
     await presentError(error instanceof Error ? error.message : "应用会话失败");
   } finally {
     applyPending.value = false;
@@ -410,10 +519,13 @@ async function removeSession(): Promise<void> {
   if (!window.confirm(`移除会话 ${existingSession.value.protocolName}？`)) return;
   applyPending.value = true;
   try {
-    await api<SessionDeleteResponse>(`/api/sessions/${existingSession.value.id}`, { method: "DELETE" });
+    await api<SessionDeleteResponse>(`/api/sessions/${existingSession.value.id}`, { method: "DELETE", body: JSON.stringify({ inventoryRevision: inventoryRevision.value }) });
     dispatchToast("会话已移除", "success");
     await loadDashboard(node.value.id, peer.value.id);
+    resetDraft();
+    await loadEditorContext();
   } catch (error) {
+    if (error instanceof ApiError && error.code === "STATE_CONFLICT") stateConflict.value = true;
     await presentError(error instanceof Error ? error.message : "移除会话失败");
   } finally {
     applyPending.value = false;
@@ -444,16 +556,32 @@ function insertPolicyFunction(resource: PolicyFunction): void {
   policyActionContext.value = null;
 }
 
-watch(draftSignature, (signature) => {
-  dirty.value = signature !== null && signature !== lastPreviewSignature.value;
+watch(draftSignature, () => {
+  reviewedPreview.value = null;
+  setPreviewConfig(null);
+  lastPreviewFailureSignature.value = null;
   scheduleAutoPreview();
 });
 
 // A newly selected Peer starts with an already initialized draft signature. Force
 // one preview so a new session gets a visible block before it is saved.
-watch(contextKey, () => scheduleAutoPreview(0, true), { immediate: true });
+watch(contextKey, () => {
+  contextGeneration++; inventoryRevision.value = null; stateConflict.value = false; comparisonOpen.value = false; reviewedPreview.value = null;
+  previewController.value?.abort();
+  previewController.value = null; previewPending.value = false;
+  previewTask = null;
+  autoPreviewQueued = false; clearError(); applyDialog.value?.close();
+  void loadEditorContext();
+}, { immediate: true });
+
+function protectUnload(event: BeforeUnloadEvent): void {
+  if (dirty.value || applyPending.value) { event.preventDefault(); event.returnValue = ""; }
+}
+window.addEventListener("beforeunload", protectUnload);
 
 onBeforeUnmount(() => {
+  contextGeneration++;
+  window.removeEventListener("beforeunload", protectUnload);
   if (autoPreviewTimer !== null) window.clearTimeout(autoPreviewTimer);
   autoPreviewQueued = false;
   previewController.value?.abort();
@@ -462,7 +590,10 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="session-section" aria-labelledby="sessionTitle">
-    <div class="section-heading compact"><div><p class="eyebrow">会话</p><h2 id="sessionTitle">会话配置</h2></div><span class="compatibility-badge">BIRD 2.19.1</span></div>
+    <div class="section-heading compact"><div><p class="eyebrow">会话</p><h2 id="sessionTitle">会话配置</h2></div><span v-if="draft" class="compatibility-badge" role="status" data-testid="session-draft-state">{{ dirty ? '有未应用修改' : '已保存配置' }}</span></div>
+    <div v-if="hasConflict" class="protocol-notice" role="alert">服务端配置已变化，本地草稿已保留。<button class="secondary-button" type="button" :disabled="contextPending || applyPending" @click="loadEditorContext(true)">加载最新版本并对比</button></div>
+    <div v-else-if="draft && inventoryRevision === null && !contextPending" class="protocol-notice" role="alert">暂时无法读取编辑版本，草稿已保留。<button class="secondary-button" type="button" @click="loadEditorContext()">重试读取编辑版本</button></div>
+    <section v-if="comparisonOpen" class="protocol-preview session-conflict-comparison" role="region" aria-label="eBGP 冲突对比"><h3>最新配置与本地草稿</h3><details><summary>服务端最新会话</summary><pre>{{ comparisonSummary(existingSession) }}</pre></details><details><summary>本地草稿</summary><pre>{{ comparisonSummary(draft) }}</pre></details><p>认证字段不在此处展示。保留草稿后需重新预检并确认应用。</p><div class="form-actions"><button class="secondary-button" type="button" @click="resolveConflict(false)">采用最新配置</button><button class="secondary-button" type="button" @click="resolveConflict(true)">保留草稿，重新预检</button></div></section>
     <div class="session-preview-overlay" role="status" aria-live="polite" aria-atomic="true" :hidden="!previewPending">
       <div class="session-preview-notice"><span class="session-preview-spinner" aria-hidden="true"></span><div><strong>正在预检会话配置</strong><span>等待节点返回检查结果</span></div></div>
     </div>
@@ -470,14 +601,19 @@ onBeforeUnmount(() => {
     <div v-if="unavailable" class="empty-state"><strong>{{ unavailableTitle }}</strong><button class="secondary-button" type="button" @click="openPeerResources">前往资源管理</button></div>
 
     <form v-else-if="draft && peer" ref="form" novalidate :aria-busy="applyPending" :inert="applyPending" @submit.prevent="preview(false)">
+      <ProtocolWorkflow label="eBGP 配置步骤" :steps="workflowSteps" @select="focusWorkflowStep" />
+      <section class="protocol-config-section" data-workflow-section="basics" tabindex="-1" aria-label="eBGP 基础连接">
+      <div class="protocol-section-title"><span>1</span><div><h3>基础连接</h3><p>确认本机与远端，再设置本地连接参数。</p></div></div>
       <div class="pair-summary"><div><span>本机</span><strong>{{ pairLocal }}</strong></div><i aria-hidden="true"></i><div><span>远端</span><strong>{{ pairRemote }}</strong></div></div>
       <div class="field" data-field="protocolName" :class="{ 'field-invalid': errorField === 'protocolName' }"><label for="protocolName">BIRD 协议名称（自动，可编辑）</label><input id="protocolName" v-model.trim="draft.protocolName" required pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" autocomplete="off" :aria-invalid="errorField === 'protocolName'"></div>
       <label class="toggle-row full-width session-enabled-row"><span><strong>启用会话</strong><small>关闭后不生成该会话的 BGP 配置</small></span><input v-model="draft.enabled" type="checkbox"><i aria-hidden="true"></i></label>
-      <div class="field" data-field="localAddress" :class="{ 'field-invalid': errorField === 'localAddress' }"><label>本地地址（可选）</label><OptionalTextInput v-model="draft.localAddress" placeholder="自动选择" autocomplete="off" :aria-invalid="errorField === 'localAddress'" /></div>
-      <div class="field" data-field="localAsn" :class="{ 'field-invalid': errorField === 'localAsn' }"><label>本地 ASN</label><NullableNumberInput v-model="draft.localAsn" min="1" max="4294967295" required :aria-invalid="errorField === 'localAsn'" /></div>
-      <div class="field" data-field="localPort" :class="{ 'field-invalid': errorField === 'localPort' }"><label>本地端口</label><NullableNumberInput v-model="draft.localPort" min="1" max="65535" required :aria-invalid="errorField === 'localPort'" /></div>
+      <div class="field" data-field="localAddress" :class="{ 'field-invalid': errorField === 'localAddress' }"><label for="session-localAddress">本地地址（可选）</label><OptionalTextInput id="session-localAddress" v-model="draft.localAddress" placeholder="自动选择" autocomplete="off" :aria-invalid="errorField === 'localAddress'" /></div>
+      <div class="field" data-field="localAsn" :class="{ 'field-invalid': errorField === 'localAsn' }"><label for="session-localAsn">本地 ASN</label><NullableNumberInput id="session-localAsn" v-model="draft.localAsn" min="1" max="4294967295" required :aria-invalid="errorField === 'localAsn'" /></div>
+      <div class="field" data-field="localPort" :class="{ 'field-invalid': errorField === 'localPort' }"><label for="session-localPort">本地端口</label><NullableNumberInput id="session-localPort" v-model="draft.localPort" min="1" max="65535" required :aria-invalid="errorField === 'localPort'" /></div>
+      </section>
 
-      <div class="channel-editors" data-field="channels" :class="{ 'field-invalid': errorField === 'channels' }">
+      <div class="channel-editors protocol-config-section" data-field="channels" data-workflow-section="channels" tabindex="-1" :class="{ 'field-invalid': errorField === 'channels' }">
+        <div class="protocol-section-title"><span>2</span><div><h3>地址族与路由策略</h3><p>IPv4 / IPv6 独立配置。导入是从远端接收，导出是向远端发布。</p></div></div>
         <nav class="afi-tabs" role="tablist" aria-label="BGP Address Family">
           <button v-for="family in families" :key="family" class="afi-tab" :class="{ active: activeFamily === family, disabled: !draft.channels[family].enabled }" type="button" role="tab" :aria-selected="activeFamily === family" :tabindex="activeFamily === family ? 0 : -1" @click="activeFamily = family">{{ family === "ipv4" ? "IPv4" : "IPv6" }} <span>{{ draft.channels[family].enabled ? "开启" : "关闭" }}</span></button>
         </nav>
@@ -492,13 +628,20 @@ onBeforeUnmount(() => {
           :filters="dashboard?.filters ?? []"
           :defines="visibleDefines(family)"
           :active="activeFamily === family"
+          compact-policies
           @open-policy-action="openPolicyAction(family, $event)"
         />
       </div>
 
-      <div data-field="connectionMode"><BgpOptionsEditor v-model="draft.bgp" /></div>
+      <div class="protocol-config-section" data-field="connectionMode"><BgpOptionsEditor v-model="draft.bgp" /></div>
+      <section class="protocol-config-section" data-workflow-section="review" tabindex="-1" aria-label="eBGP 变更确认">
+      <div class="protocol-section-title"><span>3</span><div><h3>预检与应用</h3><p>影响节点：{{ node?.name }}。预检只检查配置，确认应用后才会部署。</p></div></div>
       <p class="auth-error session-form-error" role="alert" :hidden="!errorMessage">{{ errorMessage }}</p>
-      <div class="form-actions"><button class="secondary-button" type="submit" :disabled="previewPending || applyPending">{{ previewPending ? "正在预检" : "预检配置" }}</button><button class="primary-button" type="button" :disabled="previewPending || applyPending" @click="openApplyDialog">应用会话变更</button></div>
+      <p v-if="currentPreview" class="protocol-help" role="status">预检通过 · {{ dirty ? '尚未应用' : '与已保存配置一致' }}</p>
+      <details v-if="currentPreview" class="session-change-summary"><summary>查看待应用配置差异</summary><pre>{{ currentPreview.diff || '配置无变化' }}</pre></details>
+      </section>
+      <div class="protocol-action-bar" role="region" aria-label="eBGP 配置操作"><span class="protocol-action-state">{{ dirty ? '有待应用修改' : '与已保存配置一致' }} · {{ currentPreview ? '预检通过' : '应用前将预检' }}</span><div class="form-actions"><button class="secondary-button" type="submit" :disabled="previewPending || applyPending || contextPending || hasConflict || inventoryRevision === null">{{ previewPending ? "正在预检" : "预检配置" }}</button><button class="primary-button" type="button" :disabled="previewPending || applyPending || contextPending || hasConflict || inventoryRevision === null" @click="openApplyDialog">应用会话变更</button></div></div>
+      <div class="form-actions protocol-maintenance-actions"><button class="secondary-button" type="button" :disabled="applyPending" @click="reloadSavedSession">重新加载已保存配置</button></div>
       <button v-if="existingSession" class="text-danger-button" type="button" :disabled="applyPending" @click="removeSession">移除当前会话</button>
     </form>
   </section>
@@ -507,7 +650,8 @@ onBeforeUnmount(() => {
     <form method="dialog" @submit.prevent="applySession">
       <div class="dialog-head"><span class="dialog-icon">⇄</span><div><p class="eyebrow">节点部署</p><h2 id="applyDialogTitle">应用节点会话配置</h2></div></div>
       <div class="dialog-route"><span>{{ pairLocal }}</span><i></i><span>{{ peer?.name ?? "远端" }} · AS{{ peer?.asn ?? "-" }}</span></div>
-      <p class="dialog-note">将合并此节点的全部已启用会话，预检通过后更新该节点。</p>
+      <p class="dialog-note">将合并此节点的全部已启用会话，重新预检后更新该节点。仅应用当前已预检草稿。</p>
+      <details v-if="currentPreview" class="session-apply-diff"><summary>查看配置差异</summary><pre>{{ currentPreview.diff || '配置无变化' }}</pre></details>
       <div class="dialog-actions"><button class="secondary-button" type="button" @click="closeApplyDialog">取消</button><button class="primary-button" type="submit">确认应用</button></div>
     </form>
   </dialog>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, useId } from "vue";
 
 import type {
   AddressFamily,
@@ -33,6 +33,7 @@ const emit = defineEmits<{
 
 const model = defineModel<BgpSession>({ required: true });
 const activeFamily = ref<AddressFamily>("ipv4");
+const formId = useId();
 const families = ["ipv4", "ipv6"] as const satisfies readonly AddressFamily[];
 const clusterInputId = computed(
   () => `ibgpCluster_${model.value.nodeId}_${model.value.id}`,
@@ -78,8 +79,9 @@ const visibleFilters = computed(() =>
 
     <div class="ibgp-form-grid">
       <div class="field">
-        <label>协议名称</label
+        <label :for="`${formId}-protocol`">协议名称</label
         ><input
+          :id="`${formId}-protocol`"
           v-model.trim="model.protocolName"
           pattern="[A-Za-z_][A-Za-z0-9_]*"
           maxlength="48"
@@ -90,8 +92,9 @@ const visibleFilters = computed(() =>
         <div class="field-readonly">{{ model.localAddress }}</div>
       </div>
       <div class="field">
-        <label>本地端口</label
+        <label :for="`${formId}-port`">本地端口</label
         ><input
+          :id="`${formId}-port`"
           v-model.number="model.localPort"
           type="number"
           min="1"
@@ -146,6 +149,7 @@ const visibleFilters = computed(() =>
         :filters="visibleFilters"
         :defines="visibleDefines"
         :active="activeFamily === family"
+        compact-policies
         @open-policy-action="
           emit('open-policy-action', { family, direction: $event })
         "

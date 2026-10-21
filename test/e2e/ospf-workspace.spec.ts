@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 
 type NodeId = "local" | "edge" | "core" | "backup";
 
@@ -158,9 +159,12 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await page.locator('.ospf-link-editor input[type="number"]').first().fill("30");
   await expect(page.locator(".ospf-link-label").first()).toContainText("Cost 30");
 
+  await page.locator(".ospf-inspector-nav").getByRole("button", { name: "节点", exact: true }).click();
   await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Beta" }).click();
   await expect(page.locator(".ospf-link-editor")).toHaveCount(0);
   await expect(page.locator(".ospf-editor")).toContainText("E2E Router Beta");
+  await expect(page.locator('.ospf-editor .channel-policy-disclosure[open]')).toHaveCount(0);
+  await page.locator('.ospf-editor .channel-policy-disclosure > summary').first().click();
   const policyFunction = page.locator('.policy-block').first().getByLabel("可用 Function");
   await policyFunction.selectOption("fn_accept");
   await page.locator('.policy-block').first().getByRole("button", { name: "添加 Function" }).click();
@@ -188,11 +192,12 @@ test("OSPF 桌面工作区覆盖拓扑、链路、策略、预览、详情和失
   await expect(page.locator("#toastRegion .toast.success").filter({ hasText: "OSPF 配置已保存并应用" })).toBeVisible();
   await page.getByRole("button", { name: "关闭 OSPF 应用确认" }).click();
 
-  await page.locator(".runtime-summary-card").nth(0).click();
+  await page.locator(".ospf-inspector-nav").getByRole("button", { name: "节点", exact: true }).click();
+  await page.locator(".ospf-inspector-runtime-summary .runtime-summary-card").nth(0).click();
   await expect(page.locator(".ospf-runtime-dialog")).toBeVisible();
   await expect(page.locator(".ospf-runtime-dialog")).toContainText("192.0.2.2");
   await page.getByRole("button", { name: "关闭 OSPF 运行详情" }).click();
-  await page.locator(".runtime-summary-card").nth(1).click();
+  await page.locator(".ospf-inspector-runtime-summary .runtime-summary-card").nth(1).click();
   await expect(page.locator(".ospf-runtime-dialog")).toContainText("198.18.0.1/32");
   await page.getByRole("button", { name: "关闭 OSPF 运行详情" }).click();
 
@@ -255,6 +260,8 @@ test("OSPF 失败保存后恢复交互并可再次操作", async ({ page }) => {
   await openOspfWorkspace(page);
   await page.getByRole("button", { name: "保存并应用" }).click();
   await expect(page.locator("#toastRegion .toast")).toContainText("OSPF 配置预检失败：OSPF 链路 link_ab 接口不合法");
+  await expect(page.locator(".ospf-preview-dialog")).toContainText("预检失败：OSPF 链路 link_ab 接口不合法");
+  await page.getByRole("button", { name: "关闭 OSPF 配置预览", exact: true }).click();
   await expect(page.getByRole("button", { name: "保存并应用" })).toBeEnabled();
   await page.getByRole("button", { name: "查询路径" }).click();
   await expect(page.locator(".ospf-path-dialog")).toBeVisible();
@@ -278,6 +285,8 @@ test("OSPF Area 与节点草稿独立，重复选择节点保留未保存参数"
   await authenticate(page);
   await openOspfWorkspace(page);
   await expect(page.locator(".ospf-node-stats em.up").first()).toBeVisible();
+  await expect(page.locator(".ospf-editor")).not.toBeVisible();
+  await page.locator(".ospf-node-row").filter({ hasText: "E2E Router Alpha" }).click();
   const advanced = page.locator("details.ospf-advanced");
   await advanced.locator("summary").first().click();
   await expect(page.locator(".ospf-area-card")).toHaveCount(1);
@@ -313,6 +322,7 @@ test("OSPF 域切换和新建保护未保存草稿，取消恢复原选择", asy
   await picker.selectOption(other.id);
   await expect(picker).toHaveValue(other.id);
   expect(confirmations).toBe(0);
+  await page.locator(".ospf-inspector-nav").getByRole("button", { name: "节点", exact: true }).click();
   await routerId.fill("192.0.2.99");
   await picker.selectOption(domain.id);
   await expect(picker).toHaveValue(other.id);

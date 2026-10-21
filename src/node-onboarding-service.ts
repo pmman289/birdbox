@@ -945,6 +945,7 @@ export class NodeOnboardingService {
             staticProtocols: current.staticProtocols.filter((item) => item.nodeId !== targetNode.id),
             directProtocols: current.directProtocols.filter((item) => item.nodeId !== targetNode.id),
             kernelProtocols: removeNodeFromMultiScope(current.kernelProtocols, targetNode.id),
+            pipeProtocols: removeNodeFromMultiScope(current.pipeProtocols, targetNode.id),
             ibgpDomains,
             ospfDomains: current.ospfDomains.map((domain) => ({
               ...domain,
@@ -967,7 +968,7 @@ export class NodeOnboardingService {
         }
         if (
           nodePeers(current, targetNode.id).length
-          || ownedNodePolicyResources(current, targetNode.id).length
+          || ownedNodePolicyResources(current, targetNode.id).filter((resource) => !("peerTable" in resource)).length
           || nodeSessions(current, targetNode.id).length
         ) {
           fail(409, "请先删除该节点的会话、Peer 和节点级资源");
@@ -975,6 +976,7 @@ export class NodeOnboardingService {
         const inventory = validateInventory({
           ...current,
           nodes: current.nodes.filter((item) => item.id !== targetNode.id),
+          pipeProtocols: removeNodeFromMultiScope(current.pipeProtocols, targetNode.id),
         });
         const validation = await stageAndValidate(
           targetNode,

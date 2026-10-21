@@ -15,6 +15,7 @@ import { uniqueNodeIds } from "./resource-impact.js";
 import type { InventoryStore } from "./store.js";
 import type { NodeConfigBundle } from "./config-bundle.js";
 import { errorContext, logger } from "./logger.js";
+import { recoverSourcePolicyRules } from "./source-policy-deployment.js";
 
 type UnknownRecord = Record<string, unknown>;
 type DeploymentDirection = "forward" | "rollback";
@@ -145,6 +146,8 @@ export class DeploymentService {
           if (!applied.ok) throw new Error(applied.stderr || applied.stdout || `${target.node.name} 的恢复配置应用失败`);
         }
       }
+      const recoveryTargets = active.direction === "forward" ? active.forwardTargets : active.rollbackTargets;
+      for (const target of recoveryTargets) await recoverSourcePolicyRules(target.node, desired, opposite);
       if (!isDeepStrictEqual(actual, desired)) await this.#options.store.replace(actual, desired);
       await this.clearJournal(active);
       this.#options.addEvent("warning", `已完成中断部署 ${active.id} 的${active.direction === "forward" ? "提交" : "回滚"}恢复`);
@@ -163,6 +166,11 @@ export class DeploymentService {
         let committed = false;
         let journal: ActiveDeploymentJournal | null = null;
         let current: Inventory | null = null;
+        let deploymentNodes: ManagedNode[] = [];
+        const nodeResults = new Map<string, NonNullable<DeploymentReport["nodeResults"]>[number]>();
+        let failedNodeId: string | null = null;
+        let rollbackAttempted = false, rollbackSucceeded = true;
+        let transactionId: string | undefined;
         try {
           logger.info("开始部署变更", { attempt: attempt + 1, maxAttempts: INVENTORY_COMMIT_RETRIES });
           current = await this.#options.store.read();
@@ -171,25 +179,33 @@ export class DeploymentService {
           const inventory = validateInventory(draft);
           const nodeIds = uniqueNodeIds(typeof nodeIdsForDraft === "function" ? nodeIdsForDraft(mutation, inventory) : nodeIdsForDraft);
           const nodes = nodeIds.map((nodeId) => this.#options.findNode(inventory, nodeId));
+          deploymentNodes = nodes;
+          for (const node of nodes) nodeResults.set(node.id, { nodeId: node.id, status: "not_attempted", error: null });
           logger.info("开始检查部署候选配置", { nodeCount: nodes.length, nodeIds: nodeIds.join(",") });
 
           for (const node of nodes) {
+            failedNodeId = node.id;
             const config = this.#options.configForNode(inventory, node);
             const validation = await stageAndValidate(node, config);
             if (!validation.ok) this.#options.fail(422, this.#options.validationError(config.main, validation.stderr || validation.stdout, `${node.name} 的 BIRD 语法检查失败`));
           }
+          failedNodeId = null;
           if (nodes.length) journal = await this.beginJournal(current, inventory, nodeIds, nodes);
+          transactionId = journal?.id;
           for (const node of nodes) {
+            failedNodeId = node.id;
             attemptedNodes.push(node);
             const target = journal?.forwardTargets.find((item) => item.node.id === node.id);
             const applied = await applyStagedConfig(node, target?.config ?? this.#options.configForNode(inventory, node));
             if (!applied.ok) this.#options.fail(500, applied.stderr || applied.stdout || `${node.name} 的 BIRD 配置应用失败`);
             logger.info("节点配置已应用", { nodeId: node.id, nodeName: node.name });
             if (hooks.apply) await hooks.apply(node, inventory);
+            nodeResults.set(node.id, { nodeId: node.id, status: "success", error: null });
           }
+          failedNodeId = null;
           const state = await this.#options.store.replace(current, inventory);
           committed = true;
-          const transactionId = journal?.id ?? `deployment_${randomUUID()}`;
+          transactionId = journal?.id ?? `deployment_${randomUUID()}`;
           if (journal) {
             await this.clearJournal(journal);
             journal = null;
@@ -197,6 +213,8 @@ export class DeploymentService {
           logger.info("部署变更已提交", { nodeCount: nodes.length, nodeIds: nodeIds.join(",") });
           return { state, result: mutation, deployment: this.#report(inventory, nodeIds, transactionId) };
         } catch (error) {
+          const failureMessage = error instanceof Error ? error.message : "部署失败";
+          if (failedNodeId) nodeResults.set(failedNodeId, { nodeId: failedNodeId, status: "failed", error: failureMessage });
           const code = (error as Partial<{ code: unknown }>).code;
           const retryableConflict = code === "STATE_CONFLICT" && attempt + 1 < INVENTORY_COMMIT_RETRIES;
           const failureContext = { ...errorContext(error), attemptedNodeIds: attemptedNodes.map((node) => node.id).join(","), attempt: attempt + 1 };
@@ -212,20 +230,25 @@ export class DeploymentService {
                 logger.error("部署回滚标记失败", { ...errorContext(journalError) });
               }
             }
-            let rollbackSucceeded = true;
             for (const node of attemptedNodes.reverse()) {
+              rollbackAttempted = true;
               const target = journal?.forwardTargets.find((item) => item.node.id === node.id);
               const rollback = await rollbackNode(node, target?.config ?? { main: "", resources: [] });
               if (!rollback.ok) {
                 rollbackSucceeded = false;
+                nodeResults.set(node.id, { nodeId: node.id, status: "unknown", error: rollback.stderr || rollback.stdout || "节点回滚失败，需检查恢复日志" });
                 this.#options.addEvent("error", `${node.name} 回滚失败：${rollback.stderr || rollback.stdout}`, node.id);
               }
-              else logger.info("节点配置已回滚", { nodeId: node.id, nodeName: node.name });
+              else {
+                nodeResults.set(node.id, { nodeId: node.id, status: "rolled_back", error: node.id === failedNodeId ? failureMessage : null });
+                logger.info("节点配置已回滚", { nodeId: node.id, nodeName: node.name });
+              }
               if (hooks.rollback) {
                 try {
                   await hooks.rollback(node, current!);
                 } catch (hookError) {
                   rollbackSucceeded = false;
+                  nodeResults.set(node.id, { nodeId: node.id, status: "unknown", error: hookError instanceof Error ? hookError.message : "系统规则回滚失败" });
                   this.#options.addEvent("error", `${node.name} 系统规则回滚失败：${hookError instanceof Error ? hookError.message : String(hookError)}`, node.id);
                 }
               }
@@ -244,6 +267,11 @@ export class DeploymentService {
               continue;
             }
           }
+          if (error && typeof error === "object" && deploymentNodes.length) Object.assign(error, { deployment: {
+            applied: committed, transactionId, nodeIds: deploymentNodes.map(node => node.id),
+            nodes: deploymentNodes.map(node => ({ id: node.id, name: node.name })), nodeResults: [...nodeResults.values()], sessions: [],
+            rollback: { attempted: rollbackAttempted, succeeded: rollbackSucceeded, error: rollbackSucceeded ? null : "存在未知结果，请检查节点及部署恢复日志" },
+          } satisfies DeploymentReport });
           throw error;
         }
       }

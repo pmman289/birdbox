@@ -31,6 +31,7 @@ export const AGENT_METHODS = new Set([
   "system.info",
   "system.interfaces",
   "network.ip_rules",
+  "network.ip_rules.inspect",
   "bird.ospf",
   "bird.access",
   "bird.inspect",

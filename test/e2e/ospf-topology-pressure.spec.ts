@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 
 // Long-running topology pressure harness.  It authenticates once and keeps a
 // single browser session alive so the auth rate limiter cannot mask rendering

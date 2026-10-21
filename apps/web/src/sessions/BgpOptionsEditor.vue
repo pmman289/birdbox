@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, useId, watch } from "vue";
 
 import type { BgpOptions, BgpSessionType } from "@birdbox/contracts/inventory";
 
@@ -7,6 +7,7 @@ import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import OptionalTextInput from "../shared/OptionalTextInput.vue";
 
 const model = defineModel<BgpOptions>({ required: true });
+const headingId = useId();
 const props = withDefaults(defineProps<{ sessionType?: BgpSessionType }>(), {
   sessionType: "ebgp",
 });
@@ -107,10 +108,10 @@ function updateAllowLocalAs(event: Event): void {
 </script>
 
 <template>
-  <section class="session-options" aria-labelledby="commonBgpTitle">
+  <section class="session-options" :aria-labelledby="headingId">
     <div class="option-heading">
       <span>{{ props.sessionType === "ibgp" ? "iBGP" : "eBGP" }}</span>
-      <h3 id="commonBgpTitle">常用会话参数</h3>
+      <h3 :id="headingId">常用会话参数</h3>
     </div>
     <div class="option-grid">
       <div class="field">

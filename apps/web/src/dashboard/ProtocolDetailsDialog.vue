@@ -94,7 +94,7 @@ onBeforeUnmount(() => {
         <strong :class="peer?.protocol?.established ? 'up' : 'down'">{{ statusLabel || "未知" }}</strong>
       </div>
       <div class="protocol-details-meta">
-        <span>等价查询：<code>birdc -v "show protocols all {{ peer?.session?.protocolName ?? "" }}"</code></span>
+        <span>等价查询：<code>birdc -v 'show protocols all "{{ peer?.session?.protocolName ?? "" }}"'</code></span>
         <button class="secondary-button compact-command" type="button" :disabled="pending" @click="load">刷新</button>
       </div>
       <div class="protocol-details-body" aria-live="polite">

@@ -1,6 +1,10 @@
 import type {
   AddressFamily,
   StaticProtocol,
+  StaticRoute,
+  StaticRouteAction,
+  StaticRouteForwarding,
+  StaticNextHop,
   StaticRouteFilter,
   StaticRouteFilterOperation,
 } from "../packages/contracts/src/inventory.js";
@@ -11,8 +15,12 @@ import {
   normalizeIPAddress,
   normalizeLabel,
   normalizeOptionalInteger,
+  splitScopedIPAddress,
+  isLinkLocalIPv6,
 } from "./bird-normalize-common.js";
 import { isExactPrefix, normalizeBirdPrefixPattern } from "./bird-prefix.js";
+import { normalizeChannelPolicy } from "./bird-session.js";
+import { normalizeRoutingTableReference } from "./bird-pipe.js";
 import { normalizeBirdBlockSource } from "./bird-source.js";
 
 type UnknownRecord = Record<string, unknown>;
@@ -57,7 +65,12 @@ function normalizeRequiredEnum<Value extends string>(value: unknown, allowed: Re
   return normalized;
 }
 
-function normalizeStaticRouteAction(value: unknown, family: AddressFamily, label = "Static 路由动作"): string {
+function normalizeStaticRouteAction(value: unknown, family: AddressFamily, label = "Static 路由动作"): StaticRouteAction {
+  if (value && typeof value === "object") {
+    const input = record(value, `${label}必须是对象`);
+    const route = normalizeRoutes([{ ...input, id: "define_route", prefix: family === "ipv4" ? "0.0.0.0/0" : "::/0" }], family)[0]!;
+    return { type: route.type, nextHops: route.nextHops, recursiveVia: route.recursiveVia, enabled: route.enabled };
+  }
   const action = String(value ?? "").trim().toLowerCase();
   assertValidation(STATIC_ROUTE_ACTIONS.has(action) || /^via\s+\S+$/i.test(action), `${label}不合法`);
   if (!action.startsWith("via ")) return action;
@@ -65,18 +78,19 @@ function normalizeStaticRouteAction(value: unknown, family: AddressFamily, label
   return `via ${address}`;
 }
 
-function normalizeStaticRouteActions(value: unknown, family: AddressFamily): Record<string, string> {
+function normalizeStaticRouteActions(value: unknown, family: AddressFamily): Record<string, StaticRouteAction> {
   if (value === null || value === undefined) return {};
   const input = record(value, "Static CIDR 动作必须是对象");
   const entries = Object.entries(input);
   assertValidation(entries.length <= 256, "Static CIDR 动作最多支持 256 个条目");
-  const normalized: Record<string, string> = {};
+  const normalized: Record<string, StaticRouteAction> = {};
   for (const [prefixInput, actionInput] of entries) {
     const prefix = normalizeBirdPrefixPattern(prefixInput, family === "ipv4" ? 4 : 6);
     assertValidation(isExactPrefix(prefix), `Static CIDR 条目必须是完整 CIDR: ${prefixInput}`);
     assertValidation(!Object.hasOwn(normalized, prefix), `Static CIDR 条目重复: ${prefix}`);
     normalized[prefix] = normalizeStaticRouteAction(actionInput, family, `Static CIDR ${prefix} 动作`);
   }
+  assertValidation(Buffer.byteLength(JSON.stringify(normalized), "utf8") <= 1024 * 1024, "Static CIDR 转发配置不能超过 1 MiB");
   return normalized;
 }
 
@@ -152,6 +166,53 @@ function normalizeStaticRouteFilters(value: unknown, family: AddressFamily): Rec
   return normalized;
 }
 
+function normalizeNextHop(value: unknown, family: AddressFamily): StaticNextHop {
+  const input = record(value, "Static 下一跳必须是对象");
+  let iface = input.interface ? String(input.interface).trim() : null;
+  const scoped = input.address ? normalizeIPAddress(String(input.address), "Static 下一跳地址", family === "ipv4" ? 4 : 6) : null;
+  const { base: address, zone } = scoped ? splitScopedIPAddress(scoped) : { base: null, zone: null };
+  assertValidation(!zone || !iface || zone === iface, "Static 下一跳地址 Scope 与出口接口不一致");
+  iface ??= zone;
+  assertValidation(iface === null || /^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$/.test(iface), "Static 下一跳接口不合法");
+  assertValidation(address || iface, "Static 下一跳必须填写地址或接口");
+  assertValidation(!isLinkLocalIPv6(address) || iface, "IPv6 链路本地下一跳必须指定接口");
+  assertValidation(!input.onlink || (address && iface), "Static onlink 必须同时指定地址和接口");
+  assertValidation(!(input.bfd && input.onlink), "Static BFD 与 Onlink 不能同时启用");
+  assertValidation(!input.bfd || address, "Static BFD 必须指定下一跳地址");
+  const weight = normalizeOptionalInteger(input.weight, "Static 下一跳权重", 1, 256) ?? 1;
+  return { address, interface: iface, weight, bfd: input.bfd === true, onlink: input.onlink === true };
+}
+
+function normalizeRoutes(value: unknown, family: AddressFamily): StaticRoute[] {
+  if (value === undefined || value === null) return [];
+  assertValidation(Array.isArray(value) && value.length <= 1024, "Static 路由列表最多支持 1024 条");
+  const routes = value.map((item, index): StaticRoute => {
+    const input = record(item, "Static 路由必须是对象");
+    const prefix = normalizeBirdPrefixPattern(input.prefix, family === "ipv4" ? 4 : 6);
+    assertValidation(isExactPrefix(prefix), "Static 路由必须填写完整 CIDR");
+    const type = normalizeEnum(input.type, new Set(["via", "recursive", "blackhole", "unreachable", "prohibit"] as const), "blackhole", "Static 路由类型");
+    const hops = input.nextHops ?? [];
+    assertValidation(Array.isArray(hops) && hops.length <= 64, "Static 下一跳最多支持 64 个");
+    const nextHops = type === "via" ? hops.map(hop => normalizeNextHop(hop, family)) : [];
+    assertValidation(type !== "via" || nextHops.length > 0, "Static 转发路由至少需要一个下一跳");
+    assertValidation(new Set(nextHops.map(hop => JSON.stringify([hop.address, hop.interface]))).size === nextHops.length, "Static 下一跳重复");
+    const recursiveVia = type === "recursive" ? normalizeIPAddress(input.recursiveVia, "Static 递归下一跳", family === "ipv4" ? 4 : 6) : null;
+    return { id: normalizeId(input.id ?? `route_${index + 1}`, "Static 路由 ID"), prefix, type, nextHops, recursiveVia, filter: normalizeStaticRouteFilter(input.filter, prefix), enabled: input.enabled !== false };
+  });
+  assertValidation(new Set(routes.map(route => route.id)).size === routes.length, "Static 路由 ID 重复");
+  assertValidation(Buffer.byteLength(JSON.stringify(routes), "utf8") <= 1024 * 1024, "Static 路由配置不能超过 1 MiB");
+  return routes;
+}
+
+export function staticRouteAction(route: StaticRouteForwarding): string {
+  if (route.type === "recursive") return `recursive ${route.recursiveVia}`;
+  if (route.type !== "via") return route.type;
+  return route.nextHops.map(hop => {
+    const via = hop.address ? hop.address : `"${hop.interface}"`;
+    return `via ${via}${hop.address && hop.interface ? ` dev "${hop.interface}"` : ""}${hop.onlink ? " onlink" : ""}${hop.bfd ? " bfd" : ""}${hop.weight !== 1 ? ` weight ${hop.weight}` : ""}`;
+  }).join(" ");
+}
+
 export function normalizeStaticProtocol(inputValue: unknown): StaticProtocol {
   const input = record(inputValue, "Static 资源参数不能为空");
   const family = normalizeEnum(input.family, new Set(["ipv4", "ipv6"] as const), "ipv4", "Static 地址族");
@@ -167,7 +228,15 @@ export function normalizeStaticProtocol(inputValue: unknown): StaticProtocol {
   assertValidation(defineId !== null || !Object.keys(routeActions).length, "未选择 Static CIDR Define 时不能设置逐条动作");
   assertValidation(defineId !== null || !Object.keys(routeFilters).length, "未选择 Static CIDR Define 时不能设置 per-route 配置");
   const raw = normalizeBirdBlockSource(input.raw, "额外 Static 指令");
-  assertValidation(action !== null || raw, "Static 资源至少需要标准路由或自定义指令");
+  const routes = normalizeRoutes(input.routes, family);
+  const table = normalizeRoutingTableReference(input.table, family, family === "ipv4" ? "master4" : "master6", "Static");
+  const igpTable = input.igpTable ? normalizeId(input.igpTable, "Static IGP 路由表名称") : null;
+  assertValidation(igpTable !== "master4" || family === "ipv4", "Static IGP 表地址族不匹配");
+  assertValidation(igpTable !== "master6" || family === "ipv6", "Static IGP 表地址族不匹配");
+  const legacyImport = normalizeEnum(input.import, STATIC_CHANNEL_POLICIES, "all", "Static Import 设置");
+  const importPolicy = normalizeChannelPolicy(input.importPolicy ?? { mode: "form", formAction: legacyImport }, "Static Import", "import");
+  assertValidation(["all", "none"].includes(importPolicy.formAction), "Static Import 前缀筛选请使用 Filter");
+  assertValidation(action !== null || raw || routes.length, "Static 资源至少需要标准路由或自定义指令");
   const name = normalizeId(input.name, "Static 协议名称");
   assertValidation(!new Set(["birdbox_device", "birdbox_static", "birdbox_static4", "birdbox_static6", "birdbox_bfd"]).has(name), "Static 协议名称与 Birdbox 内部协议冲突");
   return {
@@ -184,6 +253,7 @@ export function normalizeStaticProtocol(inputValue: unknown): StaticProtocol {
     export: normalizeEnum(input.export, STATIC_CHANNEL_POLICIES, "none", "Static Export 设置"),
     raw,
     enabled: input.enabled !== false,
+    table, igpTable, checkLink: input.checkLink === true, routes, importPolicy,
   };
 }
 

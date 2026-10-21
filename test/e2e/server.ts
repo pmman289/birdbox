@@ -53,7 +53,7 @@ process.env.NODE_ENV = "test";
 process.env.BIRDBOX_DATABASE_URL = "memory:";
 process.env.BIRDBOX_DATA_DIR = dataDir;
 process.env.BIRDBOX_NODES_FILE = nodesFile;
-process.env.BIRDBOX_PORT = "31000";
+process.env.BIRDBOX_PORT ??= "31000";
 process.env.BIRDBOX_HOST = "0.0.0.0";
 process.env.BIRDBOX_SECURE_COOKIE = "false";
 

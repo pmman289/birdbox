@@ -4,7 +4,7 @@ import { nextTick, ref, watch } from "vue";
 export interface OspfApplyNode {
   nodeId: string;
   name: string;
-  status: "ready" | "applying" | "success" | "failed" | "unknown";
+  status: "ready" | "applying" | "success" | "failed" | "unknown" | "rolled_back" | "not_attempted";
   detail?: string;
 }
 
@@ -14,7 +14,8 @@ const props = withDefaults(defineProps<{
   nodes: OspfApplyNode[];
   pending?: boolean;
   error?: string;
-}>(), { pending: false, error: "" });
+  completed?: boolean;
+}>(), { pending: false, error: "", completed: false });
 
 const emit = defineEmits<{
   close: [];
@@ -29,6 +30,8 @@ const statusLabel: Record<OspfApplyNode["status"], string> = {
   success: "已完成",
   failed: "失败",
   unknown: "结果未知",
+  rolled_back: "已回滚",
+  not_attempted: "未下发",
 };
 
 watch(() => props.open, async (open) => {
@@ -55,7 +58,7 @@ function close(): void {
         <button class="icon-button" type="button" aria-label="关闭 OSPF 应用确认" title="关闭" :disabled="pending" @click="close">×</button>
       </header>
       <div class="ospf-apply-copy">
-        <strong>即将更新 {{ nodes.length }} 个节点</strong>
+        <strong>{{ completed ? '已完成' : '即将更新' }} {{ nodes.length }} 个节点</strong>
         <span>应用会按节点执行检查、部署和重载；失败节点会显示原因并保留当前草稿。</span>
       </div>
       <div class="ospf-apply-list">
@@ -67,8 +70,9 @@ function close(): void {
       <p v-if="error" class="field-error" role="alert">{{ error }}</p>
       <div class="dialog-actions">
         <button class="secondary-button" type="button" :disabled="pending" @click="close">取消</button>
-        <button v-if="nodes.some((node) => node.status === 'failed' || node.status === 'unknown')" class="secondary-button" type="button" :disabled="pending" @click="emit('retry')">重试失败节点</button>
-        <button class="primary-button" type="button" :disabled="pending || !nodes.length" @click="emit('confirm')">{{ pending ? "正在应用…" : "确认应用" }}</button>
+        <button v-if="error" class="secondary-button" type="button" :disabled="pending" @click="emit('retry')">重新预检并重试</button>
+        <button v-else-if="completed" class="primary-button" type="button" @click="close">完成</button>
+        <button v-else class="primary-button" type="button" :disabled="pending" @click="emit('confirm')">{{ pending ? "正在应用…" : "确认应用" }}</button>
       </div>
     </div>
   </dialog>

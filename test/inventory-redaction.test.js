@@ -56,3 +56,15 @@ test("restores virtual-link passwords by Router ID and transit area", () => {
   const restored = restoreSecretPlaceholders(incoming, previous);
   assert.deepEqual(restored.virtualLinks.map((link) => link.password), ["second-secret", "first-secret"]);
 });
+
+test("redacts credentials in node configuration diffs and previous configurations", () => {
+  const result = redactPayload({ configs: [{ diff: '- password "old-key";\n+ password "new-key";', previousConfig: 'secret "private-key";' }] });
+  assert.doesNotMatch(JSON.stringify(result), /old-key|new-key|private-key/);
+  assert.match(result.configs[0].diff, /password "\*{8}"/);
+});
+
+test("redacts credentials in OSPF structured unified diffs", () => {
+ const result = redactPayload({ configs: [{ diff: { unified: '- password "ospf-old";\n+ password "ospf-new";' } }] });
+ assert.doesNotMatch(JSON.stringify(result), /ospf-old|ospf-new/);
+ assert.match(result.configs[0].diff.unified, /password "\*{8}"/);
+});

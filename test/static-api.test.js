@@ -1,0 +1,162 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import Fastify from "fastify";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { MemoryDatabase } from "../src/database.js";
+import { InventoryStore } from "../src/store.js";
+import { DeploymentService } from "../src/deployment-service.js";
+import { createResourceApplicationService } from "../src/resource-application-service.js";
+import { mutationRoutes } from "../src/http/mutation-routes.js";
+import { sessionRuntimeRoutes } from "../src/http/session-runtime-routes.js";
+import { configureAgentBroker } from "../src/node-executor.js";
+import { configBundleForNode, findNode } from "../src/inventory-domain.js";
+import { validateInventory } from "../src/bird.js";
+const node = id => ({ id, name: id, transport: "agent", routerId: id === "one" ? "192.0.2.1" : "192.0.2.2", deploymentMode: "include", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/var/lib/birdbox/generated.conf", socketPath: "/run/bird.ctl" });
+const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
+async function setup(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-static-api-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", validateInventory({ nodes: [node("one"), node("two")] }));
+  const store = new InventoryStore({ database, dataDir: root, nodesPath: path.join(root, "nodes.json"), legacySessionPath: path.join(root, "session.json") });
+  await store.initialize();
+  const calls = []; const failures = new Map();
+  configureAgentBroker({ async dispatch(nodeId, method, params) {
+    calls.push({ nodeId, method, params });
+    if (failures.has(`${nodeId}:${method}`)) return { ok: false, stdout: "", stderr: failures.get(`${nodeId}:${method}`) };
+    if (method === "bird.protocol") return { ok: true, stdout: "1002-api_static Static master4 up 00:00\n1006-  Channel ipv4\n    Table: master4\n    Routes: 1 imported, 0 exported", stderr: "" };
+    if (method === "bird.routes") return { ok: true, stdout: `Table ${params.table}:\n198.51.100.0/24 blackhole [api_static 00:00] * (200)\n Type: static univ`, stderr: "" };
+    return { ok: true, stdout: "", stderr: "" };
+  } });
+  t.after(() => configureAgentBroker(null));
+  const lock = operation => database.withLock("static_test", operation);
+  const deploymentService = new DeploymentService({ database, store, withDeploymentLock: lock, configForNode: configBundleForNode, emptyConfigForNode: () => ({ main: "", resources: [] }), findNode, validationError: (_config, diagnostic) => String(diagnostic), addEvent: () => {}, fail });
+  await deploymentService.initialize();
+  let sequence = 0;
+  const service = createResourceApplicationService({ store, deploymentService, nodeOnboarding: {}, sessions: {}, withDeploymentLock: lock, makeId: prefix => `${prefix}_${++sequence}`, addEvent: () => ({}), getEvents: () => [] });
+  const app = Fastify();
+  app.setErrorHandler((error, _request, reply) => reply.code(error.status ?? 500).send({ error: error.message, code: error.code }));
+  const options = { authStore: { isAuthenticated: async token => token === "test" }, secureCookieSetting: false };
+  await app.register(mutationRoutes, { ...options, service, agentBroker: {} });
+  await app.register(sessionRuntimeRoutes, { ...options, store });
+  t.after(() => app.close());
+  const request = (method, url, payload) => app.inject({ method, url, payload, headers: { cookie: "birdbox_session=test" } });
+  // Cookie name follows the shared authentication contract.
+  return { database, store, calls, failures, service, deploymentService, request, app, lock };
+}
+const route = (rest = {}) => ({ id: 'r1', prefix: '198.51.100.0/24', type: 'blackhole', ...rest });
+const resource = (rest = {}) => ({ nodeId: 'one', name: 'api_static', label: 'API Static', family: 'ipv4', routes: [route()], ...rest });
+test('Static HTTP preview → apply → runtime → target routes → disable → delete, with identical generated configuration', async t => {
+ const h = await setup(t); const before = await h.store.read();
+ assert.equal((await h.app.inject({ method: 'POST', url: '/api/statics/preview', payload: resource() })).statusCode, 401);
+ const preview = await h.request('POST', '/api/statics/preview', resource({ routes: [route({ filter: { operations: [{ type: 'set', attribute: 'preference', value: 170 }], custom: '' } })] }));
+ assert.equal(preview.statusCode, 200, preview.body); const p = preview.json(); assert.equal(p.valid, true);
+ assert.deepEqual(await h.store.read(), before); assert.equal(h.calls.filter(c => c.method === 'bird.apply').length, 0); assert.match(p.configs[0].diff, /\+.*route/);
+ const created = await h.request('POST', '/api/statics', { ...p.resource, previewId: p.previewId, inventoryRevision: p.inventoryRevision });
+ assert.equal(created.statusCode, 201, created.body); const id = created.json().resource.id;
+ assert.equal(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, p.configs[0].config);
+ assert.equal(created.json().deployment.applied, true);
+ const runtime = (await h.request('GET', `/api/statics/${id}/runtime`)).json(); assert.equal(runtime.state, 'up'); assert.equal(runtime.imported, 1);
+ const queried = await h.request('GET', `/api/statics/${id}/routes?target=198.51.100.10`); assert.equal(queried.statusCode, 200, queried.body);
+ const query = h.calls.filter(c => c.method === 'bird.routes').at(-1).params; assert.equal(query.table, 'master4'); assert.equal(query.protocolName, 'api_static'); assert.equal(query.target, '198.51.100.10');
+ assert.equal((await h.request('GET', `/api/statics/${id}/routes?target=1.1.1.1;shutdown`)).statusCode, 400);
+ assert.equal((await h.request('PUT', `/api/statics/${id}`, { enabled: false })).statusCode, 200);
+ h.calls.length = 0; assert.equal((await h.request('GET', `/api/statics/${id}/runtime`)).json().state, 'disabled'); assert.deepEqual((await h.request('GET', `/api/statics/${id}/routes`)).json().routes, []); assert.equal(h.calls.length, 0);
+ assert.equal((await h.request('DELETE', `/api/statics/${id}`)).statusCode, 200); assert.equal((await h.store.read()).staticProtocols.length, 0);
+});
+test('Static rejects changed preview candidates and stale revisions before deployment; fresh preview recovers', async t => {
+ const h = await setup(t); const p = (await h.service.previewStatic(resource())).payload;
+ await assert.rejects(() => h.service.createStatic({ ...p.resource, label: 'changed', previewId: p.previewId, inventoryRevision: p.inventoryRevision }), e => e.code === 'STATIC_PREVIEW_STALE');
+ const other = await h.service.createStatic(resource({ name: 'other_static' }));
+ h.calls.length = 0;
+ await assert.rejects(() => h.service.createStatic({ ...p.resource, previewId: p.previewId, inventoryRevision: p.inventoryRevision }), e => e.code === 'STATE_CONFLICT');
+ assert.equal(h.calls.filter(c => c.method === 'bird.apply').length, 0); assert.equal((await h.store.read()).staticProtocols.length, 1);
+ const fresh = (await h.service.previewStatic(resource())).payload;
+ assert.equal((await h.service.createStatic({ ...fresh.resource, previewId: fresh.previewId, inventoryRevision: fresh.inventoryRevision })).status, 201);
+ assert.ok(other.payload.resource.id);
+});
+test('Static preflight and apply failures preserve inventory, roll back and release journal and lock', async t => {
+ const h = await setup(t); const before = await h.store.read();
+ h.failures.set('one:bird.stage', 'bad next hop'); const p = await h.service.previewStatic(resource()); assert.equal(p.payload.valid, false);
+ await assert.rejects(() => h.service.createStatic(resource()), /bad next hop/); assert.deepEqual(await h.store.read(), before);
+ h.failures.clear(); h.calls.length = 0; h.failures.set('one:bird.apply', 'apply failed');
+ await assert.rejects(() => h.service.createStatic(resource()), /apply failed/); assert.deepEqual(await h.store.read(), before);
+ assert.ok(h.calls.some(c => c.method === 'bird.rollback')); assert.equal((await h.deploymentService.readJournal()).active, null);
+ h.failures.clear(); assert.equal((await h.service.createStatic(resource())).status, 201);
+});
+test('Static runtime distinguishes missing protocol and node errors; Import policy references are protected even while disabled', async t => {
+ const h = await setup(t);
+ const filter = await h.service.createPolicy('filters', { name: 'static_filter', label: 'Filter', nodeIds: ['one'], source: 'filter static_filter { accept; }' });
+ const id = (await h.service.createStatic(resource({ importPolicy: { mode: 'custom', filterId: filter.payload.resource.id } }))).payload.resource.id;
+ h.failures.set('one:bird.protocol', 'No protocols match'); assert.equal((await h.request('GET', `/api/statics/${id}/runtime`)).json().state, 'not_configured');
+ h.failures.set('one:bird.protocol', 'offline'); assert.equal((await h.request('GET', `/api/statics/${id}/runtime`)).json().state, 'error');
+ h.failures.clear(); await h.service.updateStatic(id, { enabled: false });
+ await assert.rejects(() => h.service.deletePolicy('filters', filter.payload.resource.id), /Static/);
+ await assert.rejects(() => h.service.updateStatic(id, { nodeId: 'two' }), /不可直接移动/);
+});
+test('Static Define batch routes coexist with direct routes and legacy Import updates remain effective', async t => {
+ const h = await setup(t);
+ const define = await h.service.createPolicy('defines', { type: 'cidr4', label: 'CIDR', name: 'static_prefixes', entries: ['203.0.113.0/24'], nodeIds: ['one'] });
+ const s = await h.service.createStatic(resource({ defineId: define.payload.resource.id, action: 'unreachable' }));
+ const id = s.payload.resource.id;
+ await h.service.updateStatic(id, { import: 'none' });
+ assert.match(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, /import none;/);
+ assert.match(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, /route 203\.0\.113\.0\/24 unreachable;/);
+ assert.match(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, /route 198\.51\.100\.0\/24 blackhole;/);
+});
+test('Static inventory CAS commit failure rolls back remote changes and can be retried', async t => {
+ const h = await setup(t); const before = await h.store.read(); const replace = h.store.replace.bind(h.store);
+ h.store.replace = async () => { throw Object.assign(new Error('CAS conflict'), { code: 'STATE_CONFLICT', status: 409 }); };
+ await assert.rejects(() => h.service.createStatic(resource()), e => e.code === 'STATE_CONFLICT');
+ assert.deepEqual(await h.store.read(), before); assert.ok(h.calls.some(c => c.method === 'bird.rollback')); assert.equal((await h.deploymentService.readJournal()).active, null);
+ h.store.replace = replace; assert.equal((await h.service.createStatic(resource())).status, 201);
+});
+test('Static policies and direct-route custom code enforce scope and deletion protection', async t => {
+ const h = await setup(t);
+ const fn = await h.service.createPolicy('functions', { name: 'static_helper', label: 'Helper', nodeIds: ['two'], source: 'function static_helper() { return true; }' });
+ await assert.rejects(() => h.service.createStatic(resource({ importPolicy: { mode: 'combined', steps: [{ type: 'function', functionId: fn.payload.resource.id }], formAction: 'all' } })), /不可用的 Function|作用域/);
+ const def = await h.service.createPolicy('defines', { name: 'STATIC_METRIC', label: 'Metric', nodeIds: ['one'], type: 'expression', value: '20' });
+ const s = await h.service.createStatic(resource({ routes: [route({ filter: { operations: [], custom: 'igp_metric = STATIC_METRIC;' } })] }));
+ await assert.rejects(() => h.service.deletePolicy('defines', def.payload.resource.id), /源码|引用/);
+ await h.service.deleteStatic(s.payload.resource.id); assert.equal((await h.service.deletePolicy('defines', def.payload.resource.id)).status, 200);
+});
+test('Editing the first of multiple Statics preserves renderer order and preview/apply equivalence', async t => {
+ const h = await setup(t); const first = (await h.service.createStatic(resource())).payload.resource;
+ await h.service.createStatic(resource({ name: 'second_static' }));
+ const preview = (await h.service.previewStatic({ id: first.id, import: 'none' })).payload;
+ assert.equal(preview.resource.importPolicy.formAction, 'none');
+ await h.service.updateStatic(first.id, { ...preview.resource, previewId: preview.previewId, inventoryRevision: preview.inventoryRevision });
+ assert.equal(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, preview.configs[0].config);
+ const state = await h.store.read(); assert.equal(state.staticProtocols[0].id, first.id);
+});
+
+test('Unified Define/direct workflow previews, applies, reopens and inherits forwarding on Define updates', async t => {
+ const h = await setup(t);
+ const define = (await h.service.createPolicy('defines', { type: 'cidr4', label: 'CIDR', name: 'static_prefixes', entries: ['203.0.113.0/24', '203.0.114.0/24'], nodeIds: ['one'] })).payload.resource;
+ const forwarding = { type: 'via', nextHops: [{ address: '192.0.2.2', interface: 'eth0', weight: 2, bfd: true }, { address: null, interface: 'eth1' }] };
+ const candidate = resource({ defineId: define.id, action: forwarding, routeActions: { '203.0.114.0/24': { type: 'recursive', recursiveVia: '192.0.2.3', enabled: false } }, routeFilters: { '203.0.113.0/24': { operations: [{ type: 'set', attribute: 'preference', value: 150 }], custom: 'ospf_metric1 = 20;' } } });
+ const before = await h.store.read(); const preview = (await h.request('POST', '/api/statics/preview', candidate)).json();
+ assert.equal(preview.valid, true); assert.deepEqual(await h.store.read(), before);
+ const applied = await h.request('POST', '/api/statics', { ...preview.resource, previewId: preview.previewId, inventoryRevision: preview.inventoryRevision });
+ assert.equal(applied.statusCode, 201, applied.body); const id = applied.json().resource.id;
+ assert.equal(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, preview.configs[0].config);
+ assert.match(preview.configs[0].config, /route 203\.0\.113\.0\/24 via 192\.0\.2\.2 dev "eth0" bfd weight 2 via "eth1"/);
+ assert.match(preview.configs[0].config, /route 198\.51\.100\.0\/24 blackhole/); assert.doesNotMatch(preview.configs[0].config, /route 203\.0\.114/);
+ const saved = (await h.store.read()).staticProtocols[0]; assert.equal(saved.routeActions['203.0.114.0/24'].enabled, false);
+ const reopened = (await h.service.previewStatic({ ...saved, id })).payload;
+ await h.service.updateStatic(id, { ...reopened.resource, previewId: reopened.previewId, inventoryRevision: reopened.inventoryRevision });
+ assert.equal(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, reopened.configs[0].config);
+ await h.service.updatePolicy('defines', define.id, { entries: ['203.0.113.0/24', '203.0.115.0/24'] });
+ const refreshed = (await h.store.read()).staticProtocols[0];
+ assert.deepEqual(refreshed.routeActions['203.0.115.0/24'], refreshed.action); assert.equal(refreshed.routeActions['203.0.114.0/24'], undefined);
+ assert.equal(refreshed.routeFilters['203.0.113.0/24'].operations[0].value, 150);
+ assert.match(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, /route 203\.0\.115\.0\/24 via/);
+ // Legacy clients that update only the default action still get identical preview/apply candidates.
+ const patch = { id, action: { type: 'recursive', recursiveVia: '192.0.2.9' } };
+ const patched = (await h.service.previewStatic(patch)).payload;
+ await h.service.updateStatic(id, { ...patch, previewId: patched.previewId, inventoryRevision: patched.inventoryRevision });
+ assert.equal(h.calls.filter(c => c.method === 'bird.stage').at(-1).params.config, patched.configs[0].config);
+ assert.equal((await h.store.read()).staticProtocols[0].routeActions['203.0.113.0/24'].type, 'recursive');
+});

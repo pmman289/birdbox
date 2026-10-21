@@ -4,7 +4,8 @@ import net from "node:net";
 import path from "node:path";
 
 import type { AddressFamily, ManagedNode } from "../packages/contracts/src/inventory.js";
-import type { NodeRuntime, RouteDetail } from "../packages/contracts/src/api.js";
+import type { NodeRuntime, RouteDetail, OspfProtocolRuntime } from "../packages/contracts/src/api.js";
+import { parseOspfProtocolRuntime } from "./ospf-runtime-details.js";
 import {
   RUNTIME,
   assertValidation,
@@ -28,6 +29,8 @@ export { configureAgentBroker } from "./node-executor.js";
 export type { NodeCommandResult, NodeExecutorOptions } from "./node-executor.js";
 
 interface RouteInspectionOptions {
+  tableOnly?: boolean;
+  target?: string;
   limit?: number;
   table?: string | null;
 }
@@ -45,8 +48,8 @@ interface RouteInspectionResult {
 export interface OspfRuntimeResult {
   reachable: boolean;
   error: string | null;
-  v2: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
-  v3: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null };
+  v2: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null; protocol?: OspfProtocolRuntime };
+  v3: { state: string | null; neighbors: number; routes: number | null; configured?: boolean; error?: string | null; protocol?: OspfProtocolRuntime };
   neighbors: OspfNeighborRuntime[];
   routes: OspfRouteRuntime[];
   routesTruncated: boolean;
@@ -245,14 +248,14 @@ printf '%s\\n---BIRDBOX---\\n%s\\n---BIRDBOX-STATUS---\\nversion=%s\\nprotocols=
 }
 
 /** Read the verbose BIRD details for one configured protocol. */
-export async function inspectProtocolDetails(nodeInput: unknown, protocolNameInput: unknown): Promise<ProtocolDetailsResult> {
+export async function inspectProtocolDetails(nodeInput: unknown, protocolNameInput: unknown, timeoutMs = 20_000): Promise<ProtocolDetailsResult> {
   const node = normalizeNode(nodeInput);
   const protocolName = normalizeId(protocolNameInput, "BGP 协议名称");
   if (node.transport === "agent") {
     const result = await executeNodeRpc(node, "bird.protocol", {
       socketPath: node.socketPath,
       protocolName,
-    }, 20_000);
+    }, timeoutMs);
     return {
       ok: result.ok,
       output: extractProtocolDetails(result.stdout, protocolName),
@@ -261,8 +264,8 @@ export async function inspectProtocolDetails(nodeInput: unknown, protocolNameInp
   }
   const result = await executeNodeCommand(
     node,
-    `birdc -s '${node.socketPath}' -v 'show protocols all ${protocolName}' 2>&1`,
-    { timeout: 15_000, maxBuffer: 512 * 1024 },
+    `birdc -s '${node.socketPath}' -v 'show protocols all "${protocolName}"' 2>&1`,
+    { timeout: Math.min(timeoutMs, 15_000), maxBuffer: 512 * 1024 },
   );
   return {
     ok: result.ok,
@@ -382,6 +385,23 @@ function ospfVersionRuntime(
   };
 }
 
+async function inspectOspfProtocolRuntime(node: ManagedNode, name: string, timeoutMs: number): Promise<OspfProtocolRuntime> {
+  try {
+    const result = node.transport === "agent"
+      ? await executeNodeRpc(node, "bird.protocol", { socketPath: node.socketPath, protocolName: name, ospfState: true }, timeoutMs)
+      : await executeNodeCommand(node, [
+        `details=$(birdc -s '${node.socketPath}' -v 'show protocols all "${name}"' 2>&1); details_status=$?`,
+        `areas=$(birdc -s '${node.socketPath}' 'show ospf ${name}' 2>&1); areas_status=$?`,
+        `printf '%s\\n---BIRDBOX-OSPF-STATE---\\nstatus=%s\\n%s\\n' "$details" "$areas_status" "$areas"`,
+        `exit "$details_status"`,
+      ].join("\n"), { timeout: timeoutMs, maxBuffer: 512 * 1024 });
+    const [raw = "", state] = result.stdout.split("---BIRDBOX-OSPF-STATE---");
+    if (!result.ok && !/no protocols? match(?:es)?|no such protocol/i.test(`${result.stderr} ${raw}`)) throw new Error(result.stderr || raw || "协议检查失败");
+    const match = state?.match(/^\s*status=(\d+)\r?\n([\s\S]*)$/);
+    return parseOspfProtocolRuntime(raw, name, match ? { ok: match[1] === "0", output: match[2] ?? "" } : state === undefined ? undefined : { ok: false, output: "节点 OSPF Area 状态标记不完整" });
+  } catch (error) { return { state: "error", areas: [], raw: "", error: error instanceof Error ? error.message : "协议检查失败" }; }
+}
+
 export async function inspectOspfRuntime(
   nodeInput: unknown,
   protocolNames: { v2: string; v3: string },
@@ -391,6 +411,7 @@ export async function inspectOspfRuntime(
   const v2 = normalizeId(protocolNames.v2, "OSPFv2 协议名称");
   const v3 = normalizeId(protocolNames.v3, "OSPFv3 协议名称");
   const boundedTimeout = Math.max(250, Math.min(timeoutMs, 120_000));
+  const protocolDetails = Promise.all([v2, v3].map(name => inspectOspfProtocolRuntime(node, name, Math.min(boundedTimeout, 10_000))));
   if (node.transport === "agent") {
     const result = await executeNodeRpc(node, "bird.ospf", {
       socketPath: node.socketPath,
@@ -401,11 +422,12 @@ export async function inspectOspfRuntime(
     const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = payload.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
     const statuses = parseOspfCommandStatuses(statusRaw);
     const statusError = ospfStatusMarkerError(statusRaw, statuses);
+    const [protocol2, protocol3] = await protocolDetails;
     return {
       reachable: !statusError && result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0),
       error: statusError || (result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0) ? null : (result.stderr || "节点不可达")),
-      v2: ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes),
-      v3: ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes),
+      v2: { ...ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes), protocol: protocol2 },
+      v3: { ...ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes), protocol: protocol3 },
       neighbors: [
         ...parseOspfNeighborDetails(neighbors, v2, "ospfv2"),
         ...parseOspfNeighborDetails(neighbors, v3, "ospfv3"),
@@ -434,11 +456,12 @@ export async function inspectOspfRuntime(
   const [neighbors = "", v2count = "", v2routes = "", v3count = "", v3routes = "", interfaces = ""] = payload.split(/---BIRDBOX-OSPF-(?:V2-COUNT|V2-ROUTES|V3-COUNT|V3-ROUTES|INTERFACES)---/);
   const statuses = parseOspfCommandStatuses(statusRaw);
   const statusError = ospfStatusMarkerError(statusRaw, statuses);
+  const [protocol2, protocol3] = await protocolDetails;
   return {
     reachable: !statusError && result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0),
     error: statusError || (result.ok && (statuses.neighbors === undefined || statuses.neighbors === 0) && (statuses.interfaces === undefined || statuses.interfaces === 0) ? null : (result.stderr || "节点不可达")),
-    v2: ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes),
-    v3: ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes),
+    v2: { ...ospfVersionRuntime(statuses, "v2", v2, neighbors, v2count, v2routes), protocol: protocol2 },
+    v3: { ...ospfVersionRuntime(statuses, "v3", v3, neighbors, v3count, v3routes), protocol: protocol3 },
     neighbors: [
       ...parseOspfNeighborDetails(neighbors, v2, "ospfv2"),
       ...parseOspfNeighborDetails(neighbors, v3, "ospfv3"),
@@ -497,12 +520,15 @@ export async function inspectProtocolRoutes(
   const limit = options.limit ?? 200;
   assertValidation(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1000, "路由明细数量限制不合法");
   const table = normalizeOptionalName(options.table, "Channel 路由表名称") ?? (family === "ipv4" ? "master4" : "master6");
+  const target = options.target?.trim() ?? "";
+  assertValidation(!target || net.isIP(target) === (family === "ipv4" ? 4 : 6), "查询目标必须与协议地址族一致");
   if (node.transport === "agent") {
     const result = await executeNodeRpc(node, "bird.routes", {
       socketPath: node.socketPath,
       table,
-      protocolName,
-      direction,
+      protocolName: options.tableOnly ? undefined : protocolName,
+      direction: options.tableOnly ? undefined : direction,
+      ...(target ? { target } : {}),
     }, 25_000);
     return {
       ok: result.ok,
@@ -510,7 +536,7 @@ export async function inspectProtocolRoutes(
       error: result.ok ? null : (result.stderr || result.stdout || "无法读取 BIRD 路由明细"),
     };
   }
-  const routeSelector = direction === "import" ? `protocol ${protocolName}` : `export ${protocolName}`;
+  const routeSelector = options.tableOnly ? (target ? `for ${target}` : "") : direction === "import" ? `${target ? `for ${target} ` : ""}protocol ${protocolName}` : `${target ? `for ${target} ` : ""}export ${protocolName}`;
   const query = `show route table ${table} ${routeSelector} all`;
   const command = `
 status_file=$(mktemp)

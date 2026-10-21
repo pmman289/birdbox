@@ -12,7 +12,7 @@ import { extractBgpProtocolConfig } from "../sessions/session-config";
 type RuntimeTab = "config" | "events";
 
 const { dashboard } = useDashboardStore();
-const { previewConfig, previewContext, contextKey } = useSessionStore();
+const { previewConfig, previewContext, contextKey, dirty } = useSessionStore();
 const activeTab = ref<RuntimeTab>("config");
 const peers = computed(() => dashboard.value?.peers ?? []);
 const events = computed(() => [...(dashboard.value?.events ?? [])].reverse());
@@ -131,7 +131,7 @@ function eventTime(event: ChangeEvent): string {
     </table>
   </div>
   <div class="tabs" role="tablist" aria-label="配置与日志">
-    <button id="localConfigTab" class="tab" :class="{ active: activeTab === 'config' }" type="button" role="tab" :aria-selected="activeTab === 'config'" aria-controls="localConfig" :tabindex="activeTab === 'config' ? 0 : -1" @click="selectTab('config')" @keydown="moveTabFocus($event, 'config')">当前 eBGP 配置</button>
+    <button id="localConfigTab" class="tab" :class="{ active: activeTab === 'config' }" type="button" role="tab" :aria-selected="activeTab === 'config'" aria-controls="localConfig" :tabindex="activeTab === 'config' ? 0 : -1" @click="selectTab('config')" @keydown="moveTabFocus($event, 'config')">当前 eBGP 配置<span v-if="dirty && previewConfig"> · 草稿预览</span></button>
     <button id="eventLogTab" class="tab" :class="{ active: activeTab === 'events' }" type="button" role="tab" :aria-selected="activeTab === 'events'" aria-controls="eventLog" :tabindex="activeTab === 'events' ? 0 : -1" @click="selectTab('events')" @keydown="moveTabFocus($event, 'events')">变更日志 <span>{{ dashboard?.events.length ?? 0 }}</span></button>
   </div>
   <div class="tab-panels">

@@ -1094,18 +1094,12 @@ func birdTaskStructured(parent context.Context, method string, params map[string
 		}
 		return r
 	case "bird.protocol":
-		protocolName, _ := params["protocolName"].(string)
-		if protocolName != "" && !safeBirdName.MatchString(protocolName) {
-			r.Stderr, r.Code = "invalid protocol name", "INVALID_PROTOCOL"
-			return r
-		}
-		command := "show protocols all"
-		if protocolName != "" {
-			command += " " + protocolName
-		}
-		out := runBirdcVerbose(parent, socket, command)
-		r.Stdout, r.Stderr, r.OK, r.Code = out.stdout, out.stderr, out.ok, out.code
-		return r
+		return birdProtocolTaskWith(params, r, func(command string, verbose bool) commandResult {
+			if verbose {
+				return runBirdcVerbose(parent, socket, command)
+			}
+			return runBirdc(parent, socket, command)
+		})
 	case "bird.routes":
 		return birdRoutesTask(parent, params, r)
 	case "bird.protocol_state":
@@ -1134,14 +1128,35 @@ func birdTaskStructured(parent context.Context, method string, params map[string
 	}
 }
 
-func birdRoutesTask(parent context.Context, params map[string]any, r result) result {
+func birdProtocolTaskWith(params map[string]any, r result, query func(string, bool) commandResult) result {
+	protocolName, _ := params["protocolName"].(string)
+	ospfState, _ := params["ospfState"].(bool)
+	if protocolName != "" && !safeBirdName.MatchString(protocolName) || ospfState && protocolName == "" {
+		r.Stderr, r.Code = "invalid protocol name", "INVALID_PROTOCOL"
+		return r
+	}
+	command := "show protocols all"
+	if protocolName != "" {
+		command += " \"" + protocolName + "\""
+	}
+	out := query(command, true)
+	r.Stdout, r.Stderr, r.OK, r.Code = out.stdout, out.stderr, out.ok, out.code
+	// Optional, bounded read-only extension. Older controllers keep the
+	// original response; older Agents safely ignore the requested flag.
+	if ospfState {
+		state := query("show ospf "+protocolName, false)
+		r.Stdout += fmt.Sprintf("\n---BIRDBOX-OSPF-STATE---\nstatus=%d\n%s", commandStatus(state), state.stdout+state.stderr)
+	}
+	return r
+}
+
+func birdRouteQuery(params map[string]any) (string, bool) {
 	table, tableOK := params["table"].(string)
 	protocol, _ := params["protocolName"].(string)
 	direction, _ := params["direction"].(string)
 	target, _ := params["target"].(string)
 	if !tableOK || !safeBirdName.MatchString(table) || protocol != "" && !safeBirdName.MatchString(protocol) {
-		r.Stderr, r.Code = "invalid route query parameters", "INVALID_ROUTE_QUERY"
-		return r
+		return "", false
 	}
 	if target != "" {
 		baseTarget := target
@@ -1149,29 +1164,32 @@ func birdRoutesTask(parent context.Context, params map[string]any, r result) res
 			baseTarget = baseTarget[:index]
 		}
 		if net.ParseIP(baseTarget) == nil || strings.ContainsAny(target, " \t\r\n'\"") {
-			r.Stderr, r.Code = "invalid route target", "INVALID_ROUTE_QUERY"
-			return r
+			return "", false
 		}
 	}
 	command := "show route table " + table
 	if target != "" {
-		command += " for " + target + " all"
-	} else {
-		if direction == "import" {
-			if protocol == "" {
-				r.Stderr, r.Code = "protocolName is required", "INVALID_ROUTE_QUERY"
-				return r
-			}
-			command += " protocol " + protocol + " all"
-		} else if direction == "export" {
-			if protocol == "" {
-				r.Stderr, r.Code = "protocolName is required", "INVALID_ROUTE_QUERY"
-				return r
-			}
-			command += " export " + protocol + " all"
-		} else {
-			command += " all"
+		command += " for " + target
+	}
+	if direction == "import" || direction == "export" {
+		if protocol == "" {
+			return "", false
 		}
+		if direction == "import" {
+			command += " protocol " + protocol
+		} else {
+			command += " export " + protocol
+		}
+	}
+	command += " all"
+	return command, true
+}
+
+func birdRoutesTask(parent context.Context, params map[string]any, r result) result {
+	command, valid := birdRouteQuery(params)
+	if !valid {
+		r.Stderr, r.Code = "invalid route query parameters", "INVALID_ROUTE_QUERY"
+		return r
 	}
 	out := runBirdc(parent, params["socketPath"].(string), command)
 	r.Stdout, r.Stderr, r.OK, r.Code = out.stdout, out.stderr, out.ok, out.code

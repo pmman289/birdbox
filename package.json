@@ -14,7 +14,8 @@
     "test:e2e": "playwright test",
     "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
     "typecheck:web": "vue-tsc --noEmit -p apps/web/tsconfig.json",
-    "demo:ospf": "npm run build:web && tsx scripts/ospf-demo.ts"
+    "demo:ospf": "npm run build:web && tsx scripts/ospf-demo.ts",
+    "demo:static": "npm run build:web && tsx scripts/static-demo.ts"
   },
   "engines": {
     "node": ">=24"
@@ -27,11 +28,11 @@
     "@playwright/test": "1.64.1",
     "@types/node": "24.13.3",
     "@vitejs/plugin-vue": "5.2.4",
+    "pinyin-pro": "3.28.2",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vite": "6.4.5",
     "vue": "3.5.44",
-    "vue-tsc": "3.3.13",
-    "pinyin-pro": "3.28.2"
+    "vue-tsc": "3.3.13"
   }
 }

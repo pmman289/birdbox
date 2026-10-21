@@ -1,6 +1,9 @@
 import net from "node:net";
 
-import type { RpkiFileSource, RpkiServerSource, RpkiSource } from "../packages/contracts/src/inventory.js";
+import type { Inventory, RpkiFileSource, RpkiServerSource, RpkiSource } from "../packages/contracts/src/inventory.js";
+import type { RpkiEditorContext } from "../packages/contracts/src/api.js";
+import { birdSourceReferencesSymbol } from "../packages/contracts/src/bird-source-identifiers.js";
+import { resourceScopeContains } from "../packages/contracts/src/resource-scope.js";
 import {
   assertValidation,
   normalizeEnum,
@@ -15,6 +18,22 @@ import {
 } from "./bird-normalize-common.js";
 
 type UnknownRecord = Record<string, unknown>;
+
+export function rpkiReferences(inventory: Inventory, resource: RpkiSource): RpkiEditorContext["references"] {
+  const symbols = [resource.name, resource.roa4Table, resource.roa6Table].filter((name): name is string => name !== null);
+  const references: RpkiEditorContext["references"] = [];
+  for (const kind of ["defines", "functions", "filters", "statics"] as const) {
+    const resources = kind === "statics" ? inventory.staticProtocols : inventory[kind];
+    for (const consumer of resources) {
+      if (!resourceScopeContains(resource, consumer)) continue;
+      const source = "source" in consumer ? consumer.source : "type" in consumer ? consumer.type === "expression" ? consumer.value : ""
+        : [consumer.raw, ...Object.values(consumer.routeFilters).map(item => item.custom), ...(consumer.routes ?? []).map(item => item.filter.custom)].join("\n");
+      const used = symbols.filter(symbol => birdSourceReferencesSymbol(source, symbol));
+      if (used.length) references.push({ kind, id: consumer.id, label: consumer.label, symbols: used });
+    }
+  }
+  return references;
+}
 
 const RPKI_SOURCE_TYPES = new Set(["file", "server"] as const);
 const RPKI_TRANSPORTS = new Set(["tcp", "ssh"] as const);

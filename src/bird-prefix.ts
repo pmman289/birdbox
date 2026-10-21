@@ -1,4 +1,5 @@
 import net from "node:net";
+import { splitBirdPrefixEntries } from "../packages/contracts/src/prefix-entries.js";
 
 type IpFamily = 4 | 6;
 
@@ -42,22 +43,7 @@ export function parseBirdPrefixEntries(value: unknown, expectedFamily: IpFamily 
   if (Array.isArray(value)) {
     entries = value.map((item) => normalizeBirdPrefixPattern(item, expectedFamily));
   } else {
-    let source = String(value ?? "").trim();
-    if (source.startsWith("[") && source.endsWith("]")) source = source.slice(1, -1);
-    entries = [];
-    let current = "";
-    let braceDepth = 0;
-    for (const character of source) {
-      if (character === "{") braceDepth += 1;
-      if (character === "}") braceDepth -= 1;
-      if ((character === "," || character === "\n" || character === ";") && braceDepth === 0) {
-        if (current.trim()) entries.push(normalizeBirdPrefixPattern(current, expectedFamily));
-        current = "";
-      } else {
-        current += character;
-      }
-    }
-    if (current.trim()) entries.push(normalizeBirdPrefixPattern(current, expectedFamily));
+    entries = splitBirdPrefixEntries(String(value ?? "")).map(item => normalizeBirdPrefixPattern(item, expectedFamily));
   }
   if (entries.length < 1) validationError("CIDR 列表至少需要一个条目");
   if (entries.length > maximumEntries) validationError(`单个 CIDR 列表最多支持 ${maximumEntries} 个条目`);

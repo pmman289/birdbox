@@ -21,6 +21,7 @@ import { dashboardRoutes } from "./dashboard-routes.js";
 import { mutationRoutes } from "./mutation-routes.js";
 import { sessionRuntimeRoutes } from "./session-runtime-routes.js";
 import { inspectOspfRuntime } from "../bird.js";
+import { redactPayload } from "../inventory-redaction.js";
 
 interface HttpApplicationOptions {
   publicDirectory: string;
@@ -262,6 +263,7 @@ export async function createHttpApplication(options: HttpApplicationOptions) {
     }
     const payload: ApiErrorResponse = { error: unexpected ? "服务器内部错误" : publicError.message };
     if (!unexpected && publicError.code) payload.code = publicError.code;
+    if (authenticated && publicError.deployment) payload.deployment = redactPayload(publicError.deployment);
     if (authenticated) payload.events = options.getEvents();
     if (!reply.sent) {
       return sendJson(reply, publicError.status ?? publicError.statusCode ?? 500, payload);

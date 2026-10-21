@@ -15,8 +15,8 @@ import {
 import { birdIdentifierList } from "./bird-identifiers.js";
 import { assertValidation } from "./bird-normalize-common.js";
 
-type DependencyKind = "Define" | "Function" | "Filter" | "RPKI" | "Static" | "SourcePolicy" | "OSPF";
-type DependencyInventory = Pick<Inventory, "defines" | "functions" | "filters" | "rpki" | "staticProtocols" | "sourcePolicies" | "ospfDomains">;
+type DependencyKind = "Define" | "Function" | "Filter" | "RPKI" | "Static" | "SourcePolicy" | "OSPF" | "Pipe";
+type DependencyInventory = Pick<Inventory, "defines" | "functions" | "filters" | "rpki" | "staticProtocols" | "sourcePolicies" | "ospfDomains"> & { pipeProtocols?: Inventory["pipeProtocols"] };
 
 interface DependencyNode {
   key: string;
@@ -88,7 +88,7 @@ function rpkiNode(resource: RpkiSource, index: number): DependencyNode {
 }
 
 function staticNode(resource: StaticProtocol, index: number): DependencyNode {
-  const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
+  const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom), ...(resource.routes ?? []).map(route => route.filter.custom)];
   return {
     key: `Static:${resource.id}`,
     kind: "Static",
@@ -161,6 +161,14 @@ function dependencyNodes(inventory: DependencyInventory): DependencyNode[] {
     ...inventory.rpki.map(rpkiNode),
     ...inventory.functions.map((resource, index) => policyNode(resource, "Function", 2, index)),
     ...inventory.filters.map((resource, index) => policyNode(resource, "Filter", 3, index)),
+    ...(inventory.pipeProtocols ?? []).map((pipe, index): DependencyNode => ({
+      key: `Pipe:${pipe.id}`, kind: "Pipe", name: pipe.name, enabled: pipe.enabled, scope: pipe, phase: 4, index,
+      references: new Set([pipe.importPolicy, pipe.exportPolicy].flatMap((policy) => [
+        ...(policy.mode === "custom" && policy.filterId ? [filterNames.get(policy.filterId)] : []),
+        ...(policy.mode === "combined" ? policy.steps.flatMap((step) => step.type === "function" ? [functionNames.get(step.functionId)] : []) : []),
+      ]).filter((name): name is string => Boolean(name))),
+      providedSymbols: new Set(),
+    })),
     ...inventory.staticProtocols.map(staticNode),
     ...inventory.sourcePolicies.map((resource, index) => sourcePolicyNode(resource, index, defineNames)),
     ...ospfNodes(inventory.ospfDomains, functionNames, filterNames, defineNames),

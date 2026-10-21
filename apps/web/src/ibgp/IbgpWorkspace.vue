@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import type {
+  DeploymentReport,
   IbgpDomainPreviewResponse,
   IbgpPreviewSide,
 } from "@birdbox/contracts/api";
@@ -20,9 +21,10 @@ import type {
 import type { NodeRuntime } from "@birdbox/contracts/api";
 
 import { useDashboardStore } from "../dashboard/dashboard-store";
-import { api } from "../shared/api-client";
+import { api, ApiError } from "../shared/api-client";
 import { cloneReactive } from "../shared/clone-reactive";
 import { uniqueBirdName } from "../shared/resource-names";
+import ProtocolWorkflow from "../shared/ProtocolWorkflow.vue";
 import PolicyActionDialog from "../sessions/PolicyActionDialog.vue";
 import { defaultBgpOptions, defaultChannel } from "../sessions/session-draft";
 import IbgpSessionSideEditor from "./IbgpSessionSideEditor.vue";
@@ -32,6 +34,8 @@ const domains = ref<IbgpDomain[]>([]);
 const selectedDomainId = ref<string | null>(null);
 const selectedNodeId = ref<string | null>(null);
 const selectedAdjacencyId = ref<string | null>(null);
+const endpointView = ref<"left" | "right" | "both">("left");
+const workspace = ref<HTMLElement | null>(null);
 const draft = ref<IbgpDomain | null>(null);
 const sessionDrafts = ref<Record<string, BgpSession>>({});
 const loading = ref(false);
@@ -40,11 +44,17 @@ const layoutSaving = ref(false);
 const error = ref("");
 const connectionSearch = ref("");
 const canvas = ref<HTMLElement | null>(null);
-const dragging = ref<{ nodeId: string; dx: number; dy: number } | null>(null);
+const dragging = ref<{ nodeId: string; dx: number; dy: number; moved?: boolean } | null>(null);
 const previewPending = ref(false);
 const previewValid = ref<boolean | null>(null);
 const previewError = ref("");
 const previewSides = ref<IbgpPreviewSide[]>([]);
+const inventoryRevision = ref<number | null | undefined>(undefined);
+const reviewed = ref<{ signature: string; response: IbgpDomainPreviewResponse } | null>(null);
+const conflict = ref(false);
+const latestContext = ref<{ domains: IbgpDomain[]; inventory: Inventory; inventoryRevision?: number | null } | null>(null);
+const deploymentResult = ref<DeploymentReport | null>(null);
+const reviewOpen = ref(false);
 const inventorySnapshot = ref<Inventory | null>(null);
 const runtimeByNodeId = ref<Record<string, NodeRuntime>>({});
 const draftDirty = ref(false);
@@ -166,6 +176,7 @@ function protocolRuntime(session: BgpSession | null): NodeRuntime["protocols"][n
 }
 
 function sessionStatus(session: BgpSession | null): string {
+  if (session && !session.enabled) return "已停用";
   const protocol = protocolRuntime(session);
   if (!protocol) return "未获取";
   if (protocol.established) return "已建立";
@@ -216,6 +227,7 @@ function markDraftDirty(): void {
 }
 
 function confirmDiscardDraft(): boolean {
+  if (saving.value) return false;
   if (!draftDirty.value) return true;
   return window.confirm("当前 iBGP 域有未保存的双端配置，切换后将丢失这些修改。是否继续？");
 }
@@ -223,12 +235,34 @@ function confirmDiscardDraft(): boolean {
 function handleDomainSelect(event: Event): void {
   const next = (event.target as HTMLSelectElement).value || null;
   if (next) selectDomain(next);
+  (event.target as HTMLSelectElement).value = selectedDomainId.value ?? "";
 }
 
-function focusPairSide(side: "left" | "right"): void {
+async function focusPairSide(side: "left" | "right"): Promise<void> {
+  endpointView.value = side;
+  await nextTick();
   const target = side === "left" ? leftSideColumn.value : rightSideColumn.value;
+  target?.scrollTo({ top: 0 });
+  const panel = target?.closest<HTMLElement>(".ibgp-pair-workspace");
+  panel?.scrollTo({ top: 0 });
+  if (window.matchMedia("(max-width: 1099px)").matches) panel?.scrollIntoView({ block: "start" });
+}
+
+const workflowSteps = computed(() => [
+  { id: "domain", title: "域与节点", detail: `${draft.value?.members.length ?? 0} 个成员 · AS${draft.value?.asn ?? '未设置'}` },
+  { id: "connections", title: "连接与双端", detail: draft.value?.adjacencies.length ? `${draft.value.adjacencies.length} 条连接 · 分端编辑` : "点选本机，再选择对端建立连接" },
+  { id: "review", title: "预检与应用", detail: previewValid.value ? "当前草稿已通过预检" : "检查所有受影响节点", disabled: previewPending.value },
+]);
+async function focusWorkflowStep(id: string): Promise<void> {
+  if (id === "review") {
+    reviewOpen.value = true;
+    await runPreview();
+    await nextTick();
+  }
+  const selector = id === "domain" ? ".ibgp-domain-strip" : id === "connections" ? ".ibgp-connection-panel" : ".ibgp-change-review";
+  const target = workspace.value?.querySelector<HTMLElement>(selector);
   target?.scrollIntoView({ behavior: "smooth", block: "start" });
-  target?.querySelector<HTMLElement>("input, select, button")?.focus({ preventScroll: true });
+  target?.focus({ preventScroll: true });
 }
 
 function clone<T>(value: T): T {
@@ -257,6 +291,11 @@ function layoutFor(
   index: number,
 ): { x: number; y: number; locked: boolean } {
   return draft.value?.layout[nodeId] ?? defaultLayoutFor(index);
+}
+
+function layoutForId(nodeId: string): { x: number; y: number; locked: boolean } {
+  const index = draft.value ? domainNodes(draft.value).findIndex(node => node.id === nodeId) : 0;
+  return layoutFor(nodeId, Math.max(0, index));
 }
 
 function makeDraft(): IbgpDomain {
@@ -306,7 +345,7 @@ function makeSession(
     peerId,
     protocolName: uniqueBirdName(
       currentInventory.value ?? {
-        version: 28,
+        version: 31,
         nodes: [],
         peers: [],
         defines: [],
@@ -316,6 +355,7 @@ function makeSession(
         staticProtocols: [],
         directProtocols: [],
         kernelProtocols: [],
+        pipeProtocols: [],
         sourcePolicies: [],
         sessions: [],
         ibgpDomains: [],
@@ -365,8 +405,10 @@ async function loadDomains(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    const response = await api<{ domains: IbgpDomain[]; inventory: Inventory }>("/api/ibgp-domains");
+    const response = await api<{ domains: IbgpDomain[]; inventory: Inventory; inventoryRevision?: number | null }>("/api/ibgp-domains");
     if (!mounted || requestId !== domainLoadSequence) return;
+    if (draftDirty.value || saving.value) return;
+    inventoryRevision.value = response.inventoryRevision;
     inventorySnapshot.value = response.inventory;
     domains.value = response.domains;
     if (
@@ -389,6 +431,7 @@ function selectDomain(domainId: string, reload = false): void {
   if (!domain) return;
   if (domain.id === selectedDomainId.value && !reload) return;
   if (!confirmDiscardDraft()) return;
+  resetReview();
   runtimeRefreshSequence += 1;
   selectedDomainId.value = domainId;
   draft.value = clone(domain);
@@ -416,6 +459,7 @@ function selectDomain(domainId: string, reload = false): void {
 
 function newDomain(): void {
   if (!confirmDiscardDraft()) return;
+  resetReview();
   runtimeRefreshSequence += 1;
   selectedDomainId.value = null;
   draft.value = makeDraft();
@@ -431,71 +475,126 @@ function newDomain(): void {
   runtimeByNodeId.value = {};
 }
 
+function resetReview(): void {
+  reviewed.value = null;
+  previewValid.value = null;
+  previewSides.value = [];
+  previewError.value = "";
+  conflict.value = false;
+  latestContext.value = null;
+  reviewOpen.value = false;
+  deploymentResult.value = null;
+}
+
+async function compareLatest(): Promise<void> {
+  try {
+    latestContext.value = await api("/api/ibgp-domains");
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : "读取最新版本失败"; }
+}
+function rebaseDraft(useLatest: boolean): void {
+  const context = latestContext.value;
+  if (!context || !draft.value) return;
+  const latest = context.domains.find(item => item.id === selectedDomainId.value);
+  domains.value = context.domains;
+  inventorySnapshot.value = context.inventory;
+  inventoryRevision.value = context.inventoryRevision;
+  conflict.value = false;
+  latestContext.value = null;
+  reviewed.value = null;
+  if (useLatest) {
+    draftDirty.value = false;
+    if (latest) selectDomain(latest.id, true);
+    else newDomain();
+  } else if (selectedDomainId.value && !latest) {
+    selectedDomainId.value = null;
+    draft.value.id = "";
+    // A deleted session cannot restore masked credentials from the server.
+    for (const session of Object.values(sessionDrafts.value)) {
+      if (session.bgp.password === "********") session.bgp.password = "";
+      if (session.bgp.aoKeys === "********") session.bgp.aoKeys = "";
+    }
+  }
+  schedulePreview();
+}
+
 async function saveDomain(): Promise<void> {
-  if (!draft.value) return;
+  if (!draft.value || saving.value || conflict.value || layoutSaving.value) return;
+  if (!reviewed.value || reviewed.value.signature !== previewSignature.value || !reviewed.value.response.valid) {
+    reviewOpen.value = true;
+    await runPreview();
+    return;
+  }
+  const accepted = reviewed.value;
+  const names = accepted.response.configs?.map(item => item.nodeName) ?? [];
+  if (!window.confirm(`将应用 iBGP 域“${draft.value.name}”的配置${names.length ? `，影响节点：${names.join("、")}` : ""}。是否确认下发？`)) return;
+  // The browser confirmation may have remained open while async state changed.
+  if (accepted !== reviewed.value || accepted.signature !== previewSignature.value || conflict.value) return;
   saving.value = true;
   error.value = "";
   try {
-    const path = selectedDomainId.value
-      ? `/api/ibgp-domains/${selectedDomainId.value}`
-      : "/api/ibgp-domains";
-    const response = await api<{ domain: IbgpDomain; inventory: Inventory }>(path, {
+    const path = selectedDomainId.value ? `/api/ibgp-domains/${selectedDomainId.value}` : "/api/ibgp-domains";
+    const response = await api<{ domain: IbgpDomain; inventory: Inventory; inventoryRevision?: number | null; deployment?: typeof deploymentResult.value }>(path, {
       method: selectedDomainId.value ? "PUT" : "POST",
-      body: JSON.stringify(domainPayload(draft.value)),
+      body: JSON.stringify({ ...accepted.response.domain, layout: draft.value.layout, sessionUpdates: accepted.response.sessions,
+        inventoryRevision: accepted.response.inventoryRevision, mode: "apply", previewId: accepted.response.previewId, candidateHash: accepted.response.candidateHash }),
     });
-    domains.value = selectedDomainId.value
-      ? domains.value.map((domain) =>
-          domain.id === response.domain.id ? response.domain : domain,
-        )
-      : [...domains.value, response.domain];
-    selectedDomainId.value = response.domain.id;
-    draft.value = clone(response.domain);
+    domains.value = [...domains.value.filter(item => item.id !== response.domain.id), response.domain];
     inventorySnapshot.value = response.inventory;
+    inventoryRevision.value = response.inventoryRevision;
     draftDirty.value = false;
-    window.dispatchEvent(
-      new CustomEvent("birdbox:dashboard-selection", {
-        detail: { nodeId: selectedNodeId.value, peerId: null },
-      }),
-    );
+    saving.value = false;
+    selectDomain(response.domain.id, true);
+    deploymentResult.value = response.deployment ?? null;
+    window.dispatchEvent(new CustomEvent("birdbox:dashboard-selection", { detail: { nodeId: selectedNodeId.value, peerId: null } }));
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "保存 iBGP 域失败";
-  } finally {
-    saving.value = false;
-  }
+    if (cause instanceof ApiError && cause.code === "STATE_CONFLICT") conflict.value = true;
+    if (cause instanceof ApiError && cause.code === "IBGP_PREVIEW_STALE") reviewed.value = null;
+  } finally { saving.value = false; }
 }
 
 async function removeDomain(): Promise<void> {
   if (
+    saving.value ||
     !selectedDomainId.value ||
     !window.confirm("删除该 iBGP 域及其全部双向会话？")
   )
     return;
   saving.value = true;
   try {
-    await api(`/api/ibgp-domains/${selectedDomainId.value}`, {
-      method: "DELETE",
+    const response = await api<{ inventory: Inventory; inventoryRevision?: number | null }>(`/api/ibgp-domains/${selectedDomainId.value}`, {
+      method: "DELETE", body: JSON.stringify({ inventoryRevision: inventoryRevision.value }),
     });
+    inventorySnapshot.value = response.inventory;
+    inventoryRevision.value = response.inventoryRevision;
     domains.value = domains.value.filter(
       (domain) => domain.id !== selectedDomainId.value,
     );
     draftDirty.value = false;
+    saving.value = false;
     if (domains.value[0]) selectDomain(domains.value[0].id);
     else newDomain();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "删除 iBGP 域失败";
+    if (cause instanceof ApiError && cause.code === "STATE_CONFLICT") conflict.value = true;
   } finally {
     saving.value = false;
   }
 }
 
 async function saveLayout(): Promise<void> {
-  if (!selectedDomainId.value || !draft.value) return;
+  if (!selectedDomainId.value || !draft.value || saving.value) return;
+  const domainId = selectedDomainId.value;
+  const revision = inventoryRevision.value;
   layoutSaving.value = true;
   try {
-    await api(`/api/ibgp-domains/${selectedDomainId.value}/layout`, {
+    const response = await api<{ inventoryRevision?: number | null }>(`/api/ibgp-domains/${domainId}/layout`, {
       method: "PATCH",
       body: JSON.stringify({ layout: draft.value.layout }),
     });
+    if (selectedDomainId.value === domainId && typeof revision === "number" && response.inventoryRevision === revision + 1) inventoryRevision.value = response.inventoryRevision;
+    reviewed.value = null;
+    schedulePreview();
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : "保存拓扑位置失败";
   } finally {
@@ -508,7 +607,7 @@ function selectNode(nodeId: string): void {
   const adjacency = draft.value?.adjacencies.find(
     (item) => item.leftNodeId === nodeId || item.rightNodeId === nodeId,
   );
-  if (adjacency) selectedAdjacencyId.value = adjacency.id;
+  selectedAdjacencyId.value = adjacency?.id ?? null;
 }
 
 function startDrag(event: PointerEvent, nodeId: string): void {
@@ -525,6 +624,7 @@ function startDrag(event: PointerEvent, nodeId: string): void {
 function dragNode(event: PointerEvent): void {
   if (!dragging.value || !canvas.value || !draft.value) return;
   const rect = canvas.value.getBoundingClientRect();
+  dragging.value.moved = true;
   draft.value.layout[dragging.value.nodeId] = {
     ...(draft.value.layout[dragging.value.nodeId] ?? { locked: false }),
     x: Math.max(8, Math.round(event.clientX - rect.left - dragging.value.dx)),
@@ -534,8 +634,9 @@ function dragNode(event: PointerEvent): void {
 
 function stopDrag(): void {
   if (!dragging.value) return;
+  const moved = dragging.value.moved;
   dragging.value = null;
-  void saveLayout();
+  if (moved) void saveLayout();
 }
 
 function connectionTo(nodeId: string): IbgpAdjacency | null {
@@ -643,76 +744,61 @@ function insertPolicyFunction(resource: PolicyFunction): void {
 }
 
 const previewSignature = computed(() => {
-  if (!draft.value || !draft.value.adjacencies.length) return null;
+  if (!draft.value) return null;
   const { layout: _layout, ...domain } = draft.value;
-  return JSON.stringify({
-    ...domain,
-    sessionUpdates: Object.values(sessionDrafts.value),
-  });
+  return JSON.stringify({ ...domain, sessionUpdates: Object.values(sessionDrafts.value) });
 });
 
 function schedulePreview(): void {
   if (previewTimer !== null) window.clearTimeout(previewTimer);
-  if (!previewSignature.value) {
-    previewSides.value = [];
-    previewValid.value = null;
-    previewError.value = "";
-    return;
-  }
+  reviewed.value = null;
+  previewValid.value = null;
+  previewSides.value = [];
+  if (!previewSignature.value || conflict.value || saving.value) return;
   previewTimer = window.setTimeout(() => void runPreview(), 650);
 }
-
 async function runPreview(): Promise<void> {
-  if (!mounted || !draft.value) return;
-  if (previewPending.value) {
-    previewQueued = true;
-    return;
-  }
+  if (!mounted || !draft.value || conflict.value || saving.value) return;
+  if (previewTimer !== null) window.clearTimeout(previewTimer);
+  if (previewPending.value) { previewQueued = true; return; }
   const signature = previewSignature.value;
   if (!signature) return;
+  const domainId = selectedDomainId.value;
+  const revision = inventoryRevision.value;
+  reviewed.value = null;
+  previewValid.value = null;
   previewPending.value = true;
   previewError.value = "";
   try {
-    const response = await api<IbgpDomainPreviewResponse>(
-      "/api/ibgp-domains/preview",
-      {
-        method: "POST",
-        body: signature,
-        mutationWait: false,
-      },
-    );
+    const response = await api<IbgpDomainPreviewResponse>("/api/ibgp-domains/preview", {
+      method: "POST", body: JSON.stringify({ ...domainPayload(draft.value), inventoryRevision: revision }), mutationWait: false,
+    });
     if (!mounted) return;
-    if (signature !== previewSignature.value) {
-      previewQueued = true;
-      return;
-    }
-    if (!draft.value.id) draft.value.id = response.domain.id;
-    draft.value.adjacencies = response.domain.adjacencies;
-    suppressDraftDirty = true;
-    try {
-      sessionDrafts.value = Object.fromEntries(
-        response.sessions.map((session) => [session.id, clone(session)]),
-      );
-    } finally {
-      suppressDraftDirty = false;
-    }
+    if (signature !== previewSignature.value || domainId !== selectedDomainId.value || revision !== inventoryRevision.value) { previewQueued = true; return; }
+    // Keep typed credentials and unsaved fields. The normalized candidate lives only in the reviewed snapshot.
+    reviewed.value = { signature, response };
     previewSides.value = response.sides;
     previewValid.value = response.valid;
   } catch (cause) {
-    if (!mounted) return;
+    if (!mounted || signature !== previewSignature.value || domainId !== selectedDomainId.value || revision !== inventoryRevision.value) { previewQueued = true; return; }
     previewValid.value = false;
-    previewError.value =
-      cause instanceof Error ? cause.message : "iBGP 两端配置预检失败";
+    previewError.value = cause instanceof Error ? cause.message : "iBGP 两端配置预检失败";
+    if (cause instanceof ApiError && cause.code === "STATE_CONFLICT") conflict.value = true;
   } finally {
     previewPending.value = false;
-    if (previewQueued) {
-      previewQueued = false;
-      schedulePreview();
-    }
+    if (previewQueued) { previewQueued = false; schedulePreview(); }
   }
 }
+function beforeUnload(event: BeforeUnloadEvent): void {
+  if (draftDirty.value || saving.value) { event.preventDefault(); event.returnValue = ""; }
+}
+function confirmLeave(): boolean {
+  return !saving.value && (!draftDirty.value || window.confirm("当前 iBGP 域有未应用修改，是否离开？草稿会保留在当前页面中。"));
+}
+defineExpose({ confirmLeave });
 
 watch(previewSignature, schedulePreview);
+watch([selectedAdjacencyId, selectedNodeId], () => { endpointView.value = selectedAdjacency.value?.rightNodeId === selectedNodeId.value ? "right" : "left"; });
 watch(
   sessionDrafts,
   () => {
@@ -736,6 +822,7 @@ function handleAppReady(): void {
 onMounted(() => {
   mounted = true;
   window.addEventListener("birdbox:app-ready", handleAppReady);
+  window.addEventListener("beforeunload", beforeUnload);
   runtimeTimer = window.setInterval(() => void refreshIbgpRuntimes(), 10000);
 });
 onBeforeUnmount(() => {
@@ -743,13 +830,14 @@ onBeforeUnmount(() => {
   domainLoadSequence += 1;
   runtimeRefreshSequence += 1;
   window.removeEventListener("birdbox:app-ready", handleAppReady);
+  window.removeEventListener("beforeunload", beforeUnload);
   if (previewTimer !== null) window.clearTimeout(previewTimer);
   if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
 });
 </script>
 
 <template>
-  <section class="ibgp-workspace" aria-labelledby="ibgpTitle">
+  <section ref="workspace" class="ibgp-workspace" aria-labelledby="ibgpTitle">
     <div class="section-heading">
       <div>
         <p class="eyebrow">INTERNAL BGP</p>
@@ -760,6 +848,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="ibgp-toolbar">
         <select
+          :disabled="saving"
           :value="selectedDomainId ?? ''"
           aria-label="选择 iBGP 域"
           @change="handleDomainSelect"
@@ -769,18 +858,8 @@ onBeforeUnmount(() => {
             {{ domain.name }} · AS{{ domain.asn }}
           </option>
         </select>
-        <button class="secondary-button" type="button" @click="newDomain">
+        <button class="secondary-button" type="button" :disabled="saving" @click="newDomain">
           新建域
-        </button>
-        <button
-          class="primary-button"
-          type="button"
-          :disabled="
-            saving || previewPending || previewValid === false || !draft
-          "
-          @click="saveDomain"
-        >
-          {{ saving ? "正在保存" : draftDirty ? "保存域 · 有未保存修改" : "保存域" }}
         </button>
         <button
           v-if="selectedDomainId"
@@ -793,7 +872,34 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
+    <ProtocolWorkflow v-if="draft" label="iBGP 配置步骤" :steps="workflowSteps" :disabled="saving" @select="focusWorkflowStep" />
+    <div v-if="draft" class="protocol-context-strip" role="status"><strong>{{ draft.name || '未命名域' }}</strong><span>{{ draftDirty ? '有未保存修改' : selectedDomainId ? '已保存' : '新域 · 尚未应用' }}</span><span>影响范围：{{ draft.members.length }} 个成员；保存域会预检并下发配置</span></div>
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+    <section v-if="conflict" class="ibgp-status-notice" role="alert">
+      <p>库存已变化，当前双端草稿已保留。请读取最新配置，对比后重新预检。</p>
+      <button class="secondary-button" type="button" @click="compareLatest">加载最新版本并对比</button>
+      <template v-if="latestContext">
+        <p>本地：{{ draft?.name }} · {{ draft?.adjacencies.length }} 条邻接；最新：{{ latestContext.domains.find(item => item.id === selectedDomainId)?.name ?? '域已删除' }} · {{ latestContext.domains.find(item => item.id === selectedDomainId)?.adjacencies.length ?? 0 }} 条邻接</p>
+        <button class="secondary-button" type="button" @click="rebaseDraft(true)">采用最新配置</button>
+        <button class="secondary-button" type="button" @click="rebaseDraft(false)">保留本地草稿并重新预检</button>
+      </template>
+    </section>
+    <details v-if="reviewOpen" class="ibgp-change-review" tabindex="-1" open>
+      <summary>预检与配置变更 · {{ previewPending ? '检查中' : previewValid === true ? '通过' : previewValid === false ? '未通过' : '待预检' }}</summary>
+      <p v-if="previewError" class="form-error">{{ previewError }}</p>
+      <p v-if="!previewPending && !previewError && !reviewed?.response.configs?.length">暂无节点配置差异；空域不会建立邻接。</p>
+      <details v-for="item in reviewed?.response.configs ?? []" :key="item.nodeId">
+        <summary>{{ item.nodeName }} · {{ item.validation.ok ? '通过' : '失败' }}</summary>
+        <p v-if="!item.validation.ok" class="form-error">{{ item.validation.stderr || item.validation.stdout }}</p>
+        <pre>{{ item.diff }}</pre>
+      </details>
+      <button class="primary-button" type="button" :disabled="saving || previewPending || !previewValid || conflict" @click="saveDomain">确认应用</button>
+    </details>
+    <p v-if="saving" class="ibgp-status-notice" role="status">正在预检和应用各节点配置，请保持页面打开。</p>
+    <section v-if="deploymentResult" class="ibgp-status-notice" role="status">
+      <p>应用完成</p>
+      <p v-for="item in deploymentResult.nodeResults ?? []" :key="item.nodeId">{{ nodes.find(node => node.id === item.nodeId)?.name ?? item.nodeId }} · {{ item.status === 'success' ? '成功' : item.status }} {{ item.error ?? '' }}</p>
+    </section>
     <div v-if="loading" class="empty-state">正在加载 iBGP 域…</div>
     <div v-else-if="!draft" class="empty-state">
       <strong>还没有 iBGP 域</strong
@@ -801,9 +907,9 @@ onBeforeUnmount(() => {
         创建第一个域
       </button>
     </div>
-    <div v-else class="ibgp-layout">
+    <div v-else class="ibgp-layout" :class="{ 'has-pair': !!selectedAdjacency, 'compare-endpoints': endpointView === 'both' }" :inert="saving || undefined">
       <section class="ibgp-canvas-panel">
-        <div class="ibgp-domain-strip">
+        <div class="ibgp-domain-strip" tabindex="-1">
           <div class="field">
             <label for="ibgpName">域名称</label
             ><input id="ibgpName" v-model.trim="draft.name" maxlength="80" @input="markDraftDirty" />
@@ -849,10 +955,10 @@ onBeforeUnmount(() => {
               v-for="edge in draft.adjacencies"
               :key="edge.id"
               :class="{ selected: selectedAdjacencyId === edge.id }"
-              :x1="(draft.layout[edge.leftNodeId]?.x ?? 0) + 72"
-              :y1="(draft.layout[edge.leftNodeId]?.y ?? 0) + 34"
-              :x2="(draft.layout[edge.rightNodeId]?.x ?? 0) + 72"
-              :y2="(draft.layout[edge.rightNodeId]?.y ?? 0) + 34"
+              :x1="layoutForId(edge.leftNodeId).x + 72"
+              :y1="layoutForId(edge.leftNodeId).y + 34"
+              :x2="layoutForId(edge.rightNodeId).x + 72"
+              :y2="layoutForId(edge.rightNodeId).y + 34"
             />
           </svg>
           <button
@@ -884,7 +990,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="ibgp-connection-panel">
+      <section class="ibgp-connection-panel" tabindex="-1">
         <div class="ibgp-connection-controls">
           <div class="subsection-head">
             <div>
@@ -968,9 +1074,11 @@ onBeforeUnmount(() => {
             <span :class="['ibgp-status', sessionStatusClass(leftSession)]"><i />{{ leftNode?.name }}：{{ sessionStatus(leftSession) }}</span>
             <span :class="['ibgp-status', sessionStatusClass(rightSession)]"><i />{{ rightNode?.name }}：{{ sessionStatus(rightSession) }}</span>
           </div>
-          <div class="ibgp-pair-jump" aria-label="跳转到双端配置">
-            <button class="compact-button" type="button" @click="focusPairSide('left')">编辑 {{ leftNode?.name }}</button>
-            <button class="compact-button" type="button" @click="focusPairSide('right')">编辑 {{ rightNode?.name }}</button>
+          <label class="compact-toggle"><span>启用当前连接</span><input v-model="selectedAdjacency.enabled" type="checkbox" @change="markDraftDirty" /><i aria-hidden="true" /></label>
+          <div class="ibgp-pair-jump" role="group" aria-label="选择编辑端点">
+            <button class="secondary-button compact-button" type="button" :aria-pressed="endpointView === 'left'" @click="focusPairSide('left')">编辑 {{ leftNode?.name }}</button>
+            <button class="secondary-button compact-button" type="button" :aria-pressed="endpointView === 'right'" @click="focusPairSide('right')">编辑 {{ rightNode?.name }}</button>
+            <button class="secondary-button compact-button" type="button" :aria-pressed="endpointView === 'both'" @click="endpointView = 'both'">同时查看双端</button>
           </div>
           <span
             :class="{
@@ -991,8 +1099,9 @@ onBeforeUnmount(() => {
         <p v-if="previewError" class="form-error" role="alert">
           {{ previewError }}
         </p>
-        <div class="ibgp-session-grid">
-          <div v-if="leftSession && leftPeer && leftNode" ref="leftSideColumn" class="ibgp-side-column">
+        <p class="protocol-help">{{ endpointView === 'both' ? '双端对照：每端配置独立保存。' : `当前编辑：${endpointView === 'left' ? leftNode?.name : rightNode?.name}。切换端点保留全部草稿。` }} 导入为从对端接收，导出为向对端发布。</p>
+        <div class="ibgp-session-grid" :class="{ 'single-side': endpointView !== 'both' }">
+          <div v-if="leftSession && leftPeer && leftNode" v-show="endpointView !== 'right'" ref="leftSideColumn" class="ibgp-side-column">
             <IbgpSessionSideEditor
               :model-value="leftSession"
               side="left"
@@ -1014,7 +1123,8 @@ onBeforeUnmount(() => {
                 )
               "
             />
-            <section class="ibgp-preview-section">
+            <details class="ibgp-preview-section">
+              <summary>查看 {{ leftNode.name }} 的候选配置</summary>
               <div class="tabs ibgp-preview-tabs" role="tablist">
                 <button class="tab active" type="button" role="tab" aria-selected="true">
                   节点配置
@@ -1027,10 +1137,10 @@ onBeforeUnmount(() => {
               <small v-if="leftPreview && !leftPreview.validation.ok" class="ibgp-preview-error">{{
                 leftPreview.validation.stderr || leftPreview.validation.stdout
               }}</small>
-            </section>
+            </details>
           </div>
 
-          <div v-if="rightSession && rightPeer && rightNode" ref="rightSideColumn" class="ibgp-side-column">
+          <div v-if="rightSession && rightPeer && rightNode" v-show="endpointView !== 'left'" ref="rightSideColumn" class="ibgp-side-column">
             <IbgpSessionSideEditor
               :model-value="rightSession"
               side="right"
@@ -1052,7 +1162,8 @@ onBeforeUnmount(() => {
                 )
               "
             />
-            <section class="ibgp-preview-section">
+            <details class="ibgp-preview-section">
+              <summary>查看 {{ rightNode.name }} 的候选配置</summary>
               <div class="tabs ibgp-preview-tabs" role="tablist">
                 <button class="tab active" type="button" role="tab" aria-selected="true">
                   节点配置
@@ -1065,13 +1176,29 @@ onBeforeUnmount(() => {
               <small v-if="rightPreview && !rightPreview.validation.ok" class="ibgp-preview-error">{{
                 rightPreview.validation.stderr || rightPreview.validation.stdout
               }}</small>
-            </section>
+            </details>
           </div>
         </div>
         <p v-if="!leftSession || !rightSession" class="field-help">
           正在生成双方会话草稿…
         </p>
       </section>
+    </div>
+    <div v-if="draft" class="protocol-action-bar" role="region" aria-label="iBGP 配置操作">
+      <span class="protocol-action-state">{{ draftDirty ? '有待应用修改' : '当前配置' }} · {{ previewValid ? '预检通过' : '应用前需预检' }} · {{ draft.members.length }} 个成员</span>
+      <div class="form-actions">
+        <button class="secondary-button" type="button" :disabled="saving || previewPending || conflict || !draft" @click="reviewOpen = true; runPreview()">预检并查看变更</button>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="
+            saving || previewPending || !draft || conflict || layoutSaving
+          "
+          @click="saveDomain"
+        >
+          {{ saving ? "正在保存" : draftDirty ? "保存域 · 有未保存修改" : "保存域" }}
+        </button>
+      </div>
     </div>
   </section>
   <PolicyActionDialog

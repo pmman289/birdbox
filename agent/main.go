@@ -41,6 +41,7 @@ func main() {
 	client := NewClientWithTransport(cfg, transport)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	restoreIPRulesOnStartup(ctx, cfg.NodeID)
 	backoff := time.Second
 	registered := false
 	unauthorized := 0

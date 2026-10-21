@@ -13,8 +13,90 @@ import type {
   StaticProtocol,
   DirectProtocol,
   KernelProtocol,
+  PipeProtocol,
   OspfDomain,
 } from "./inventory.js";
+import type { DefineReference } from "./define-references.js";
+
+export type SystemProtocolKind = "directs" | "kernels";
+export interface RpkiEditorContext {
+  inventoryRevision: number | null;
+  resource: RpkiSource | null;
+  references: Array<{ kind: "defines" | "functions" | "filters" | "statics"; id: string; label: string; symbols: string[] }>;
+}
+export interface RpkiPreviewResponse extends RpkiEditorContext {
+  valid: boolean;
+  previewId: string;
+  candidateHash: string;
+  resource: RpkiSource;
+  configs: Array<{ nodeId: string; config: string; diff: string; validation: NodeCommandResponse }>;
+}
+export interface RpkiRuntimeResponse {
+  resourceId: string;
+  nodes: Array<{ nodeId: string; lastCheckedAt: string; protocols: Array<{
+    name: string; state: "up" | "down" | "start" | "disabled" | "not_configured" | "error" | "unknown";
+    rtrState: string | null;
+    channels: Array<{ family: AddressFamily; table: string; state: string | null; imported: number | null }>;
+    raw: string; error: string | null;
+  }> }>;
+}
+export interface RpkiRoaResponse {
+  resourceId: string; nodeId: string; family: AddressFamily; table: string;
+  entries: Array<{ prefix: string; maxLength: number; asn: number; protocol: string | null; raw: string }>;
+  truncated: boolean; limit: number;
+}
+export interface SystemProtocolEditorContext {
+  inventoryRevision: number | null;
+  resource: DirectProtocol | KernelProtocol | null;
+}
+export interface SystemProtocolPreviewResponse extends SystemProtocolEditorContext {
+  valid: boolean;
+  previewId: string;
+  candidateHash: string;
+  resource: DirectProtocol | KernelProtocol;
+  configs: Array<{ nodeId: string; config: string; diff: string; validation: { ok: boolean; stdout: string; stderr: string } }>;
+}
+export interface SystemProtocolRuntimeResponse {
+  resourceId: string;
+  nodes: Array<{
+    nodeId: string;
+    lastCheckedAt: string;
+    protocols: Array<{
+      name: string;
+      family: AddressFamily | "dual";
+      state: "up" | "down" | "start" | "disabled" | "not_configured" | "error" | "unknown";
+      imported: number | null;
+      exported: number | null;
+      raw: string;
+      error: string | null;
+    }>;
+  }>;
+}
+
+export interface PolicyResourceEditorContext {
+  inventoryRevision: number | null;
+  resource: PolicyDefine | PolicyFunction | PolicyFilter | null;
+  references: DefineReference[];
+}
+export interface DefineEditorContext extends PolicyResourceEditorContext {
+  resource: PolicyDefine | null;
+}
+
+export interface PolicyResourcePreviewResponse extends PolicyResourceEditorContext {
+  valid: boolean;
+  previewId: string;
+  candidateHash: string;
+  resource: PolicyDefine | PolicyFunction | PolicyFilter;
+  changes: { added: string[]; removed: string[]; addedCount: number; removedCount: number };
+  configs: Array<{
+    nodeId: string;
+    config: string;
+    diff: string;
+    validation: NodeCommandResponse;
+  }>;
+}
+
+export interface DefinePreviewResponse extends PolicyResourcePreviewResponse { resource: PolicyDefine; }
 
 export type SessionMutationRequest = Omit<BgpSession, "id" | "managedBy">;
 export type NodeMutationRequest = Omit<ManagedNode, "id" | "kind">;
@@ -32,6 +114,16 @@ export interface ApiErrorResponse {
   error: string;
   code?: string;
   events?: ChangeEvent[];
+  deployment?: DeploymentReport;
+}
+
+export interface OspfProtocolRuntime {
+  state: "up" | "down" | "start" | "disabled" | "not_configured" | "unknown" | "error";
+  areas: Array<{ area: string; type?: "normal" | "stub" | "nssa" | null; interfaces: number | null; neighbors: number | null; adjacentNeighbors: number | null; raw: string }>;
+  areasAvailable?: boolean;
+  areaError?: string | null;
+  raw: string;
+  error: string | null;
 }
 
 export interface ProtocolChannelRuntime {
@@ -112,6 +204,7 @@ export interface DashboardResponse {
   staticProtocols: StaticProtocol[];
   directProtocols: DirectProtocol[];
   kernelProtocols: KernelProtocol[];
+  pipeProtocols: PipeProtocol[];
   sourcePolicies: SourcePolicyEgress[];
   selectedPeer: DashboardPeer | null;
   runtime: NodeRuntime;
@@ -135,7 +228,7 @@ export interface DeploymentReport {
   transactionId?: string;
   nodeIds: string[];
   nodes: Array<{ id: string; name: string }>;
-  nodeResults?: Array<{ nodeId: string; status: "success" | "failed" | "rolled_back" | "unknown"; error?: string | null }>;
+  nodeResults?: Array<{ nodeId: string; status: "success" | "failed" | "rolled_back" | "unknown" | "not_attempted"; error?: string | null }>;
   rollback?: { attempted: boolean; succeeded: boolean; error?: string | null };
   sessions: Array<{ id: string; nodeId: string; protocolName: string }>;
 }
@@ -169,8 +262,13 @@ export interface OspfRuntimeResponse {
 
 export interface SessionPreviewResponse {
   valid: boolean;
+  inventoryRevision: number | null;
+  previewId: string;
+  candidateHash: string;
   session: BgpSession;
   config: string;
+  previousConfig: string;
+  diff: string;
   /** Only the BGP block represented by the submitted draft. */
   sessionConfig: string;
   validation: NodeCommandResponse;
@@ -240,7 +338,54 @@ export interface SourcePolicyManualPlan {
 }
 
 export interface SourcePolicyMutationResponse extends ResourceMutationResponse<SourcePolicyEgress> {
+  inventoryRevision: number | null;
   manualPlans: SourcePolicyManualPlan[];
+}
+
+export interface SourcePolicyEditorContext {
+  resource: SourcePolicyEgress | null;
+  inventoryRevision: number | null;
+}
+
+export interface SourcePolicyPreviewResponse extends SourcePolicyEditorContext {
+  resource: SourcePolicyEgress;
+  manualPlans: SourcePolicyManualPlan[];
+  valid?: boolean;
+  previewId?: string;
+  candidateHash?: string;
+  configs?: PolicyResourcePreviewResponse["configs"];
+}
+
+export interface SourcePolicyRuntimeResponse {
+  resourceId: string;
+  nodes: Array<{
+    nodeId: string;
+    lastCheckedAt: string;
+    rules: {
+      expected: number;
+      installed: number | null;
+      missing: SourcePolicyRuleInstruction[];
+      unexpected: Array<{ priority: number; source?: string; destination?: string; table: number }>;
+      persistence: "ready" | "pending" | "missing" | "manual" | "error" | "unknown";
+      error: string | null;
+      raw: string;
+    };
+    groups: Array<{
+      groupId: string;
+      egressAddress: string;
+      table: string;
+      kernelTable: number;
+      skipped: boolean;
+      protocols: Array<{
+        name: string; kind: "Static" | "Kernel" | "Pipe";
+        state: "up" | "down" | "start" | "disabled" | "not_configured" | "error" | "unknown";
+        raw: string; error: string | null;
+      }>;
+      kernelRoutes: Array<{ prefix: string; gateway: string | null; interface: string | null; type: string; raw: string }>;
+      routesTruncated: boolean;
+      routeError: string | null;
+    }>;
+  }>;
 }
 
 export interface NodeMutationResponse {
@@ -338,11 +483,13 @@ export interface ResourceDeleteResponse {
 }
 
 export interface IbgpDomainListResponse {
+  inventoryRevision?: number | null;
   domains: IbgpDomain[];
   inventory: Inventory;
 }
 
 export interface IbgpDomainMutationResponse {
+  inventoryRevision?: number | null;
   domain?: IbgpDomain;
   inventory: Inventory;
   deployment?: DeploymentReport;
@@ -359,6 +506,10 @@ export interface IbgpPreviewSide {
 }
 
 export interface IbgpDomainPreviewResponse {
+  inventoryRevision?: number | null;
+  previewId?: string;
+  candidateHash?: string;
+  configs?: Array<{ nodeId: string; nodeName: string; config: string; previousConfig: string; diff: string; validation: NodeCommandResponse }>;
   valid: boolean;
   domain: IbgpDomain;
   sessions: BgpSession[];
@@ -405,6 +556,70 @@ export interface RoutePathResponse {
   reachable: boolean;
   error: string | null;
   routes: RoutePathEntry[];
+  truncated: boolean;
+  limit: number;
+}
+
+export interface PipePreviewResponse {
+  valid: boolean;
+  resource: PipeProtocol;
+  configs: Array<{ nodeId: string; config: string; validation: NodeCommandResponse }>;
+}
+export interface PipeChannelRuntime {
+  table: string | null;
+  state: string | null;
+  imported: number | null;
+  exported: number | null;
+}
+export interface PipeRuntimeResponse {
+  resourceId: string;
+  lastCheckedAt: string;
+  nodes: Array<{
+    nodeId: string;
+    ok: boolean;
+    state: "up" | "down" | "start" | "disabled" | "not_configured" | "error" | "unknown";
+    lastCheckedAt: string;
+    primary: PipeChannelRuntime;
+    peer: PipeChannelRuntime;
+    error: string | null;
+    raw: string;
+  }>;
+}
+export interface PipeRoutesResponse {
+  resourceId: string;
+  nodeId: string;
+  family: AddressFamily;
+  side: "primary" | "peer";
+  table: string;
+  routes: RouteDetail[];
+  truncated: boolean;
+  limit: number;
+}
+
+export interface StaticPreviewResponse {
+  valid: boolean;
+  previewId: string;
+  inventoryRevision: number | null;
+  resource: StaticProtocol;
+  configs: Array<{ nodeId: string; config: string; previousConfig: string; diff: string; validation: NodeCommandResponse }>;
+}
+export interface StaticRuntimeResponse {
+  resourceId: string;
+  nodeId: string;
+  lastCheckedAt: string;
+  state: "up" | "down" | "start" | "disabled" | "not_configured" | "error" | "unknown";
+  table: string;
+  imported: number | null;
+  exported: number | null;
+  error: string | null;
+  raw: string;
+}
+export interface StaticRoutesResponse {
+  resourceId: string;
+  nodeId: string;
+  family: AddressFamily;
+  table: string;
+  routes: RouteDetail[];
   truncated: boolean;
   limit: number;
 }

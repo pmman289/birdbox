@@ -37,7 +37,7 @@ export function validateForm(form: HTMLFormElement): boolean {
   }
   clearFormValidation(form);
   form.classList.add("validation-attempted");
-  const controls = [...form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(":invalid")];
+  const controls = [...form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input:invalid, select:invalid, textarea:invalid")];
   for (const control of controls) {
     control.setAttribute("aria-invalid", "true");
     control.closest(".field, .channel-enable-row, .toggle-row")?.classList.add("field-invalid");

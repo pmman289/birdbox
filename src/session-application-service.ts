@@ -1,4 +1,5 @@
 import type { ChangeEvent } from "../packages/contracts/src/api.js";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   BgpSession,
   CidrDefine,
@@ -16,11 +17,12 @@ import {
 } from "./bird.js";
 import type { ActiveDeploymentJournal, DeploymentService } from "./deployment-service.js";
 import { fail, optionalRecord, record, safeErrorMessage, type UnknownRecord } from "./errors.js";
-import { configForNode, findNode, findPeer, findPolicyResource } from "./inventory-domain.js";
+import { configForNode, configBundleForNode, findNode, findPeer, findPolicyResource } from "./inventory-domain.js";
 import type { InventoryStore } from "./store.js";
 import { errorContext, logger } from "./logger.js";
 import { extractBgpProtocolConfig } from "../packages/contracts/src/config-snippet.js";
 import { restoreSecretPlaceholders } from "./inventory-redaction.js";
+import { configDiff } from "./config-diff.js";
 
 interface PreparedSession {
   inventory: Inventory;
@@ -47,23 +49,51 @@ interface SessionApplicationServiceOptions {
 
 export class SessionApplicationService {
   readonly #options: SessionApplicationServiceOptions;
+  readonly #previews = new Map<string, { session: BgpSession; revision: number | null; hash: string; expiresAt: number }>();
 
   constructor(options: SessionApplicationServiceOptions) {
     this.#options = options;
+  }
+
+  async editorContext(nodeId: string, peerId: string) {
+    const state = await this.#options.store.read();
+    findNode(state, nodeId);
+    const peer = findPeer(state, peerId);
+    if (peer.nodeId !== nodeId || peer.managedBy?.kind === "ibgp-domain") fail(400, "所选 Peer 不属于该节点的 eBGP 管理");
+    return { status: 200, payload: { inventoryRevision: this.#options.store.revisionOf(state), session: state.sessions.find(s => s.nodeId === nodeId && s.peerId === peerId) ?? null } };
+  }
+
+  #assertRevision(state: Inventory, body: Record<string, unknown>) {
+    if (body.inventoryRevision !== undefined && body.inventoryRevision !== this.#options.store.revisionOf(state)) fail(409, "库存已变化，eBGP 草稿已保留，请对比最新配置并重新预检", "STATE_CONFLICT");
+  }
+
+  #hash(session: BgpSession): string {
+    return createHash("sha256").update(JSON.stringify(session)).digest("hex");
   }
 
   async preview(body: Record<string, unknown>) {
     const startedAt = Date.now();
     logger.info("开始预检会话配置");
     try {
-      const staged = await this.#options.withDeploymentLock(async () =>
-        this.#stageSession(await this.#options.store.read(), body),
-      );
+      const { staged, revision, previousConfig } = await this.#options.withDeploymentLock(async () => {
+        const state = await this.#options.store.read();
+        this.#assertRevision(state, body);
+        const revision = this.#options.store.revisionOf(state);
+        const staged = await this.#stageSession(state, body);
+        if (revision !== this.#options.store.revisionOf(await this.#options.store.read())) fail(409, "库存在预检期间已变化，请重新预检", "STATE_CONFLICT");
+        return { staged, revision, previousConfig: configForNode(state, staged.node) };
+      });
+      const previewId = randomUUID(), candidateHash = this.#hash(staged.session);
+      for (const [key, value] of this.#previews) if (value.expiresAt < Date.now()) this.#previews.delete(key);
+      if (this.#previews.size >= 200) this.#previews.delete(this.#previews.keys().next().value!);
+      if (staged.valid) this.#previews.set(previewId, { session: staged.session, revision, hash: candidateHash, expiresAt: Date.now() + 300_000 });
+      const diff = configDiff(previousConfig, staged.config);
       logger.info("会话配置预检完成", { valid: staged.valid, durationMs: Date.now() - startedAt });
       return {
         status: staged.valid ? 200 : 422,
         payload: {
           valid: staged.valid,
+          inventoryRevision: revision, previewId, candidateHash, previousConfig, diff,
           session: staged.session,
           config: staged.config,
           sessionConfig: extractBgpProtocolConfig(staged.config, staged.session.protocolName) ?? "",
@@ -86,7 +116,15 @@ export class SessionApplicationService {
       try {
         logger.info("开始应用会话配置");
         const currentInventory = await this.#options.store.read();
-        staged = await this.#stageSession(currentInventory, body);
+        this.#assertRevision(currentInventory, body);
+        const token = body.previewId ? this.#previews.get(String(body.previewId)) : undefined;
+        if (body.mode !== undefined && body.mode !== "apply") fail(400, "eBGP 保存模式不合法");
+        if ((body.mode === "apply" || body.previewId !== undefined) && (!token || token.expiresAt < Date.now())) fail(409, "预检已失效，请重新预检当前草稿", "SESSION_PREVIEW_STALE");
+        if (token && token.revision !== this.#options.store.revisionOf(currentInventory)) fail(409, "库存已变化，请对比最新配置并重新预检", "STATE_CONFLICT");
+        const candidate = this.#prepareSession(currentInventory, token ? restoreSecretPlaceholders(body, token.session) : body, token?.session.id);
+        if (token && (candidate.session.id !== token.session.id || this.#hash(candidate.session) !== token.hash || body.candidateHash !== token.hash)) fail(409, "eBGP 草稿已变化，请重新预检", "SESSION_PREVIEW_STALE");
+        staged = { ...candidate, validation: await stageAndValidate(candidate.node, configBundleForNode(candidate.inventory, candidate.node)), valid: false };
+        staged.valid = staged.validation.ok;
         if (!staged.valid) {
           return {
             status: 422,
@@ -175,7 +213,7 @@ export class SessionApplicationService {
     });
   }
 
-  async delete(sessionId: string) {
+  async delete(sessionId: string, body: Record<string, unknown> = {}) {
     let applied = false;
     let committed = false;
     let node: ManagedNode | null = null;
@@ -184,6 +222,7 @@ export class SessionApplicationService {
       try {
         logger.info("开始删除会话", { sessionId });
         const state = await this.#options.store.read();
+        this.#assertRevision(state, body);
         const session = state.sessions.find((item) => item.id === sessionId);
         if (!session) fail(404, "会话不存在");
         if (session.managedBy?.kind === "ibgp-domain") fail(409, "该会话由 iBGP 管理，请在 iBGP 管理中删除邻接");
@@ -192,7 +231,7 @@ export class SessionApplicationService {
           ...state,
           sessions: state.sessions.filter((item) => item.id !== session.id),
         });
-        const validation = await stageAndValidate(node, configForNode(candidate, node));
+        const validation = await stageAndValidate(node, configBundleForNode(candidate, node));
         if (!validation.ok) fail(422, validation.stderr || "配置预检失败");
         journal = await this.#options.deploymentService.beginJournal(state, candidate, [node.id], [node]);
         applied = true;
@@ -234,7 +273,7 @@ export class SessionApplicationService {
     });
   }
 
-  #prepareSession(state: Inventory, payloadValue: unknown): PreparedSession {
+  #prepareSession(state: Inventory, payloadValue: unknown, candidateId?: string): PreparedSession {
     const payload = record(payloadValue, "会话参数不能为空");
     const node = findNode(state, String(payload.nodeId ?? ""));
     const peer = findPeer(state, String(payload.peerId ?? ""));
@@ -277,7 +316,7 @@ export class SessionApplicationService {
     const existing = state.sessions.find((item) => item.nodeId === node.id && item.peerId === peer.id);
     const requestedBgp = restoreSecretPlaceholders(payload.bgp, existing?.bgp ?? null);
     const session = normalizeSession({
-      id: existing?.id ?? this.#options.makeId("session"),
+      id: existing?.id ?? candidateId ?? this.#options.makeId("session"),
       nodeId: node.id,
       peerId: peer.id,
       protocolName: payload.protocolName,
@@ -306,7 +345,7 @@ export class SessionApplicationService {
 
   async #stageSession(state: Inventory, payload: unknown): Promise<StagedSession> {
     const prepared = this.#prepareSession(state, payload);
-    const validation = await stageAndValidate(prepared.node, prepared.config);
+    const validation = await stageAndValidate(prepared.node, configBundleForNode(prepared.inventory, prepared.node));
     return { ...prepared, validation, valid: validation.ok };
   }
 }

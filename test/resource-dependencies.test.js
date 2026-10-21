@@ -198,6 +198,9 @@ test("keeps rename and delete protection for Static per-route custom blocks", ()
     }],
   });
   assert.equal(resourceReferencesSymbol(state, "CUSTOM_DEPENDENCY"), true);
+  assert.equal(resourceReferencesSymbol(state, "CUSTOM_DEPENDENCY", null, { nodeIds: ["right"] }), false);
+  assert.equal(resourceReferencesSymbol(state, "CUSTOM_DEPENDENCY", null, { nodeIds: ["left"] }), true);
+  assert.equal(resourceReferencesSymbol(state, "CUSTOM_DEPENDENCY", null, { nodeIds: null }), true);
   assert.equal(resourceReferencesSymbol(state, "ONLY_IN_A_COMMENT"), false);
 });
 

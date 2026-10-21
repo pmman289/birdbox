@@ -377,3 +377,67 @@ func TestPrepareIncludeValidationConfigKeepsActiveLinksUntouched(t *testing.T) {
 		t.Fatalf("active resource target changed while executing preflight: %q", activeTarget)
 	}
 }
+
+func TestRouteTargetRetainsProtocolSelector(t *testing.T) {
+	params := map[string]any{"table": "business", "protocolName": "static_test", "direction": "import", "target": "198.51.100.1"}
+	command, valid := birdRouteQuery(params)
+	if !valid || command != "show route table business for 198.51.100.1 protocol static_test all" {
+		t.Fatalf("unexpected command: %s", command)
+	}
+	params["target"] = "1.1.1.1;shutdown"
+	if _, valid := birdRouteQuery(params); valid {
+		t.Fatal("unsafe target accepted")
+	}
+	params["target"] = "198.51.100.1"
+	params["protocolName"] = ""
+	if _, valid := birdRouteQuery(params); valid {
+		t.Fatal("missing protocol silently expanded query")
+	}
+	delete(params, "direction")
+	if command, valid := birdRouteQuery(params); !valid || command != "show route table business for 198.51.100.1 all" {
+		t.Fatalf("table-only Pipe query failed: %s", command)
+	}
+}
+
+func TestOspfProtocolStateExtensionIsReadOnlyAndBackwardCompatible(t *testing.T) {
+	var queries []string
+	query := func(command string, verbose bool) commandResult {
+		queries = append(queries, command)
+		if strings.HasPrefix(command, "show protocols all") && verbose {
+			return commandResult{ok: true, stdout: "1002-test_ospf OSPF master4 up 00:00 Alone\n"}
+		}
+		if command == "show ospf test_ospf" && !verbose {
+			return commandResult{ok: true, stdout: "test_ospf:\nNumber of areas: 1\n Area: 0.0.0.0 (0)\n  Number of interfaces: 1\n  Number of neighbors: 0\n"}
+		}
+		if command == "show ospf query_fail" {
+			return commandResult{ok: false, stderr: "OSPF state unavailable", code: 1}
+		}
+		t.Fatalf("unexpected query: %q", command)
+		return commandResult{}
+	}
+	params := map[string]any{"protocolName": "test_ospf"}
+	legacy := birdProtocolTaskWith(params, result{}, query)
+	if !legacy.OK || strings.Contains(legacy.Stdout, "BIRDBOX-OSPF-STATE") {
+		t.Fatalf("legacy response changed: %#v", legacy)
+	}
+	params["ospfState"] = true
+	current := birdProtocolTaskWith(params, result{}, query)
+	if !current.OK || !strings.Contains(current.Stdout, "---BIRDBOX-OSPF-STATE---\nstatus=0\n") || !strings.Contains(current.Stdout, "Number of neighbors: 0") {
+		t.Fatalf("missing native OSPF statistics: %#v", current)
+	}
+	params["protocolName"] = "query_fail"
+	failed := birdProtocolTaskWith(params, result{}, query)
+	if !failed.OK || !strings.Contains(failed.Stdout, "status=1\nOSPF state unavailable") {
+		t.Fatalf("state query failure hid protocol state: %#v", failed)
+	}
+	for _, name := range []string{"", "bad; configure", "one\ntwo"} {
+		params["protocolName"] = name
+		rejected := birdProtocolTaskWith(params, result{}, query)
+		if rejected.OK || rejected.Code != "INVALID_PROTOCOL" {
+			t.Fatalf("accepted invalid selector: %q", name)
+		}
+	}
+	if len(queries) != 5 {
+		t.Fatalf("invalid selectors reached the command executor: %v", queries)
+	}
+}

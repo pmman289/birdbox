@@ -158,7 +158,7 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.deepEqual(normalizeStaticProtocol(staticProtocols[1]), {
     id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp", family: "ipv4",
     defineId: "prefix_ix", action: "reject", routeActions: {}, routeFilters: {}, import: "all", export: "none", raw: "",
-    enabled: true,
+    enabled: true, table: { name: "master4", source: "existing" }, igpTable: null, checkLink: false, routes: [], importPolicy: { mode: "form", formAction: "all", filterId: null, steps: [] },
   });
   assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
   assert.throws(
@@ -484,16 +484,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
     }),
     /全局标识符冲突/,
   );
-  assert.throws(
-    () => validateInventory({
-      nodes: [node],
-      peers: [],
-      defines: [cidrDefines[0]],
-      sessions: [],
-      staticProtocols: [staticProtocols[0], { ...staticProtocols[1], defineId: "prefix_transit" }],
-    }),
-    /冲突的静态路由定义/,
-  );
+  assert.equal(validateInventory({ nodes: [node], defines: [cidrDefines[0]], staticProtocols: [staticProtocols[0], { ...staticProtocols[1], defineId: "prefix_transit" }] }).staticProtocols.length, 2);
   const matchingActions = validateInventory({
     nodes: [node], peers: [], defines: [cidrDefines[0]], sessions: [],
     staticProtocols: [
@@ -506,13 +497,7 @@ test("enforces CIDR Define ownership and unique BIRD symbols per node", () => {
     ...staticProtocols[0],
     routeFilters: { "10.1.0.0/24": { operations: [{ type: "set", attribute: "preference", value: 150 }], custom: "" } },
   };
-  assert.throws(
-    () => validateInventory({
-      nodes: [node], peers: [], defines: [cidrDefines[0]], sessions: [],
-      staticProtocols: [perRoute, { ...staticProtocols[0], id: "static_route_conflict", name: "static_route_conflict" }],
-    }),
-    /冲突的静态路由定义/,
-  );
+  assert.equal(validateInventory({ nodes: [node], defines: [cidrDefines[0]], staticProtocols: [perRoute, { ...staticProtocols[0], id: "static_route_conflict", name: "static_route_conflict" }] }).staticProtocols.length, 2);
   assert.throws(
     () => validateInventory({
       nodes: [node],
@@ -895,7 +880,7 @@ test("validates policy scope, enabled state, callability, and global names", () 
     filters: policyFilters,
     sessions: [combinedSession],
   });
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.mode, "combined");
   assert.deepEqual(state.filters[0].nodeIds, ["local"]);
   assert.throws(
@@ -1358,6 +1343,17 @@ test("executes a managed node command through the Agent RPC transport", async ()
   assert.deepEqual(await command, { ok: true, stdout: "agent-ok", stderr: "" });
 });
 
+async function answerOspfRuntimeTasks(broker, nodeId, token, ospfOutput) {
+  const methods = [];
+  for (let i = 0; i < 3; i++) {
+    const task = await broker.poll(nodeId, token, 1000);
+    assert.ok(task, "runtime inspection should dispatch a task");
+    methods.push(task.method);
+    broker.result({ taskId: task.taskId, nodeId, ok: true, stdout: task.method === "bird.ospf" ? ospfOutput : "8003 No such protocol", stderr: "" }, token);
+  }
+  assert.deepEqual(methods.sort(), ["bird.ospf", "bird.protocol", "bird.protocol"]);
+}
+
 test("keeps OSPF runtime version detection compatible with old Agents", async () => {
   const broker = new AgentBroker({ database: new MemoryDatabase() });
   await broker.initialize();
@@ -1366,13 +1362,7 @@ test("keeps OSPF runtime version detection compatible with old Agents", async ()
   configureAgentBroker(broker);
   const agentNode = normalizeNode({ ...node, id: "agent_ospf_legacy", transport: "agent" });
   const pending = inspectOspfRuntime(agentNode, { v2: "birdbox_ospf_x_ospfv2", v3: "birdbox_ospf_x_ospfv3" });
-  const task = await broker.poll("agent_ospf_legacy", token, 1000);
-  assert.equal(task?.method, "bird.ospf");
-  broker.result({
-    taskId: task.taskId,
-    nodeId: task.nodeId,
-    ok: true,
-    stdout: [
+  await answerOspfRuntimeTasks(broker, "agent_ospf_legacy", token, [
       "birdbox_ospf_x_ospfv2:",
       "Router ID   Pri State      DTime Interface Router IP",
       "192.0.2.2  1 Full/PtP 30 eth0 192.0.2.2",
@@ -1387,9 +1377,7 @@ test("keeps OSPF runtime version detection compatible with old Agents", async ()
       "",
       "---BIRDBOX-OSPF-INTERFACES---",
       "eth0",
-    ].join("\n"),
-    stderr: "",
-  }, token);
+    ].join("\n"));
   const runtime = await pending;
   assert.equal(runtime.reachable, true);
   assert.equal(runtime.v2.configured, true);
@@ -1404,15 +1392,7 @@ test("rejects incomplete OSPF status markers from a new Agent", async () => {
   configureAgentBroker(broker);
   const agentNode = normalizeNode({ ...node, id: "agent_ospf_bad_marker", transport: "agent" });
   const pending = inspectOspfRuntime(agentNode, { v2: "birdbox_ospf_x_ospfv2", v3: "birdbox_ospf_x_ospfv3" });
-  const task = await broker.poll("agent_ospf_bad_marker", token, 1000);
-  assert.equal(task?.method, "bird.ospf");
-  broker.result({
-    taskId: task.taskId,
-    nodeId: task.nodeId,
-    ok: true,
-    stdout: "---BIRDBOX-OSPF-STATUS---\nneighbors=0\nv2count=0\n",
-    stderr: "",
-  }, token);
+  await answerOspfRuntimeTasks(broker, "agent_ospf_bad_marker", token, "---BIRDBOX-OSPF-STATUS---\nneighbors=0\nv2count=0\n");
   const runtime = await pending;
   assert.equal(runtime.reachable, false);
   assert.equal(runtime.error, "节点 OSPF 运行态状态标记不完整");

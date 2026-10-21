@@ -43,7 +43,7 @@ function setAllNodes(selected: boolean): void {
     <div class="policy-scope-heading"><span class="field-label">可用范围</span><span>{{ allNodes ? "所有节点" : `已选择 ${selectedNodeIds.length} 个节点` }}</span></div>
     <div class="segmented-control" role="radiogroup" aria-label="资源可用范围"><label><input type="radio" :name="`${id}Mode`" value="all" :checked="allNodes" @change="setMode('all')"><span>所有节点</span></label><label><input type="radio" :name="`${id}Mode`" value="selected" :checked="!allNodes" @change="setMode('selected')"><span>指定节点</span></label></div>
     <div v-if="!allNodes" class="policy-scope-selector">
-      <div class="policy-scope-toolbar"><input :id="`${id}Search`" v-model.trim="search" type="search" autocomplete="off" placeholder="搜索节点"><span><button class="compact-command" type="button" @click="setAllNodes(true)">全选</button><button class="compact-command" type="button" @click="setAllNodes(false)">清空</button></span></div>
+      <div class="policy-scope-toolbar"><input :id="`${id}Search`" v-model.trim="search" type="search" autocomplete="off" placeholder="搜索节点"><span><button class="secondary-button compact-command" type="button" @click="setAllNodes(true)">全选</button><button class="secondary-button compact-command" type="button" @click="setAllNodes(false)">清空</button></span></div>
       <div class="policy-scope-node-list">
         <label v-for="node in visibleNodes" :key="node.id" class="policy-scope-node"><input v-model="selectedNodeIds" type="checkbox" :value="node.id"><span><strong>{{ node.name }}</strong><code>{{ node.id }}</code></span></label>
         <span v-if="!visibleNodes.length" class="code-reference-empty">没有匹配的节点</span>
@@ -52,3 +52,12 @@ function setAllNodes(selected: boolean): void {
     </div>
   </div>
 </template>
+
+<style scoped>
+.policy-scope-toolbar > input { width: auto; flex: 1 1 140px; height: 38px; min-height: 38px; }
+.policy-scope-toolbar > span { flex: 0 0 auto; }
+.policy-scope-toolbar button { white-space: nowrap; }
+@media (max-width: 760px) {
+  .policy-scope-toolbar > input { flex: 0 0 auto; }
+}
+</style>

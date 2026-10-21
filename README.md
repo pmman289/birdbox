@@ -6,7 +6,7 @@ Birdbox 适合希望通过浏览器完成以下工作的网络管理员：
 
 - 查看节点和 BGP 会话状态；
 - 创建、预检和部署 IPv4/IPv6 eBGP 会话；
-- 管理 CIDR Define、节点级 Static Protocol、Function、Filter、RPKI 和源地址出口映射资源；
+- 管理 CIDR Define、节点级 Static Protocol、Pipe、Function、Filter、RPKI 和源地址出口映射资源；
 - 为每个会话独立设置导入、导出和高级 BGP 参数；
 - 在配置失败时保留原库存并回滚已完成的节点部署。
 
@@ -187,7 +187,11 @@ sh birdbox-node-setup.sh
 
 预检或部署失败时，Birdbox 不会提交库存变更；已经完成的节点会尝试回滚。重复提交前应先刷新状态，确认远端和库存是否已经完成变更。
 
+eBGP 会话预检通过后仍保留未应用标记，刷新状态不会清空草稿。Import/Export 和路由数量限制默认显示摘要，展开后分别编辑。应用先展示当前预检配置的确认；库存变化时可对比最新配置并保留草稿重新预检。完整流程及真实 Agent + BIRD 双版本测试见 [eBGP 验收记录](docs/ebgp-verification.md)。
+
 ## 用户操作手册与界面预览
+
+iBGP 域支持独立双端配置与连接启停。先“预检并查看变更”，检查新旧成员的配置差异及逐节点结果，再确认应用；失败与冲突会保留草稿，空域也可保存。测试和适用边界见 [iBGP 验收记录](docs/ibgp-verification.md)。
 
 完整的中文用户教程、部署步骤、eBGP/iBGP/OSPF 全流程、资源用途、故障处理和最佳实践见 [Birdbox 用户操作手册](docs/user-guide.md)。
 
@@ -207,13 +211,29 @@ sh birdbox-node-setup.sh
 
 Define 可以应用于所有节点，也可以限制到一个或多个指定节点。支持 IPv4 CIDR 前缀集合、IPv6 CIDR 前缀集合和安全的 BIRD 表达式。导出策略可以选择全部路由、禁止导出或引用一个 CIDR Define。
 
+在“资源管理 → Defines”中创建或编辑，手工前缀支持文本导入、去重和导出，表达式可从常用模板开始。编辑器显示未保存状态、影响节点和直接/间接引用；先“预检并查看变更”，核对前缀增删、逐节点配置差异和检查结果后，再“确认应用”。预检不会保存或下发配置，修改内容后需要重新预检。
+
+并发修改时保留本地草稿，可加载最新版本进行三方对比，再采用服务端配置或保留草稿重新预检。若资源已在另一处删除，可将草稿作为新 Define 预检并确认应用。被引用资源的删除、改名、停用及节点范围调整由服务端校验保护。验收范围与复现命令见 [Define 验收记录](docs/define-verification.md)。
+
 CIDR Define 的条目可以手工填写，也可以绑定 IRR AS-SET，由控制器使用 `bgpq4` 定期展开并同步。用户可以设置 IRR Server、Database、刷新间隔、前缀数量上限和是否匹配更具体前缀。动态前缀以独立的哈希版本文件下发，主生成配置只包含 Include；同步失败、结果为空、超过限制或节点预检失败时继续使用最近一次成功快照。官方 Docker 镜像已经内置 `bgpq4`，受管节点不需要安装。
 
 ### Static Protocol
 
-Static 是节点级资源，不属于任何 BGP 会话。一个节点可以创建多个 IPv4 或 IPv6 Static Protocol；每个资源可选择匹配地址族的 CIDR Define 和标准路由动作，也可以填写自定义 Static 指令。Import、Export 均可独立选择 `all` 或 `none`，默认值为 `import all`、`export none`。
+Static 是节点级资源，支持直接添加路由和 CIDR Define 批量生成，IPv4/IPv6 分别管理。可配置单下一跳、接口、ECMP 权重、递归、blackhole/unreachable/prohibit、逐下一跳 BFD、check link、逐路由属性及自定义代码；支持选择或创建 BIRD 路由表，管理表与 Pipe 去重共享。相同前缀允许用 Preference / Metric 区分主备路由。Import 支持 all/none、Function 组合及 Filter，路由向其它协议发布仍由对应协议策略决定。
 
-同一前缀可以出现在多个 Static Protocol 中，但标准路由动作必须一致；Import、Export 策略可以不同。BGP 会话是否启用、编辑或删除不会修改节点 Static 资源，路由是否向某个 Peer 发布仍由该会话自己的 Export 策略决定。
+预检返回服务端候选配置、差异和节点检查结果，不修改库存或活动配置。确认后保存应用仍重新执行完整预检，校验候选与库存 revision，沿用部署锁、CAS、journal 和回滚。列表提供独立运行态和路由查询入口，显示真实协议状态、原始详情、指定协议的路由和目标 IP 查询。失败保留草稿；桌面及移动端编辑内容独立滚动、操作栏固定。
+
+使用说明见 [Static 路由](wiki/Static%20路由.md)。真实浏览器、Agent 和 BIRD 流程可运行 `BIRD_VERSION=2.17.5 bash scripts/static-e2e.sh` 或 `BIRD_VERSION=2.19.0 bash scripts/static-e2e.sh`，测试环境和结果见 [Static 验收记录](docs/static-verification.md)。
+
+### Pipe Protocol
+
+进入“资源管理 → Pipe”，选择下发节点和地址族，填写主表及对端表。新建默认将 `master4`（IPv6 为 `master6`）中的路由传递到新建的对端表；**主表 → 对端表使用 Export**，默认允许，**对端表 → 主表使用 Import**，默认禁止。两方向分别支持 all/none、Function 组合和自定义 Filter；前缀筛选使用 Filter。每个地址族创建一条 Pipe，多个节点使用相同的表名和策略。
+
+路由表可引用内置表、库存已知表或手工填写的已有表，也可由 Birdbox 创建。管理表按节点和表名去重，停用 Pipe 只移除协议，保留表；最后一个管理引用删除后移除表声明。若其它配置仍依赖该表，完整预检会拒绝变更并保留原配置。源地址出口映射内部自动生成的表只允许引用，其内部 Pipe 独立管理。
+
+“预检配置”只检查候选配置，不保存库存或下发活动配置。“保存并应用”始终重新执行完整预检，沿用部署锁、CAS、journal 和失败回滚；修改节点范围会同步清理旧节点。保存失败时编辑内容保留。运行态独立查看每个节点的协议状态、可用统计和错误，两侧路由可按节点、路由表和目标 IP 查询，默认最多显示 200 条并提示截断。路由保留原协议来源，表内路由不等于 Pipe 的传递记录；缺失的统计显示未知。
+
+真实隔离 BIRD 与 Agent 链路验收可运行 `BIRD_VERSION=2.17.5 scripts/pipe-e2e.sh` 和 `BIRD_VERSION=2.19.0 scripts/pipe-e2e.sh`（需要 Docker）。测试环境和结果见 [Pipe 验收记录](docs/pipe-verification.md)。
 
 ### Function 和 Filter
 
@@ -222,6 +242,10 @@ Function 用于可复用的策略步骤，Filter 用于完整的自定义路由�
 ### RPKI
 
 RPKI 资源支持本地 ROA 文件和 RPKI-RTR 缓存，可应用于所有节点或多个指定节点。IPv4、IPv6 ROA Table 可以分别启用，并在 Filter 中通过 `roa_check()` 使用。
+
+新建默认当前节点与双栈 RTR；切换文件/RTR、TCP/SSH 或地址族会保留草稿。先“预检并查看变更”，核对完整配置、差异和节点结果后“确认应用”。失败或库存冲突保留编辑内容，比较最新配置后可重新预检。已有凭据掩码由服务端保留。
+
+列表的“运行态”分节点展示 RTR 连接状态、双栈 Channel 和 ROA 数量；文件来源展示 Static 状态。可按节点、地址族查询 ROA 并搜索前缀或 ASN，最多返回 200 条。旧 ROA 数量不代表 RTR 连接正常。真实 BIRD 2.17.5/2.19.0 的 Agent、RTR 和文件验收范围见 [RPKI 验收记录](docs/rpki-verification.md)。
 
 ### 源地址出口映射
 

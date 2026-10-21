@@ -163,3 +163,13 @@ test("still dispatches authentication expiry when a proxy returns non-JSON 401",
   await assert.rejects(api("/api/dashboard"), (error) => error instanceof ApiError && error.status === 401);
   assert.deepEqual(browser.events.map((event) => event.type), ["birdbox:auth-required"]);
 });
+
+test("Pipe mutations refresh unknown outcomes but read-only previews do not", async (context) => {
+  const browser = installBrowserFakes(async () => { throw new TypeError("network disconnected"); });
+  context.after(() => browser.restore());
+  await assert.rejects(() => api("/api/pipes", { method: "POST", body: "{}" }), e => e.unknownOutcome === true);
+  assert.equal(browser.events.filter(e => e.type === "birdbox:unknown-mutation-outcome").length, 1);
+  browser.events.length = 0;
+  await assert.rejects(() => api("/api/pipes/preview", { method: "POST", body: "{}", mutationWait: false }), e => e.unknownOutcome === false);
+  assert.equal(browser.events.filter(e => e.type === "birdbox:unknown-mutation-outcome").length, 0);
+});

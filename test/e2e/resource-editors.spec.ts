@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 import type { SourcePolicyManualPlan } from "../../packages/contracts/src/api";
 import type { SourcePolicyEgress } from "../../packages/contracts/src/inventory";
 
@@ -67,6 +68,8 @@ for (const transport of ["agent", "ssh"]) {
 test("源地址出口保存后继续编辑保留分配，删除结果不被旧预览覆盖", async ({ page }) => {
   test.setTimeout(75_000);
   let resource: SourcePolicyEgress | null = null;
+  let revision = 1;
+  page.on('dialog', d => d.accept());
   const writes: Array<{ method: string; path: string; body: Record<string, any> }> = [];
   let holdPreview = false;
   let heldPreviews = 0;
@@ -89,12 +92,15 @@ test("源地址出口保存后继续编辑保留分配，删除结果不被旧�
   await page.route(/\/api\/source-policies(?:\/[^?]*)?$/, async (route) => {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
+    if (path.endsWith('/editor-context')) return route.fulfill({ json: { resource, inventoryRevision: revision } });
     if (path.endsWith("/preview")) {
       if (holdPreview) {
         heldPreviews += 1;
         await previewBarrier;
       }
-      await route.fulfill({ json: { manualPlans: [plan("旧草稿预览")] } });
+      const body = route.request().postDataJSON();
+      const candidate = { ...body, id: 'e2e_saved_source_policy', rulePriorityBase: 10000, groups: body.groups.map((g: any) => ({ ...g, id: 'e2e_saved_gateway', kernelTable: 50001, ruleSlot: 0 })) };
+      await route.fulfill({ json: { resource: candidate, inventoryRevision: revision, manualPlans: [plan("旧草稿预览")], ...(body.mode === 'plan' ? {} : { valid: true, previewId: 'reviewed', candidateHash: 'candidate', configs: [{ nodeId: 'local', config: 'candidate', diff: '+ candidate', validation: { ok: true, stdout: '', stderr: '' } }] }) } });
       return;
     }
     const body = method === "DELETE" ? {} : route.request().postDataJSON();
@@ -110,7 +116,7 @@ test("源地址出口保存后继续编辑保留分配，删除结果不被旧�
         ...group, id: "e2e_saved_gateway", kernelTable: 50001, ruleSlot: 0,
       })),
     } as SourcePolicyEgress;
-    await route.fulfill({ json: { resource, manualPlans: [plan("已保存的配置")] } });
+    await route.fulfill({ json: { resource, inventoryRevision: ++revision, manualPlans: [plan("已保存的配置")] } });
   });
   try {
     await authenticate(page);
@@ -124,13 +130,18 @@ test("源地址出口保存后继续编辑保留分配，删除结果不被旧�
     await page.locator('label[for="sourcePolicyCopyInternal"]').click();
     await expect(page.locator("#sourcePolicyCopyInternal")).not.toBeChecked();
     await expect(dialog).toContainText("旧草稿预览");
-    const save = dialog.getByRole("button", { name: "预检、保存并下发 BIRD" });
+    const save = dialog.getByRole("button", { name: "预检并查看变更", exact: true });
     await save.click();
+    await expect(page.locator('#sourcePolicyPreflight')).toBeVisible();
+    expect(writes).toHaveLength(0);
+    await dialog.getByRole('button', { name: '确认应用', exact: true }).click();
     await expect(page.locator("#sourcePolicyDialogTitle")).toHaveText("编辑源地址出口映射");
     await expect(page.locator("#sourcePolicyKernelTable0")).toHaveValue("50001");
     await expect(save).toBeEnabled();
     await page.locator("#sourcePolicyLabel").fill("E2E 更新出口");
     await save.click();
+    await expect(page.locator('#sourcePolicyPreflight')).toBeVisible();
+    await dialog.getByRole('button', { name: '确认应用', exact: true }).click();
     await expect(save).toBeEnabled();
     expect(writes.map(({ method, path }) => ({ method, path }))).toEqual([
       { method: "POST", path: "/api/source-policies" },
@@ -141,7 +152,6 @@ test("源地址出口保存后继续编辑保留分配，删除结果不被旧�
     holdPreview = true;
     await page.locator("#sourcePolicyLabel").fill("等待预览时删除");
     await expect.poll(() => heldPreviews).toBeGreaterThan(0);
-    page.once("dialog", (confirmation) => confirmation.accept());
     await dialog.getByRole("button", { name: "删除映射集" }).click();
     await expect(page.locator("#sourcePolicyDialogTitle")).toHaveText("系统规则清理");
     releasePreview();
@@ -271,6 +281,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator('.policy-scope-node input[value="edge"]').check();
   await expect(page.locator("#policySourceReferences")).not.toContainText("e2e_peer CIDRs");
   await expect(page.locator("#policyResourceNodeScope")).toContainText("已选择 2 个节点");
+  page.once('dialog', confirmation => confirmation.accept());
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
   await page.locator("#resourceFiltersTab").click();
@@ -280,6 +291,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator('.policy-scope-node input[value="local"]').check();
   await page.locator('.policy-scope-node input[value="edge"]').check();
   await expect(page.locator("#policyResourceNodeScope")).toContainText("已选择 2 个节点");
+  page.once('dialog', confirmation => confirmation.accept());
   await page.locator('#policyResourceDialog [data-close="policyResourceDialog"]').click();
 
   await page.locator("#resourceStaticsTab").click();
@@ -287,9 +299,10 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(page.locator("#staticDialog")).toBeVisible();
   await page.locator("#staticLabel").fill("E2E Static");
   await page.locator("#staticDefineId").selectOption({ index: 1 });
-  await expect(page.locator("#staticRouteActionsSection")).toBeVisible();
-  await expect(page.locator("#staticRouteActionList .static-route-row")).toHaveCount(1);
-  await page.locator(".static-filter-add-controls .secondary-button").click();
+  const defineRoute = page.getByTestId('static-define-route');
+  await expect(defineRoute).toHaveCount(1);
+  await defineRoute.locator('.static-route-attributes > summary').click();
+  await defineRoute.getByRole('button', { name: '设置属性', exact: true }).click();
   const operationRow = page.locator(".static-filter-operation-row").first();
   await expect(operationRow).toBeVisible();
   const overlaps = await operationRow.evaluate((row) => {
@@ -302,6 +315,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
     }));
   });
   expect(overlaps).toBe(false);
+  page.once("dialog", dialog => dialog.accept());
   await page.locator('#staticDialog [data-close="staticDialog"]').click();
 
   await page.locator("#resourceRpkiTab").click();
@@ -315,6 +329,7 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await expect(page.locator("#rpkiServerFields")).toBeVisible();
   await page.locator("#rpkiTransport").selectOption("ssh");
   await expect(page.locator("#rpkiSshFields")).toBeVisible();
+  page.once("dialog", dialog => dialog.accept());
   await page.locator('#rpkiDialog [data-close="rpkiDialog"]').click();
 
   await page.locator("#resourceSourcePoliciesTab").click();
@@ -333,10 +348,11 @@ test("Vue 资源编辑器保留完整功能、错误定位和无重叠布局", a
   await page.locator("#sourcePolicyKernelTable0").fill("50000");
   await expect(page.locator("#sourcePolicyKernelTable0")).toHaveValue("50000");
   await expect(page.locator("#sourcePolicyDialog")).toContainText("kernel table 50000");
-  await expect(page.locator("#sourcePolicyDialog")).toContainText("本机自动下发");
+  await expect(page.locator("#sourcePolicyDialog")).toContainText("本机手工执行系统规则");
   await expect(page.locator("#sourcePolicyDialog")).toContainText("BIRD 配置片段");
   const sourcePolicyOverflow = await page.locator("#sourcePolicyDialog").evaluate((element) => element.scrollWidth > element.clientWidth + 1);
   expect(sourcePolicyOverflow).toBe(false);
+  page.once('dialog', d => d.accept());
   await page.locator("#sourcePolicyDialog").getByRole("button", { name: "关闭" }).click();
 
   expect(pageErrors).toEqual([]);

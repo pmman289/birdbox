@@ -1,333 +1,229 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
-import type { AddressFamily, ChannelPolicy, DirectProtocol, KernelExportPolicy, KernelProtocol } from "@birdbox/contracts/inventory";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import type { AddressFamily, ChannelPolicy, DirectProtocol, KernelExportPolicy, KernelProtocol, PipeTableReference } from "@birdbox/contracts/inventory";
+import type { SystemProtocolEditorContext, SystemProtocolKind, SystemProtocolPreviewResponse } from "@birdbox/contracts/api";
 import { useDashboardStore, loadDashboard } from "../dashboard/dashboard-store";
-import { api } from "../shared/api-client";
+import { api, ApiError } from "../shared/api-client";
 import { dispatchToast } from "../shared/events";
+import { uniqueBirdName } from "../shared/resource-names";
+import NullableNumberInput from "../shared/NullableNumberInput.vue";
 import PolicyEditor from "../sessions/PolicyEditor.vue";
-import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
+import { resourceScopeContains } from "@birdbox/contracts/resource-scope";
 
-const dialog = ref<HTMLDialogElement | null>(null);
-const editingId = ref<string | null>(null);
-const kind = ref<"directs" | "kernels">("directs");
-const pending = ref(false);
-const interfaceLoading = ref(false);
-const interfaceError = ref("");
-let interfaceRequestId = 0;
-let interfaceController: AbortController | null = null;
-const interfaceSearch = ref("");
-const interfaceOptions = ref<string[]>([]);
-const kernelNodeSearch = ref("");
+const dialog = ref<HTMLDialogElement>(), form = ref<HTMLFormElement>();
+const editingId = ref<string | null>(null), kind = ref<SystemProtocolKind>("directs");
+const pending = ref(false), contextLoading = ref(false), previewPending = ref(false), error = ref("");
+const preview = ref<SystemProtocolPreviewResponse | null>(null), revision = ref<number | null>(null);
+const conflict = ref(false), comparison = ref<SystemProtocolEditorContext | null>(null);
+const interfaceLoading = ref(false), interfaceError = ref("");
+const interfaceSearch = ref(""), interfaceOptions = ref<string[]>([]), kernelNodeSearch = ref("");
+let interfaceRequestId = 0, generation = 0, contextGeneration = 0;
+let interfaceController: AbortController | null = null, controller: AbortController | null = null;
+const baseline = ref("");
+let initialResource: DirectProtocol | KernelProtocol | null = null;
 const { dashboard } = useDashboardStore();
+const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const defaultPolicy = (direction: "import" | "export"): ChannelPolicy => ({ mode: "form", steps: [], filterId: null, formAction: direction === "import" ? "none" : "all" });
-function clonePolicy(policy: ChannelPolicy): ChannelPolicy {
-  return {
-    mode: policy.mode,
-    steps: policy.steps.map((step) => ({ ...step })),
-    filterId: policy.filterId,
-    formAction: policy.formAction,
-  };
-}
-function defaultKernelExportPolicy(): KernelExportPolicy {
-  return { mode: "visual", policy: defaultPolicy("export"), prefSrc: null };
-}
-function cloneKernelExportPolicy(value: KernelExportPolicy | undefined, fallback: ChannelPolicy): KernelExportPolicy {
-  if (!value) return { mode: "visual", policy: clonePolicy(fallback), prefSrc: null };
-  return {
-    mode: value.mode === "krt_prefsrc" ? "krt_prefsrc" : "visual",
-    policy: clonePolicy(value.policy ?? fallback),
-    prefSrc: value.prefSrc ?? null,
-  };
-}
-const draft = reactive<any>({
-  label: "", name: "birdbox_direct", nodeId: "", nodeIds: [] as string[], kernelGlobal: true, interfaces: [] as string[], ipv4: true, ipv6: true,
-  importPolicy: defaultPolicy("import"), exportPolicy: defaultPolicy("export"), exportPolicies: { ipv4: defaultKernelExportPolicy(), ipv6: defaultKernelExportPolicy() }, table: null, scanTime: 60, persist: false, enabled: true,
-});
-const editing = computed(() => editingId.value !== null);
+const defaultExport = (): KernelExportPolicy => ({ mode: "visual", policy: defaultPolicy("export"), prefSrc: null });
+const draft = reactive({ label: "", name: "", nodeId: "", nodeIds: [] as string[], kernelGlobal: false, interfaces: [] as string[], ipv4: true, ipv6: true, importPolicies: { ipv4: defaultPolicy("import"), ipv6: defaultPolicy("import") }, tables: { ipv4: { name: "master4", source: "existing" } as PipeTableReference, ipv6: { name: "master6", source: "existing" } as PipeTableReference }, exportPolicies: { ipv4: defaultExport(), ipv6: defaultExport() }, table: null as number | null, scanTime: 60 as number | null, persist: false, enabled: true, checkLink: false, learn: false, gracefulRestart: false, metric: null as number | null, mergePaths: null as number | null });
+const editing = computed(() => editingId.value !== null), title = computed(() => kind.value === "directs" ? "Direct" : "Kernel");
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
-const functions = computed(() => dashboard.value?.inventory.functions.filter((item) => item.enabled) ?? []);
-const filters = computed(() => dashboard.value?.inventory.filters.filter((item) => item.enabled) ?? []);
-const defines = computed(() => dashboard.value?.inventory.defines.filter((item) => item.enabled) ?? []);
-const enabledKernelFamilies = computed<AddressFamily[]>(() => [
-  ...(draft.ipv4 ? ["ipv4" as const] : []),
-  ...(draft.ipv6 ? ["ipv6" as const] : []),
-]);
-const kernelTargetNodeIds = computed(() => draft.kernelGlobal ? nodes.value.map((node) => node.id) : draft.nodeIds);
-const kernelFunctions = computed(() => functions.value.filter((item) => kernelTargetNodeIds.value.every((nodeId: string) => resourceAppliesToNode(item, nodeId))));
-const kernelFilters = computed(() => filters.value.filter((item) => kernelTargetNodeIds.value.every((nodeId: string) => resourceAppliesToNode(item, nodeId))));
-const visibleKernelNodes = computed(() => {
-  const query = kernelNodeSearch.value.trim().toLocaleLowerCase();
-  return query ? nodes.value.filter((node) => `${node.name} ${node.id} ${node.routerId}`.toLocaleLowerCase().includes(query)) : nodes.value;
-});
-const filteredInterfaces = computed(() => {
-  const query = interfaceSearch.value.trim().toLowerCase();
-  return interfaceOptions.value.filter((item) => !query || item.toLowerCase().includes(query));
-});
-
-function policyPreview(policy: ChannelPolicy, direction: "import" | "export"): string[] {
-  if (policy.mode === "custom") {
-    const filter = policy.filterId ? filters.value.find((item) => item.id === policy.filterId) : undefined;
-    return [`  ${direction} filter ${filter?.name ?? "<未选择 Filter>"};`];
-  }
-  if (policy.mode === "form" && (direction === "export" || policy.steps.length === 0)) {
-    return [`  ${direction} ${policy.formAction};`];
-  }
-  const lines = [`  ${direction} filter {`];
-  for (const step of policy.steps) {
-    if (step.type === "form") {
-      if (direction === "import" || policy.formAction !== "none") lines.push(`    ${policy.formAction === "all" ? "accept" : "reject"};`);
-      continue;
-    }
-    const fn = functions.value.find((item) => item.id === step.functionId);
-    if (!fn) continue;
-    lines.push(step.action === "execute" ? `    ${fn.name}();` : `    if ${fn.name}() then ${step.action};`);
-  }
-  if (direction === "export") lines.push("    reject;");
-  lines.push("  };");
-  return lines;
+const targetIds = computed(() => kind.value === "directs" ? [draft.nodeId].filter(Boolean) : draft.kernelGlobal ? nodes.value.map(n => n.id) : draft.nodeIds);
+const affectedIds = computed(() => [...new Set([...targetIds.value, ...(initialResource ? "nodeId" in initialResource ? [initialResource.nodeId] : initialResource.nodeIds ?? nodes.value.map(n => n.id) : [])])]);
+const functions = computed(() => dashboard.value?.inventory.functions.filter(f => f.enabled && f.callable && resourceScopeContains(f, { nodeIds: draft.kernelGlobal ? null : draft.nodeIds })) ?? []);
+const filters = computed(() => dashboard.value?.inventory.filters.filter(f => f.enabled && resourceScopeContains(f, { nodeIds: draft.kernelGlobal ? null : draft.nodeIds })) ?? []);
+const enabledKernelFamilies = computed<AddressFamily[]>(() => [...(draft.ipv4 ? ["ipv4" as const] : []), ...(draft.ipv6 ? ["ipv6" as const] : [])]);
+const visibleKernelNodes = computed(() => nodes.value.filter(n => `${n.name} ${n.id} ${n.routerId}`.toLocaleLowerCase().includes(kernelNodeSearch.value.trim().toLocaleLowerCase())));
+const filteredInterfaces = computed(() => interfaceOptions.value.filter(i => i.toLocaleLowerCase().includes(interfaceSearch.value.trim().toLocaleLowerCase())));
+const policySummary = (p: ChannelPolicy) => p.mode === "custom" ? "自定义 Filter" : p.mode === "combined" ? "Function 组合" : p.formAction === "all" ? "允许全部" : "禁止全部";
+const tableCatalog = ref<Array<{ nodeId: string; name: string; family: AddressFamily }>>([]);
+const tableSuggestions = (family: AddressFamily) => [...new Set(tableCatalog.value.filter(t => t.family === family && targetIds.value.every(id => tableCatalog.value.some(other => other.nodeId === id && other.name === t.name && other.family === family))).map(t => t.name))];
+const nameForNode = (id: string) => nodes.value.find(n => n.id === id)?.name ?? id;
+function body() {
+  return kind.value === "directs" ? { label: draft.label, name: draft.name, nodeId: draft.nodeId, interfaces: [...draft.interfaces], ipv4: draft.ipv4, ipv6: draft.ipv6, enabled: draft.enabled, checkLink: draft.checkLink }
+    : { label: draft.label, name: draft.name, nodeIds: draft.kernelGlobal ? null : [...draft.nodeIds], ipv4: draft.ipv4, ipv6: draft.ipv6, importPolicy: clone(draft.importPolicies.ipv4), importPolicies: clone(draft.importPolicies), tables: clone(draft.tables), exportPolicy: clone(draft.exportPolicies.ipv4.policy), exportPolicies: clone(draft.exportPolicies), table: draft.table, scanTime: draft.scanTime, persist: draft.persist, enabled: draft.enabled, learn: draft.learn, gracefulRestart: draft.gracefulRestart, metric: draft.metric, mergePaths: draft.mergePaths };
 }
-
-function kernelExportPreview(family: AddressFamily): string[] {
-  const setting = draft.exportPolicies[family] as KernelExportPolicy;
-  if (setting.mode === "krt_prefsrc") {
-    return setting.prefSrc
-      ? [`  export filter {`, `    krt_prefsrc = ${setting.prefSrc};`, "    accept;", "  };"]
-      : ["  export filter {", "    # 请输入源地址", "    accept;", "  };"];
-  }
-  return policyPreview(setting.policy, "export");
-}
-
-const configPreview = computed(() => {
-  if (kind.value === "directs") {
-    const name = draft.name.trim() || "birdbox_direct";
-    const interfaces = draft.interfaces.length ? draft.interfaces : ["*"];
-    return [
-      `protocol direct ${name} {`,
-      `  interface ${interfaces.map((item: string) => `"${item.replaceAll('"', '\\"')}"`).join(", ")};`,
-      ...(draft.ipv4 ? ["  ipv4;"] : []),
-      ...(draft.ipv6 ? ["  ipv6;"] : []),
-      "}",
-    ].join("\n");
-  }
-  const families = [
-    ...(draft.ipv4 ? [{ name: "ipv4", suffix: "4" }] : []),
-    ...(draft.ipv6 ? [{ name: "ipv6", suffix: "6" }] : []),
-  ];
-  const targets = draft.kernelGlobal ? "所有节点" : nodes.value.filter((node) => draft.nodeIds.includes(node.id)).map((node) => node.name).join("、") || "未选择节点";
-  const lines = [`# 下发节点：${targets}`];
-  for (const family of families) {
-    const protocolName = families.length === 1 ? (draft.name.trim() || "birdbox_kernel") : `${draft.name.trim() || "birdbox_kernel"}${family.suffix}`;
-    lines.push("", `protocol kernel ${protocolName} {`);
-    if (draft.table !== null && draft.table !== "") lines.push(`  kernel table ${draft.table};`);
-    if (draft.scanTime !== null && draft.scanTime !== "") lines.push(`  scan time ${draft.scanTime};`);
-    if (draft.persist) lines.push("  persist;");
-    lines.push(`  ${family.name} {`, ...policyPreview(draft.importPolicy, "import"), ...kernelExportPreview(family.name as AddressFamily), "  };", "}");
-  }
-  return lines.join("\n");
-});
-
-const kernelScopeMode = computed<"all" | "selected">({
-  get: () => draft.kernelGlobal ? "all" : "selected",
-  set: (mode) => { draft.kernelGlobal = mode === "all"; },
-});
-
-function reset(resource: DirectProtocol | KernelProtocol | null): void {
-  editingId.value = resource?.id ?? null;
+const signature = computed(() => JSON.stringify(body()));
+const dirty = computed(() => signature.value !== baseline.value);
+function invalidate() { generation++; controller?.abort(); controller = null; previewPending.value = false; preview.value = null; }
+watch(signature, invalidate, { flush: "sync" });
+function reset(resource: DirectProtocol | KernelProtocol | null) {
+  const selectedNodeId = dashboard.value?.node?.id ?? nodes.value[0]?.id ?? "";
+  editingId.value = resource?.id ?? null; initialResource = resource ? clone(resource) : null;
+  Object.assign(draft, { label: resource?.label ?? "", name: resource?.name ?? (dashboard.value ? uniqueBirdName(dashboard.value.inventory, kind.value === "directs" ? "direct" : "kernel", "routes") : `birdbox_${title.value.toLowerCase()}`), ipv4: resource?.ipv4 ?? true, ipv6: resource?.ipv6 ?? true, enabled: resource?.enabled ?? true });
   if (kind.value === "directs") {
     const item = resource as DirectProtocol | null;
-    Object.assign(draft, { label: item?.label ?? "", name: item?.name ?? "birdbox_direct", nodeId: item?.nodeId ?? nodes.value[0]?.id ?? "", interfaces: [...(item?.interfaces ?? [])], ipv4: item?.ipv4 ?? true, ipv6: item?.ipv6 ?? true, enabled: item?.enabled ?? true });
-    interfaceSearch.value = "";
-    interfaceError.value = "";
-    interfaceOptions.value = [...(item?.interfaces ?? [])];
+    Object.assign(draft, { nodeId: item?.nodeId ?? selectedNodeId, interfaces: [...item?.interfaces ?? []], checkLink: item?.checkLink ?? false });
   } else {
     const item = resource as KernelProtocol | null;
-    const fallbackExport = item?.exportPolicy ?? defaultPolicy("export");
-    Object.assign(draft, { label: item?.label ?? "", name: item?.name ?? "birdbox_kernel", kernelGlobal: item ? item.nodeIds === null : true, nodeIds: [...(item?.nodeIds ?? [])], ipv4: item?.ipv4 ?? true, ipv6: item?.ipv6 ?? true, importPolicy: clonePolicy(item?.importPolicy ?? defaultPolicy("import")), exportPolicy: clonePolicy(fallbackExport), exportPolicies: { ipv4: cloneKernelExportPolicy(item?.exportPolicies?.ipv4, fallbackExport), ipv6: cloneKernelExportPolicy(item?.exportPolicies?.ipv6, fallbackExport) }, table: item?.table ?? null, scanTime: item?.scanTime ?? 60, persist: item?.persist ?? false, enabled: item?.enabled ?? true });
-    kernelNodeSearch.value = "";
+    Object.assign(draft, { kernelGlobal: item?.nodeIds === null, nodeIds: [...item?.nodeIds ?? [selectedNodeId].filter(Boolean)], importPolicies: { ipv4: clone(item?.importPolicies?.ipv4 ?? item?.importPolicy ?? defaultPolicy("import")), ipv6: clone(item?.importPolicies?.ipv6 ?? item?.importPolicy ?? defaultPolicy("import")) }, tables: { ipv4: clone(item?.tables?.ipv4 ?? { name: "master4", source: "existing" }), ipv6: clone(item?.tables?.ipv6 ?? { name: "master6", source: "existing" }) }, exportPolicies: { ipv4: clone(item?.exportPolicies?.ipv4 ?? { ...defaultExport(), policy: item?.exportPolicy ?? defaultPolicy("export") }), ipv6: clone(item?.exportPolicies?.ipv6 ?? { ...defaultExport(), policy: item?.exportPolicy ?? defaultPolicy("export") }) }, table: item?.table ?? null, scanTime: item?.scanTime ?? 60, persist: item?.persist ?? false, learn: item?.learn ?? false, gracefulRestart: item?.gracefulRestart ?? false, metric: item?.metric ?? null, mergePaths: item?.mergePaths ?? null });
   }
+  baseline.value = signature.value;
 }
-
-function open(nextKind: "directs" | "kernels", resource: DirectProtocol | KernelProtocol | null): void {
-  interfaceRequestId += 1;
-  interfaceController?.abort();
-  interfaceController = null;
-  kind.value = nextKind;
-  reset(resource);
-  if (nextKind === "directs") void loadInterfaces(draft.nodeId);
-  dialog.value?.showModal();
-}
-
-function setKernelScope(mode: "all" | "selected"): void {
-  draft.kernelGlobal = mode === "all";
-}
-
-function toggleNode(nodeId: string): void {
-  draft.nodeIds = draft.nodeIds.includes(nodeId) ? draft.nodeIds.filter((id: string) => id !== nodeId) : [...draft.nodeIds, nodeId];
-}
-
-function selectAllKernelNodes(): void {
-  draft.nodeIds = nodes.value.map((node) => node.id);
-}
-
-function clearKernelNodes(): void {
-  draft.nodeIds = [];
-}
-
-function interfacesValue(): string {
-  return draft.interfaces.join(", ");
-}
-
-async function loadInterfaces(nodeId: string): Promise<void> {
-  const requestId = ++interfaceRequestId;
-  interfaceController?.abort();
-  const controller = new AbortController();
-  interfaceController = controller;
-  interfaceOptions.value = [...new Set(draft.interfaces as string[])];
-  interfaceError.value = "";
-  if (!nodeId || kind.value !== "directs") {
-    interfaceLoading.value = false;
-    interfaceController = null;
-    return;
-  }
-  interfaceLoading.value = true;
+function stopInterfaces() { interfaceRequestId++; interfaceController?.abort(); interfaceController = null; interfaceLoading.value = false; }
+function canDiscard() { return !pending.value && (!dialog.value?.open || !dirty.value || window.confirm(`放弃尚未保存的 ${title.value} 修改？`)); }
+function close() { if (!canDiscard()) return; contextGeneration++; contextLoading.value = false; invalidate(); stopInterfaces(); dialog.value?.close(); }
+async function open(nextKind: SystemProtocolKind, resource: DirectProtocol | KernelProtocol | null) {
+  if (!canDiscard()) return;
+  invalidate(); stopInterfaces(); kind.value = nextKind; reset(resource);
+  error.value = ""; conflict.value = false; comparison.value = null; revision.value = null; tableCatalog.value = []; interfaceError.value = ""; interfaceOptions.value = []; interfaceSearch.value = ""; kernelNodeSearch.value = "";
+  dialog.value?.querySelectorAll("details[open]").forEach(el => el.removeAttribute("open"));
+  if (!dialog.value?.open) dialog.value?.showModal();
+  contextLoading.value = true; const request = ++contextGeneration;
   try {
-    const response = await api<{ interfaces: string[] }>(`/api/nodes/${encodeURIComponent(nodeId)}/interfaces`, { signal: controller.signal });
-    if (requestId !== interfaceRequestId || controller.signal.aborted || draft.nodeId !== nodeId) return;
-    interfaceOptions.value = [...new Set([...response.interfaces, ...draft.interfaces])].sort();
-  } catch (error) {
-    if (controller.signal.aborted || requestId !== interfaceRequestId) return;
-    interfaceError.value = error instanceof Error ? error.message : "无法读取节点接口，可继续手动填写";
-  } finally {
-    if (requestId === interfaceRequestId) {
-      interfaceLoading.value = false;
-      interfaceController = null;
+    const result = await api<SystemProtocolEditorContext>(`/api/${nextKind}/editor-context${resource ? `?id=${encodeURIComponent(resource.id)}` : ""}`);
+    if (request !== contextGeneration || !dialog.value?.open) return;
+    revision.value = result.inventoryRevision;
+    if (resource && !result.resource) { conflict.value = true; comparison.value = result; error.value = "资源已被删除，请比较后决定是否用本地草稿重新创建"; return; }
+    reset(result.resource);
+    if (nextKind === "kernels") {
+      const catalogRequest = contextGeneration;
+      void api<{ tables: typeof tableCatalog.value }>("/api/pipes/tables").then(result => { if (catalogRequest === contextGeneration && dialog.value?.open) tableCatalog.value = result.tables; }).catch(() => {});
     }
-  }
+    if (nextKind === "directs") void loadInterfaces(draft.nodeId);
+  } catch (e) { if (request === contextGeneration) error.value = `无法加载编辑版本：${(e as Error).message}`; }
+  finally { if (request === contextGeneration) contextLoading.value = false; }
+  await nextTick(); dialog.value?.querySelector(".system-protocol-content")?.scrollTo({ top: 0 });
 }
-
-function toggleInterface(name: string): void {
-  draft.interfaces = draft.interfaces.includes(name)
-    ? draft.interfaces.filter((item: string) => item !== name)
-    : [...draft.interfaces, name];
+async function loadInterfaces(nodeId: string) {
+  stopInterfaces(); const request = interfaceRequestId; interfaceController = new AbortController(); const signal = interfaceController.signal;
+  interfaceOptions.value = [...draft.interfaces]; interfaceError.value = "";
+  if (!nodeId) return;
+  interfaceLoading.value = true;
+  try { const result = await api<{ interfaces: string[] }>(`/api/nodes/${encodeURIComponent(nodeId)}/interfaces`, { signal }); if (request === interfaceRequestId && draft.nodeId === nodeId) interfaceOptions.value = [...new Set([...result.interfaces, ...draft.interfaces])].sort(); }
+  catch (e) { if (request === interfaceRequestId && !signal.aborted) interfaceError.value = `${(e as Error).message}；可手动填写接口或匹配规则。`; }
+  finally { if (request === interfaceRequestId) interfaceLoading.value = false; }
 }
-
-function setManualInterfaces(event: Event): void {
-  draft.interfaces = String((event.target as HTMLInputElement).value)
-    .split(",").map((value) => value.trim()).filter(Boolean);
+function selectDirectNode() { draft.interfaces = []; void loadInterfaces(draft.nodeId); }
+function toggleInterface(name: string) { draft.interfaces = draft.interfaces.includes(name) ? draft.interfaces.filter(i => i !== name) : [...draft.interfaces, name]; }
+function setManualInterfaces(e: Event) { draft.interfaces = [...new Set((e.target as HTMLInputElement).value.split(",").map(i => i.trim()).filter(Boolean))]; }
+function toggleNode(id: string) { draft.nodeIds = draft.nodeIds.includes(id) ? draft.nodeIds.filter(i => i !== id) : [...draft.nodeIds, id]; }
+function validate() {
+  if (!form.value?.reportValidity()) return false;
+  if (!targetIds.value.length) { error.value = "请至少选择一个下发节点"; return false; }
+  if (!draft.ipv4 && !draft.ipv6) { error.value = "至少启用一个地址族"; return false; }
+  return true;
 }
-
-function selectDirectNode(): void {
-  draft.interfaces = [];
-  void loadInterfaces(draft.nodeId);
-}
-
-async function save(): Promise<void> {
-  if (!draft.label.trim() || !draft.name.trim()) return dispatchToast("请填写显示名称和协议名称", "error");
-  if (kind.value === "directs" && !draft.nodeId) return dispatchToast("请选择 Direct 所属节点", "error");
-  if (kind.value === "kernels" && !draft.kernelGlobal && !draft.nodeIds.length) return dispatchToast("Kernel 至少选择一个节点", "error");
-  if (!draft.ipv4 && !draft.ipv6) return dispatchToast("至少启用一个地址族", "error");
-  pending.value = true;
+function showError(e: unknown) { error.value = (e as Error).message; if (e instanceof ApiError && e.code === "STATE_CONFLICT") { conflict.value = true; comparison.value = null; } }
+async function inspect() {
+  if (pending.value || contextLoading.value || conflict.value) return;
+  invalidate(); error.value = ""; if (!validate()) return;
+  const request = generation; controller = new AbortController(); const signal = controller.signal; previewPending.value = true;
   try {
-    const body = kind.value === "directs"
-      ? { label: draft.label, name: draft.name, nodeId: draft.nodeId, interfaces: draft.interfaces, ipv4: draft.ipv4, ipv6: draft.ipv6, enabled: draft.enabled }
-      : { label: draft.label, name: draft.name, nodeIds: draft.kernelGlobal ? null : draft.nodeIds, ipv4: draft.ipv4, ipv6: draft.ipv6, importPolicy: draft.importPolicy, exportPolicy: draft.exportPolicies.ipv4.policy, exportPolicies: draft.exportPolicies, table: draft.table === "" ? null : draft.table, scanTime: draft.scanTime === "" ? null : draft.scanTime, persist: draft.persist, enabled: draft.enabled };
-    await api(editingId.value ? `/api/${kind.value}/${encodeURIComponent(editingId.value)}` : `/api/${kind.value}`, { method: editingId.value ? "PUT" : "POST", body: JSON.stringify(body) });
-    await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
-    dialog.value?.close();
-    dispatchToast("协议资源已保存并应用", "success");
-  } catch (error) {
-    dispatchToast(error instanceof Error ? error.message : "协议资源保存失败", "error");
-  } finally { pending.value = false; }
+    const result = await api<SystemProtocolPreviewResponse>(`/api/${kind.value}/preview`, { method: "POST", body: JSON.stringify({ ...body(), ...(editingId.value ? { id: editingId.value } : {}), inventoryRevision: revision.value }), signal, timeoutMs: 120_000, mutationWait: false });
+    if (request !== generation || signal.aborted) return;
+    preview.value = result;
+    await nextTick(); const content = dialog.value?.querySelector<HTMLElement>(".system-protocol-content"), panel = dialog.value?.querySelector<HTMLElement>("#systemProtocolPreview");
+    if (content && panel) content.scrollTop += panel.getBoundingClientRect().top - content.getBoundingClientRect().top;
+  } catch (e) { if (request === generation && !signal.aborted) showError(e); }
+  finally { if (request === generation) previewPending.value = false; }
 }
-
-async function remove(): Promise<void> {
-  if (!editingId.value || !confirm("确认删除该协议资源？")) return;
-  pending.value = true;
+async function save() {
+  if (!preview.value?.valid) { await inspect(); return; }
+  if (!window.confirm(`确认应用 ${title.value} 到 ${preview.value.configs.length} 个受影响节点？`)) return;
+  pending.value = true; error.value = "";
   try {
-    await api(`/api/${kind.value}/${encodeURIComponent(editingId.value)}`, { method: "DELETE" });
-    await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null);
-    dialog.value?.close();
-    dispatchToast("协议资源已删除", "success");
-  } catch (error) { dispatchToast(error instanceof Error ? error.message : "协议资源删除失败", "error"); } finally { pending.value = false; }
+    const p = preview.value;
+    await api(editingId.value ? `/api/${kind.value}/${encodeURIComponent(editingId.value)}` : `/api/${kind.value}`, { method: editingId.value ? "PUT" : "POST", body: JSON.stringify({ ...body(), mode: "apply", previewId: p.previewId, candidateHash: p.candidateHash, inventoryRevision: p.inventoryRevision }) });
+    baseline.value = signature.value; invalidate(); stopInterfaces();
+    try { await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null); } catch { dispatchToast("操作已成功，请刷新列表", "error"); }
+    dialog.value?.close(); dispatchToast("协议资源已保存并应用", "success");
+  } catch (e) { showError(e); preview.value = null; }
+  finally { pending.value = false; }
 }
-
-function close(): void {
-  if (!pending.value) dialog.value?.close();
+async function remove() {
+  if (!editingId.value || !window.confirm(`确认删除 ${title.value}「${initialResource?.label}」并清理 ${affectedIds.value.map(nameForNode).join("、")} 上已保存的协议？${dirty.value ? "未保存的编辑也将丢弃。" : ""}`)) return;
+  pending.value = true; error.value = "";
+  try {
+    await api(`/api/${kind.value}/${encodeURIComponent(editingId.value)}`, { method: "DELETE", body: JSON.stringify({ inventoryRevision: revision.value }) });
+    baseline.value = signature.value; invalidate(); stopInterfaces();
+    try { await loadDashboard(dashboard.value?.node?.id ?? null, dashboard.value?.selectedPeer?.id ?? null); } catch { dispatchToast("删除已成功，请刷新列表", "error"); }
+    dialog.value?.close(); dispatchToast("协议资源已删除", "success");
+  } catch (e) { showError(e); } finally { pending.value = false; }
 }
-
-function handleCreate(event: CustomEvent<{ kind: string }>): void { if (event.detail.kind === "directs" || event.detail.kind === "kernels") open(event.detail.kind, null); }
-function handleEdit(event: CustomEvent<{ kind: string; id: string }>): void {
-  if (event.detail.kind !== "directs" && event.detail.kind !== "kernels") return;
-  const resource = event.detail.kind === "directs" ? dashboard.value?.inventory.directProtocols.find((item) => item.id === event.detail.id) : dashboard.value?.inventory.kernelProtocols.find((item) => item.id === event.detail.id);
-  open(event.detail.kind, resource ?? null);
+async function compareLatest() {
+  const request = ++contextGeneration; contextLoading.value = true;
+  try { const result = await api<SystemProtocolEditorContext>(`/api/${kind.value}/editor-context${editingId.value ? `?id=${encodeURIComponent(editingId.value)}` : ""}`); if (request === contextGeneration && dialog.value?.open) comparison.value = result; }
+  catch (e) { if (request === contextGeneration) showError(e); } finally { if (request === contextGeneration) contextLoading.value = false; }
 }
-onMounted(() => { window.addEventListener("birdbox:resource-create", handleCreate); window.addEventListener("birdbox:resource-edit", handleEdit); });
-onBeforeUnmount(() => { interfaceRequestId += 1; interfaceController?.abort(); window.removeEventListener("birdbox:resource-create", handleCreate); window.removeEventListener("birdbox:resource-edit", handleEdit); });
+function resolveConflict(keep: boolean) {
+  const latest = comparison.value; if (!latest) return;
+  revision.value = latest.inventoryRevision;
+  if (!keep) reset(latest.resource);
+  else { initialResource = latest.resource ? clone(latest.resource) : null; if (!latest.resource) editingId.value = null; }
+  conflict.value = false; comparison.value = null; error.value = ""; invalidate();
+}
+function create(e: CustomEvent<{ kind: string }>) { if (e.detail.kind === "directs" || e.detail.kind === "kernels") void open(e.detail.kind, null); }
+function edit(e: CustomEvent<{ kind: string; id: string }>) {
+  if (e.detail.kind !== "directs" && e.detail.kind !== "kernels") return;
+  const resource = (e.detail.kind === "directs" ? dashboard.value?.inventory.directProtocols : dashboard.value?.inventory.kernelProtocols)?.find(item => item.id === e.detail.id);
+  if (resource) void open(e.detail.kind, resource);
+}
+function beforeUnload(e: BeforeUnloadEvent) { if (dialog.value?.open && dirty.value) { e.preventDefault(); e.returnValue = ""; } }
+onMounted(() => { window.addEventListener("birdbox:resource-create", create); window.addEventListener("birdbox:resource-edit", edit); window.addEventListener("beforeunload", beforeUnload); });
+onBeforeUnmount(() => { contextGeneration++; invalidate(); stopInterfaces(); window.removeEventListener("birdbox:resource-create", create); window.removeEventListener("birdbox:resource-edit", edit); window.removeEventListener("beforeunload", beforeUnload); });
 </script>
 
 <template>
-  <dialog ref="dialog" class="editor-dialog" :aria-labelledby="`${kind}DialogTitle`" @cancel.prevent="close">
-    <form @submit.prevent="save">
-      <div class="dialog-head"><span class="dialog-icon">{{ kind === 'directs' ? 'D' : 'K' }}</span><div><p class="eyebrow">资源</p><h2 :id="`${kind}DialogTitle`">{{ editing ? '编辑' : '添加' }} {{ kind === 'directs' ? 'Direct' : 'Kernel' }}</h2></div></div>
-      <div class="dialog-grid">
-        <div class="field"><label>显示名称</label><input v-model.trim="draft.label" required></div>
-        <div class="field"><label>协议名称</label><input v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" required></div>
-        <template v-if="kind === 'directs'">
-          <div class="field full-width"><label for="directNode">所属节点</label><select id="directNode" v-model="draft.nodeId" @change="selectDirectNode"><option value="" disabled>请选择节点</option><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }} · {{ node.routerId }}</option></select></div>
-          <div class="field full-width">
-            <div class="field-label-row"><span>学习接口</span><button class="secondary-button compact-command" type="button" :disabled="interfaceLoading || !draft.nodeId" @click="loadInterfaces(draft.nodeId)">{{ interfaceLoading ? '读取中…' : '刷新接口' }}</button></div>
-            <div class="interface-picker">
-              <div class="interface-picker-toolbar"><input v-model="interfaceSearch" type="search" placeholder="搜索节点接口" aria-label="搜索节点接口"><span>{{ interfaceOptions.length ? `${draft.interfaces.length} 个已选择` : '暂无接口目录' }}</span></div>
-              <div v-if="filteredInterfaces.length" class="interface-option-list">
-                <label v-for="item in filteredInterfaces" :key="item" class="interface-option"><input type="checkbox" :checked="draft.interfaces.includes(item)" @change="toggleInterface(item)"><span><strong>{{ item }}</strong><small>来自节点接口目录</small></span></label>
-              </div>
-              <p v-else class="interface-empty">{{ interfaceLoading ? '正在读取节点接口…' : '未发现接口，可直接手动填写下方规则。' }}</p>
-            </div>
-            <input :value="interfacesValue()" class="interface-manual-input" placeholder="手动填写接口或匹配规则，多个值用逗号分隔；留空匹配全部" aria-label="手动填写接口或匹配规则" @input="setManualInterfaces">
-            <small v-if="interfaceError" class="field-error">{{ interfaceError }}</small>
-            <small v-else class="field-help">选择接口会生成精确的 interface 列表；也可以填写通配符规则。</small>
-          </div>
-          <div class="field full-width"><span class="field-label">地址族</span><div class="address-family-options" role="group" aria-label="Direct 地址族"><label><input v-model="draft.ipv4" type="checkbox"><span>IPv4</span></label><label><input v-model="draft.ipv6" type="checkbox"><span>IPv6</span></label></div></div>
-        </template>
-        <template v-else>
-          <div class="field full-width kernel-scope-field">
-            <div class="field-label-row"><span>下发节点</span><span>{{ draft.kernelGlobal ? '所有节点' : `已选择 ${draft.nodeIds.length} 个节点` }}</span></div>
-            <div class="segmented-control kernel-scope-mode" role="radiogroup" aria-label="Kernel 下发节点范围">
-              <label><input v-model="kernelScopeMode" type="radio" name="kernelScopeMode" value="all"><span>所有节点</span></label>
-              <label><input v-model="kernelScopeMode" type="radio" name="kernelScopeMode" value="selected"><span>指定节点</span></label>
-            </div>
-            <div v-if="!draft.kernelGlobal" class="policy-scope-selector">
-              <div class="policy-scope-toolbar"><input v-model.trim="kernelNodeSearch" type="search" autocomplete="off" placeholder="搜索节点" aria-label="搜索 Kernel 下发节点"><span><button class="compact-command" type="button" @click="selectAllKernelNodes">全选</button><button class="compact-command" type="button" @click="clearKernelNodes">清空</button></span></div>
-              <div class="policy-scope-node-list"><label v-for="node in visibleKernelNodes" :key="node.id" class="policy-scope-node"><input type="checkbox" :checked="draft.nodeIds.includes(node.id)" @change="toggleNode(node.id)"><span><strong>{{ node.name }}</strong><code>{{ node.routerId }}</code></span></label><span v-if="!visibleKernelNodes.length" class="code-reference-empty">没有匹配的节点</span></div>
-              <p v-if="!draft.nodeIds.length" class="field-error" role="alert">请至少选择一个节点</p>
-            </div>
-          </div>
-          <div class="field"><label>Linux 路由表</label><input v-model.number="draft.table" type="number" min="1" max="4294967295" placeholder="留空使用 main"></div>
-          <div class="field"><label>扫描周期（秒）</label><input v-model.number="draft.scanTime" type="number" min="1" max="86400"></div>
-          <label class="toggle-row full-width"><span>持久化内核路由</span><input v-model="draft.persist" type="checkbox"><i></i></label>
-          <div class="field full-width"><span class="field-label">地址族</span><div class="address-family-options" role="group" aria-label="Kernel 地址族"><label><input v-model="draft.ipv4" type="checkbox"><span>IPv4</span></label><label><input v-model="draft.ipv6" type="checkbox"><span>IPv6</span></label></div><small class="field-help">导入策略共用一份设置；导出策略可按 IPv4/IPv6 分别配置。</small></div>
-          <PolicyEditor :family="draft.ipv4 ? 'ipv4' : 'ipv6'" direction="import" :policy="draft.importPolicy" :export-define-id="null" :functions="kernelFunctions" :filters="kernelFilters" :defines="defines" :disabled="pending" :show-policy-action="false" @update:policy="draft.importPolicy = $event" />
-          <section v-for="family in enabledKernelFamilies" :key="`kernel-export-${family}`" class="kernel-export-policy full-width">
-            <div class="kernel-export-policy-head"><div><span class="field-label">{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} 导出策略</span><small class="field-help">选择快速设置源地址，或打开可视化编辑器。</small></div></div>
-            <div class="segmented-control kernel-export-mode" role="radiogroup" :aria-label="`${family} Kernel 导出策略模式`">
-              <label><input v-model="draft.exportPolicies[family].mode" type="radio" :name="`kernelExportMode-${family}`" value="krt_prefsrc"><span>快速设置 krt_prefsrc</span></label>
-              <label><input v-model="draft.exportPolicies[family].mode" type="radio" :name="`kernelExportMode-${family}`" value="visual"><span>可视化编辑</span></label>
-            </div>
-            <div v-if="draft.exportPolicies[family].mode === 'krt_prefsrc'" class="field kernel-prefsrc-field">
-              <label :for="`kernelPrefSrc-${family}`">源地址（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }}）</label>
-              <input :id="`kernelPrefSrc-${family}`" v-model.trim="draft.exportPolicies[family].prefSrc" :placeholder="family === 'ipv4' ? '例如 192.0.2.1' : '例如 2001:db8::1'" :inputmode="family === 'ipv4' ? 'decimal' : 'text'">
-              <small class="field-help">生成 `krt_prefsrc` 并接受路由；地址必须与地址族匹配。</small>
-            </div>
-            <PolicyEditor v-else :family="family" direction="export" :policy="draft.exportPolicies[family].policy" :export-define-id="null" :functions="kernelFunctions" :filters="kernelFilters" :defines="defines" :disabled="pending" :show-policy-action="false" :allow-export-cidr="false" @update:policy="draft.exportPolicies[family].policy = $event" />
+  <dialog id="systemProtocolDialog" ref="dialog" class="editor-dialog protocol-editor system-protocol-dialog" :aria-labelledby="`${kind}DialogTitle`" @cancel.prevent="close">
+    <header class="dialog-head protocol-dialog-head"><span class="dialog-icon">{{ title[0] }}</span><div><p class="eyebrow">BIRD {{ title }}</p><h2 :id="`${kind}DialogTitle`">{{ editing ? '编辑' : '添加' }} {{ title }}</h2><p class="protocol-description">{{ kind === 'directs' ? '把选定接口的直连网段导入 BIRD 路由表。先选节点和接口，再预检应用。' : '在 BIRD 与 Linux 路由表之间同步路由。先选节点，再确认两个方向的策略。' }}</p><small class="system-edit-state">{{ editing ? dirty ? '有未保存修改' : '已保存' : '尚未创建' }} · 影响 {{ affectedIds.length }} 个节点 · {{ draft.name }}</small></div><button type="button" class="secondary-button compact-command protocol-close" :disabled="pending" @click="close">关闭</button></header>
+    <form ref="form" @submit.prevent="save">
+      <div class="system-protocol-content">
+        <p v-if="contextLoading" role="status">正在加载最新编辑版本…</p>
+        <p v-if="error" class="protocol-notice protocol-error" role="alert">{{ error }}</p>
+        <section v-if="conflict" class="protocol-notice system-conflict" aria-label="库存冲突对比"><h3>草稿已保留</h3><p>先比较最新配置，再决定使用哪一份。</p><button class="secondary-button" type="button" :disabled="contextLoading" @click="compareLatest">加载最新版本并对比</button><template v-if="comparison"><details><summary>打开时的配置</summary><pre>{{ JSON.stringify(initialResource, null, 2) }}</pre></details><details><summary>服务端最新配置</summary><pre>{{ comparison.resource ? JSON.stringify(comparison.resource, null, 2) : '资源已被删除' }}</pre></details><details open><summary>本地草稿</summary><pre>{{ JSON.stringify(body(), null, 2) }}</pre></details><button type="button" class="secondary-button" @click="resolveConflict(false)">使用最新配置</button><button type="button" class="secondary-button" @click="resolveConflict(true)">{{ comparison.resource ? '保留草稿，重新预检' : '保留草稿，作为新资源预检' }}</button></template></section>
+        <fieldset class="system-protocol-fields" :disabled="pending || contextLoading || conflict || revision === null">
+          <section class="protocol-section"><div class="protocol-section-title"><span>1</span><div><h3>基本信息与节点</h3><p>选择本次配置要应用的位置。</p></div></div>
+            <div class="dialog-grid"><label class="protocol-form-field" for="systemProtocolLabel">显示名称<input id="systemProtocolLabel" v-model.trim="draft.label" required placeholder="例如：边缘节点直连网段"></label><label class="protocol-form-field" for="systemProtocolName">协议名称<input id="systemProtocolName" v-model.trim="draft.name" required pattern="[A-Za-z_][A-Za-z0-9_]*"><small class="field-help">BIRD 配置中的唯一名称</small></label>
+            <label v-if="kind === 'directs'" class="protocol-form-field full-width" for="directNode">所属节点<select id="directNode" v-model="draft.nodeId" @change="selectDirectNode"><option value="" disabled>请选择节点</option><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }} · {{ node.routerId }}</option></select></label>
+            <template v-else><label class="protocol-form-field full-width" for="kernelScope">下发节点范围<select id="kernelScope" v-model="draft.kernelGlobal"><option :value="false">指定节点</option><option :value="true">所有节点（含后续新增）</option></select></label><div v-if="!draft.kernelGlobal" class="policy-scope-selector full-width"><div class="policy-scope-toolbar"><input v-model="kernelNodeSearch" type="search" placeholder="搜索节点" aria-label="搜索 Kernel 下发节点"><span><button class="compact-command" type="button" @click="draft.nodeIds = nodes.map(n => n.id)">全选</button><button class="compact-command" type="button" @click="draft.nodeIds = []">清空</button></span></div><div class="policy-scope-node-list"><label v-for="node in visibleKernelNodes" :key="node.id" class="policy-scope-node"><input type="checkbox" :checked="draft.nodeIds.includes(node.id)" @change="toggleNode(node.id)"><span><strong>{{ node.name }}</strong><code>{{ node.routerId }}</code></span></label><p v-if="!visibleKernelNodes.length">没有匹配的节点</p></div><p v-if="!draft.nodeIds.length" class="field-error">请至少选择一个节点</p></div></template>
+            <div class="field full-width"><span class="field-label">地址族</span><div class="address-family-options" role="group" :aria-label="`${title} 地址族`"><label><input v-model="draft.ipv4" type="checkbox"><span>IPv4</span></label><label><input v-model="draft.ipv6" type="checkbox"><span>IPv6</span></label></div></div></div>
+            <label class="toggle-row" for="systemProtocolEnabled"><span><strong>启用资源</strong><small>{{ draft.enabled ? '确认应用后加载协议' : '保留配置，确认应用后停用协议' }}</small></span><input id="systemProtocolEnabled" v-model="draft.enabled" type="checkbox"><i aria-hidden="true"></i></label>
           </section>
-        </template>
-        <section class="system-protocol-preview full-width" aria-labelledby="systemProtocolPreviewTitle">
-          <div class="system-protocol-preview-head"><div><span class="eyebrow">GENERATED CONFIGURATION</span><h3 id="systemProtocolPreviewTitle">配置预览</h3></div><small>表单修改后实时更新</small></div>
-          <pre>{{ configPreview }}</pre>
-        </section>
-        <label class="toggle-row full-width"><span>启用资源</span><input v-model="draft.enabled" type="checkbox"><i></i></label>
+          <section v-if="kind === 'directs'" class="protocol-section"><div class="protocol-section-title"><span>2</span><div><h3>学习接口</h3><p>{{ draft.interfaces.length ? `仅学习 ${draft.interfaces.length} 条接口规则匹配的直连网段` : '当前学习全部接口的直连网段，也可以限定接口。' }}</p></div></div>
+            <div class="field-label-row system-interface-actions"><span>{{ interfaceLoading ? '正在发现节点接口…' : '节点接口目录' }}</span><button v-if="interfaceLoading" type="button" class="secondary-button compact-command" @click="stopInterfaces">取消发现</button><button v-else type="button" class="secondary-button compact-command" :disabled="!draft.nodeId" @click="loadInterfaces(draft.nodeId)">刷新接口</button></div>
+            <div class="interface-picker"><div class="interface-picker-toolbar"><input v-model="interfaceSearch" type="search" placeholder="搜索节点接口" aria-label="搜索节点接口"><span>{{ draft.interfaces.length }} 个已选择</span></div><div v-if="filteredInterfaces.length" class="interface-option-list"><label v-for="item in filteredInterfaces" :key="item" class="interface-option"><input type="checkbox" :checked="draft.interfaces.includes(item)" @change="toggleInterface(item)"><span><strong>{{ item }}</strong><small>{{ interfaceOptions.includes(item) ? '节点接口或已保存规则' : '手动规则' }}</small></span></label></div><p v-else class="interface-empty">{{ interfaceLoading ? '正在读取节点接口…' : '未发现接口，可继续手动填写规则。' }}</p></div>
+            <label class="protocol-form-field protocol-source-field">手动接口或匹配规则<input :value="draft.interfaces.join(', ')" placeholder="例如 eth0, vlan*；留空匹配全部" aria-label="手动填写接口或匹配规则" @input="setManualInterfaces"></label><p v-if="interfaceError" class="field-error" role="status">{{ interfaceError }}</p><p class="protocol-help">逗号分隔多个规则，支持通配符。清空选择会匹配全部接口。</p>
+            <details class="protocol-inline-disclosure"><summary>高级接口设置</summary><label class="protocol-checkbox"><input v-model="draft.checkLink" type="checkbox">检查链路状态（check link）</label><p class="protocol-help">仅在接口链路可用时学习直连网段。</p></details>
+          </section>
+          <template v-else>
+            <section class="protocol-section"><div class="protocol-section-title"><span>2</span><div><h3>路由同步方向</h3><p>Import：Linux → BIRD；Export：BIRD → Linux。默认只向 Linux 导出。</p></div></div>
+              <div v-for="family in enabledKernelFamilies" :key="`kernel-table-${family}`" class="system-kernel-table">
+                <h4>{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} 路由表</h4><div class="dialog-grid"><label class="protocol-form-field">BIRD 表来源<select v-model="draft.tables[family].source" :aria-label="`${family} BIRD 表来源`"><option value="existing">引用已有表</option><option value="managed">由 Birdbox 创建</option></select></label><label class="protocol-form-field" :for="`kernelBirdTable-${family}`">BIRD 路由表<input :id="`kernelBirdTable-${family}`" v-model.trim="draft.tables[family].name" :list="`kernelTables-${family}`" required pattern="[A-Za-z_][A-Za-z0-9_]*"><datalist :id="`kernelTables-${family}`"><option v-for="table in tableSuggestions(family)" :key="table" :value="table" /></datalist></label></div>
+                <p class="protocol-help">{{ draft.tables[family].source === 'managed' ? '管理表与 Pipe / Static 共享去重；停用协议后仍保留表。' : '可选库存已知表或填写节点上已有的表名，最终由节点预检验证。' }}</p>
+                <details class="protocol-disclosure system-policy"><summary>Linux → BIRD（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Import）<span class="protocol-policy-summary">{{ policySummary(draft.importPolicies[family]) }}</span></summary><p class="protocol-help">从内核学习其它程序安装的路由还需在高级设置启用 learn。</p><PolicyEditor :family="family" direction="import" :policy="draft.importPolicies[family]" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" @update:policy="draft.importPolicies[family] = $event" /></details>
+              <details class="protocol-disclosure system-policy"><summary>BIRD → Linux（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Export）<span class="protocol-policy-summary">{{ draft.exportPolicies[family].mode === 'krt_prefsrc' ? `源地址 ${draft.exportPolicies[family].prefSrc || '未填写'}` : policySummary(draft.exportPolicies[family].policy) }}</span></summary>
+                <label class="protocol-form-field protocol-source-field">导出方式<select v-model="draft.exportPolicies[family].mode" :aria-label="`${family} Kernel 导出策略模式`"><option value="visual">可视化编辑</option><option value="krt_prefsrc">快速设置 krt_prefsrc</option></select></label>
+                <label v-if="draft.exportPolicies[family].mode === 'krt_prefsrc'" class="protocol-form-field protocol-source-field" :for="`kernelPrefSrc-${family}`">源地址（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }}）<input :id="`kernelPrefSrc-${family}`" v-model.trim="draft.exportPolicies[family].prefSrc" required :placeholder="family === 'ipv4' ? '192.0.2.1' : '2001:db8::1'"><small class="field-help">向 Linux 导出的路由指定首选源地址并接受全部路由。</small></label>
+                <PolicyEditor v-else :family="family" direction="export" :policy="draft.exportPolicies[family].policy" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" :allow-export-cidr="false" @update:policy="draft.exportPolicies[family].policy = $event" />
+              </details>
+              </div>
+            </section>
+            <details class="protocol-disclosure"><summary>高级内核设置<span class="protocol-policy-summary">Linux 表 {{ draft.table ?? 'main' }} · 扫描 {{ draft.scanTime ?? '默认' }} 秒</span></summary><div class="dialog-grid"><label class="protocol-form-field">Linux 路由表<NullableNumberInput v-model="draft.table" min="1" max="4294967295" placeholder="留空使用 main" /></label><label class="protocol-form-field">扫描周期（秒）<NullableNumberInput v-model="draft.scanTime" min="1" max="86400" /></label><label class="protocol-form-field">默认 Metric<NullableNumberInput v-model="draft.metric" min="0" max="4294967295" placeholder="使用 BIRD 默认值" /></label><label class="protocol-form-field">ECMP 路径上限<NullableNumberInput v-model="draft.mergePaths" min="1" max="64" placeholder="留空关闭合并" /></label></div><label class="protocol-checkbox"><input v-model="draft.persist" type="checkbox">退出 BIRD 时保留内核路由（persist）</label><label class="protocol-checkbox"><input v-model="draft.learn" type="checkbox">学习其它程序安装的路由（learn）</label><label class="protocol-checkbox"><input v-model="draft.gracefulRestart" type="checkbox">平滑重启（graceful restart）</label><p class="protocol-help">Linux 路由表是系统 FIB，不是上方的 BIRD 表名；两侧表一一对应，每个地址族分别同步。</p></details>
+          </template>
+        </fieldset>
+        <section v-if="preview" id="systemProtocolPreview" class="protocol-preview" aria-label="服务端预检结果"><h3>{{ preview.valid ? '预检通过，可以确认应用' : '预检未通过，请修正后重试' }}</h3><p>受影响节点 {{ preview.configs.length }} 个。这里只检查候选配置，不修改库存或活动配置。</p><article v-for="item in preview.configs" :key="item.nodeId"><h4>{{ nameForNode(item.nodeId) }} · {{ item.validation.ok ? '通过' : '失败' }}</h4><p v-if="!item.validation.ok" class="protocol-error">{{ item.validation.stderr || item.validation.stdout }}</p><details open><summary>配置差异</summary><pre>{{ item.diff }}</pre></details><details><summary>完整服务端配置</summary><pre>{{ item.config }}</pre></details></article></section>
       </div>
-      <div class="dialog-actions split-actions"><button v-if="editing" class="text-danger-button" type="button" :disabled="pending" @click="remove">删除资源</button><span></span><button class="secondary-button" type="button" :disabled="pending" @click="close">取消</button><button class="primary-button" type="submit" :disabled="pending">{{ pending ? '正在应用' : '保存并应用' }}</button></div>
+      <footer class="dialog-actions protocol-editor-actions"><button v-if="editing" class="text-danger-button" type="button" :disabled="pending || contextLoading || conflict || revision === null" @click="remove">删除资源</button><span class="protocol-save-hint">{{ pending ? '正在预检并应用，请等待结果' : preview?.valid ? '确认后才下发远端配置' : '先查看差异，再确认应用' }}</span><button class="secondary-button" type="button" :disabled="pending" @click="close">取消</button><button v-if="preview?.valid" class="secondary-button" type="button" :disabled="pending || previewPending" @click="inspect">重新预检</button><button class="primary-button" type="submit" :disabled="pending || previewPending || contextLoading || conflict || revision === null">{{ pending ? '正在应用' : previewPending ? '正在预检…' : preview?.valid ? '确认应用' : '预检并查看变更' }}</button></footer>
     </form>
   </dialog>
 </template>
+<style scoped>
+.system-protocol-dialog { width: min(920px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: clip; }
+.system-protocol-dialog[open] { display: flex; flex-direction: column; }
+.system-protocol-dialog form { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: clip; }
+.system-protocol-content { display: grid; gap: 16px; min-height: 0; padding: 20px 24px; overflow: auto; overscroll-behavior: contain; }
+.system-protocol-fields { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.system-edit-state { display: block; margin-top: 6px; color: var(--muted); overflow-wrap: anywhere; }
+.toggle-row input:focus-visible + i { outline: 2px solid var(--green); outline-offset: 3px; }
+.system-interface-actions { margin: 16px 0 10px; }
+.system-policy { margin-top: 14px; }
+.system-kernel-table { margin-top: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.system-kernel-table h4 { margin: 0; font-size: 13px; }
+.protocol-preview article { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 14px; min-width: 0; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; max-height: 360px; overflow: auto; font-size: 11px; }
+.protocol-editor-actions { flex-shrink: 0; margin: 0; }
+.system-conflict { display: grid; gap: 10px; min-width: 0; }
+.system-conflict h3 { margin: 0; }
+@media (max-width: 600px) { .system-protocol-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .system-protocol-content { padding: 12px; } .dialog-grid { grid-template-columns: minmax(0, 1fr); } }
+</style>

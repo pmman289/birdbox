@@ -50,7 +50,7 @@ test("resource PUT applies to existing sessions and rejects invalid edits atomic
   const fakeCommand = `#!/bin/sh
 printf '%s %s\n' "$0" "$*" >> "$BIRDBOX_FAKE_LOG"
 case "$*" in
-  *"show protocols all test_bgp"*)
+  *'show protocols all "test_bgp"'*)
     printf '%s\n' 'BIRD 2.19.1 ready.' '1002-test_bgp BGP' '  BGP state: Established' '  Neighbor address: 192.0.2.2' '  Neighbor AS: 65002' '  Channel ipv4' '    State: UP' '    Routes: 1 imported, 1 exported, 1 preferred' '1002-other_bgp BGP' '  BGP state: Idle'
     exit 0
     ;;
@@ -348,8 +348,8 @@ exit 0
       defineId: "define_static", action: "blackhole", import: "all", export: "none", raw: "", enabled: true,
     }),
   });
-  assert.equal(conflictingStatic.status, 400);
-  assert.match(conflictingStatic.body.error, /冲突的静态路由定义/);
+  assert.equal(conflictingStatic.status, 201);
+  await authenticatedRequest(`/api/statics/${conflictingStatic.body.resource.id}`, { method: "DELETE" });
   const afterStaticConflict = await authenticatedRequest("/api/dashboard");
   assert.deepEqual(afterStaticConflict.body.inventory.staticProtocols.map((resource) => resource.id), [staticId]);
 
@@ -399,7 +399,7 @@ exit 0
   assert.equal(protocolDetails.body.ok, true);
   assert.match(protocolDetails.body.output, /BGP state: Established/);
   assert.doesNotMatch(protocolDetails.body.output, /other_bgp/);
-  assert.match(await fs.readFile(fakeLog, "utf8"), /show protocols all test_bgp/);
+  assert.match(await fs.readFile(fakeLog, "utf8"), /show protocols all "test_bgp"/);
 
   const disabledSession = await authenticatedRequest("/api/sessions/apply", {
     method: "POST",

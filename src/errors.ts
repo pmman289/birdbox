@@ -2,6 +2,7 @@ export interface PublicError extends Error {
   status?: number;
   statusCode?: number;
   code?: string;
+  deployment?: import("../packages/contracts/src/api.js").DeploymentReport;
 }
 
 export type UnknownRecord = Record<string, unknown>;

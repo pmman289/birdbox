@@ -24,7 +24,7 @@ function redactConfig(value: string): string {
 
 function redactValue(value: unknown, key = ""): unknown {
   if (typeof value === "string") {
-    if (key === "config" || key === "sessionConfig" || key === "generatedConfig") return redactConfig(value);
+    if (key === "config" || key === "sessionConfig" || key === "generatedConfig" || key === "previousConfig" || key === "diff" || key === "unified") return redactConfig(value);
     return SECRET_KEY.test(key) && value.length > 0 ? SECRET_PLACEHOLDER : value;
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item));

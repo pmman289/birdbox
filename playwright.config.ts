@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const port = 31_000;
+const port = Number(process.env.BIRDBOX_E2E_PORT ?? 31_000);
 
 export default defineConfig({
   testDir: "./test/e2e",
@@ -20,6 +20,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "tsx test/e2e/server.ts",
+    env: { BIRDBOX_PORT: String(port) },
     url: `http://127.0.0.1:${port}/api/health`,
     timeout: 60_000,
     reuseExistingServer: false,

@@ -60,6 +60,7 @@ const MAX_TASK_PARAMETER_BYTES = 16 * 1024 * 1024;
 const BACKGROUND_METHODS = new Set([
   "system.info",
   "system.interfaces",
+  "network.ip_rules.inspect",
   "bird.inspect",
   "bird.protocol",
   "bird.routes",

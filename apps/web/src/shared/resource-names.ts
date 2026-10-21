@@ -19,6 +19,9 @@ export function usedBirdNames(inventory: Inventory, excluded: string[] = []): Se
     ...inventory.filters.map((resource) => resource.name),
     ...inventory.rpki.flatMap((resource) => [resource.name, resource.roa4Table, resource.roa6Table]),
     ...inventory.staticProtocols.map((resource) => resource.name),
+    ...(inventory.directProtocols ?? []).map(resource => resource.name),
+    ...(inventory.kernelProtocols ?? []).flatMap(resource => [resource.name, ...(resource.ipv4 && resource.ipv6 ? [`${resource.name}4`, `${resource.name}6`] : []), ...Object.values(resource.tables ?? {}).map(table => table.name)]),
+    ...(inventory.pipeProtocols ?? []).flatMap(resource => [resource.name, resource.table.name, resource.peerTable.name]),
     ...(inventory.sourcePolicies ?? []).map((resource) => resource.id),
     ...inventory.sessions.map((session) => session.protocolName),
   ].filter((name): name is string => typeof name === "string" && name.length > 0 && !excludedSet.has(name)));

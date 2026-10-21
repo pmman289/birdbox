@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import net from "node:net";
+import { isDeepStrictEqual } from "node:util";
 import type { ChannelPolicy, OspfArea, OspfAreaOptions, OspfDomain, OspfInterfaceOptions, OspfLink, OspfLinkEndpoint, OspfNodeConfig, OspfPasswordOptions, OspfProtocolOptions, OspfVersion, OspfVirtualLink } from "../packages/contracts/src/inventory.js";
 import { assertValidation, normalizeId, normalizeLabel } from "./bird-normalize-common.js";
 
@@ -117,6 +118,10 @@ function adaptStructuredDomain(input: RecordValue): RecordValue {
   if (!Array.isArray(input.members) && !Array.isArray(input.areas)) return input;
   const rawMembers = Array.isArray(input.members) ? input.members : [];
   const rawAreas = Array.isArray(input.areas) ? input.areas : [];
+  // API responses carry the original node records alongside the topology
+  // projection. An unchanged Area must retain its node-specific legacy values.
+  const previousConfigs = Array.isArray(input.nodeConfigs) ? input.nodeConfigs.map(nodeConfig) : [];
+  const previousAreas = toOspfDomainModel({ id: "", name: "", nodeConfigs: previousConfigs, links: [], layout: {} }).areas ?? [];
   const areaById = new Map<string, RecordValue>();
   for (const [index, raw] of rawAreas.entries()) {
     const area = record(raw, `OSPF Area ${index + 1}`);
@@ -143,6 +148,8 @@ function adaptStructuredDomain(input: RecordValue): RecordValue {
   }
   const nodeConfigs = rawMembers.map((raw, index) => {
     const member = record(raw, `OSPF 成员 ${index + 1}`);
+    const nodeId = String(member.nodeId ?? "").trim();
+    const previousConfig = previousConfigs.find(config => config.nodeId === nodeId);
     const policies = member.policies && typeof member.policies === "object" && !Array.isArray(member.policies)
       ? record(member.policies, `OSPF 成员 ${index + 1} 策略`)
       : {};
@@ -161,19 +168,28 @@ function adaptStructuredDomain(input: RecordValue): RecordValue {
     for (const rawArea of rawAreas) {
       const area = record(rawArea, "OSPF Area");
       const areaName = String(area.area ?? "").trim();
+      const previousArea = previousAreas.find(item => item.area === areaName);
+      const areaSettings = (item: RecordValue) => ({ type: item.type, options: item.options, prefixes: item.prefixes });
+      if (previousConfig && previousArea && isDeepStrictEqual(areaSettings(area), areaSettings(previousArea as unknown as RecordValue))) {
+        const original = previousConfig?.areaOptions?.[areaName];
+        if (original) areaOptions[areaName] = structuredClone(original);
+        continue;
+      }
       const options = area.options && typeof area.options === "object" && !Array.isArray(area.options) ? record(area.options, "OSPF Area options") : {};
       const prefixes = Array.isArray(area.prefixes) ? area.prefixes.filter((item) => item && typeof item === "object") as RecordValue[] : [];
-      const prefixList = (kind: string) => prefixes.filter((item) => item.kind === kind).map((item) => ({ ...item, prefix: String(item.prefix ?? "").trim() }));
+      const prefixList = (kind: string, key: string) => prefixes.filter((item) => item.kind === kind).map((item) => {
+        const saved = Array.isArray(options[key]) ? (options[key] as RecordValue[]).find(entry => entry.prefix === item.prefix) : undefined;
+        return { ...saved, ...item, prefix: String(item.prefix ?? "").trim() };
+      });
       areaOptions[areaName] = {
         ...options,
-        stub: area.type === "stub" || options.stub === true,
-        nssa: area.type === "nssa" || options.nssa === true,
-        networks: prefixList("network"),
-        external: prefixList("external"),
-        stubnets: prefixList("stubnet"),
+        stub: area.type === "stub",
+        nssa: area.type === "nssa",
+        networks: prefixList("network", "networks"),
+        external: prefixList("external", "external"),
+        stubnets: prefixList("stubnet", "stubnets"),
       } as OspfAreaOptions;
     }
-    const nodeId = String(member.nodeId ?? "").trim();
     return {
       nodeId,
       enabled: member.enabled !== false,
@@ -526,16 +542,16 @@ export function toOspfDomainModel(domain: OspfDomain): OspfDomain {
     const supplied = suppliedAreas.find((item) => item.area === area);
     const source = supplied?.options ?? domain.nodeConfigs.find((config) => config.areaOptions?.[area])?.areaOptions?.[area] ?? {};
     const prefixes = [
-      ...(source.networks ?? []).map((item) => ({ prefix: item.prefix, kind: "network" as const })),
-      ...(source.external ?? []).map((item) => ({ prefix: item.prefix, kind: "external" as const })),
-      ...(source.stubnets ?? []).map((item) => ({ prefix: item.prefix, kind: "stubnet" as const })),
+      ...(source.networks ?? []).map((item) => ({ ...item, kind: "network" as const })),
+      ...(source.external ?? []).map((item) => ({ ...item, kind: "external" as const })),
+      ...(source.stubnets ?? []).map((item) => ({ ...item, kind: "stubnet" as const })),
     ];
     return {
       id: supplied?.id ?? `area_${area.replace(/[^A-Za-z0-9]+/g, "_")}`,
       area,
       type: supplied?.type ?? (source.nssa ? "nssa" as const : source.stub ? "stub" as const : "normal" as const),
       options: { ...source },
-      prefixes: supplied?.prefixes?.length ? supplied.prefixes : prefixes,
+      prefixes: supplied?.prefixes ?? prefixes,
       virtualLinks: supplied?.virtualLinks?.length ? supplied.virtualLinks : domain.nodeConfigs.flatMap((config) => (config.virtualLinks ?? []).filter((link) => link.area === area).map((link) => ({ ...link, nodeId: config.nodeId }))),
     };
   });

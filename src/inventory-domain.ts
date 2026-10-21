@@ -12,10 +12,13 @@ import type {
   StaticProtocol,
   DirectProtocol,
   KernelProtocol,
+  PipeProtocol,
 } from "../packages/contracts/src/inventory.js";
 import {
   resourceAppliesToNode,
   resourceExplicitlyScopesNode,
+  scopedNodeIds,
+  type NodeScopedResource,
 } from "../packages/contracts/src/resource-scope.js";
 import {
   birdSourceReferencesSymbol,
@@ -106,7 +109,7 @@ export function nodeSourcePolicies(state: Inventory, nodeId: string, enabledOnly
 export function ownedNodePolicyResources(
   state: Inventory,
   nodeId: string,
-): Array<PolicyResource | RpkiSource | SourcePolicyEgress | StaticProtocol | DirectProtocol | KernelProtocol> {
+): Array<PolicyResource | RpkiSource | SourcePolicyEgress | StaticProtocol | DirectProtocol | KernelProtocol | PipeProtocol> {
   return [
     ...state.defines.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
     ...state.functions.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
@@ -116,6 +119,7 @@ export function ownedNodePolicyResources(
     ...state.staticProtocols.filter((item) => item.nodeId === nodeId),
     ...state.directProtocols.filter((item) => item.nodeId === nodeId),
     ...state.kernelProtocols.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
+    ...state.pipeProtocols.filter((item) => resourceExplicitlyScopesNode(item, nodeId)),
   ];
 }
 
@@ -123,13 +127,21 @@ export function resourceReferencesSymbol(
   state: Inventory,
   symbol: string,
   excludedId: string | null = null,
+  provider?: NodeScopedResource,
 ): boolean {
+  // BIRD symbols live in a node's configuration, not in the whole inventory.
+  // A same-named declaration on another node has independent consumers.
+  const overlaps = (consumer: NodeScopedResource): boolean => {
+    if (!provider) return true;
+    const providerIds = scopedNodeIds(provider), consumerIds = scopedNodeIds(consumer);
+    return providerIds === null || consumerIds === null || providerIds.some(id => consumerIds.includes(id));
+  };
   return [...state.defines, ...state.functions, ...state.filters].some((resource) => {
     const source = "source" in resource ? resource.source : resource.type === "expression" ? resource.value : "";
-    return resource.id !== excludedId && birdSourceReferencesSymbol(source, symbol);
+    return resource.id !== excludedId && overlaps(resource) && birdSourceReferencesSymbol(source, symbol);
   }) || state.staticProtocols.some((resource) => {
-    const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom)];
-    return resource.id !== excludedId && sources.some((source) => birdSourceReferencesSymbol(source, symbol));
+    const sources = [resource.raw, ...Object.values(resource.routeFilters).map((filter) => filter.custom), ...(resource.routes ?? []).map(route => route.filter.custom)];
+    return resource.id !== excludedId && overlaps(resource) && sources.some((source) => birdSourceReferencesSymbol(source, symbol));
   });
 }
 
@@ -147,6 +159,7 @@ export function configForNode(state: Inventory, node: ManagedNode): string {
   state.ospfDomains,
     state.directProtocols.filter((item) => item.nodeId === node.id),
     state.kernelProtocols.filter((item) => resourceAppliesToNode(item, node.id)),
+    state.pipeProtocols.filter((item) => resourceAppliesToNode(item, node.id)),
   );
 }
 
@@ -164,6 +177,7 @@ export function configBundleForNode(state: Inventory, node: ManagedNode) {
   state.ospfDomains,
     state.directProtocols.filter((item) => item.nodeId === node.id),
     state.kernelProtocols.filter((item) => resourceAppliesToNode(item, node.id)),
+    state.pipeProtocols.filter((item) => resourceAppliesToNode(item, node.id)),
   );
 }
 

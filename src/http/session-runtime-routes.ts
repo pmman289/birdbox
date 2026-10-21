@@ -1,3 +1,13 @@
+import { inspectRoaTable, parseRpkiRuntime } from "../bird-rpki-runtime.js";
+import type { RpkiRuntimeResponse } from "../../packages/contracts/src/api.js";
+import { parseStaticRuntime } from "../bird-static-runtime.js";
+import { inspectSourcePolicyRuntime } from "../bird-source-policy-runtime.js";
+import { sourcePolicyNames, sourcePolicyForNode } from "../bird-source-policy.js";
+import { parseSystemProtocolRuntime } from "../bird-system-runtime.js";
+import { knownPipeTables } from "../bird-pipe.js";
+import { parsePipeRuntime } from "../bird-pipe-runtime.js";
+import { resourceAppliesToNode } from "../../packages/contracts/src/resource-scope.js";
+import type { PipeRuntimeResponse, SystemProtocolRuntimeResponse } from "../../packages/contracts/src/api.js";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 
 import type { ChangeEvent, DashboardRuntimeResponse, ProtocolDetailsResponse, RouteDetailsResponse, RoutePathResponse } from "../../packages/contracts/src/api.js";
@@ -102,6 +112,161 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
     return jsonReply(reply, 401, { error: "请先登录", code: "AUTH_REQUIRED" }, {
       "set-cookie": sessionCookie(request, "", options.secureCookieSetting, 0),
     });
+  });
+
+  app.get<{ Params: { resourceId: string } }>("/api/source-policies/:resourceId/runtime", async (request, reply) => {
+    const state = await options.store.read(), resource = state.sourcePolicies.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "源地址出口映射不存在");
+    return jsonReply(reply, 200, await inspectSourcePolicyRuntime(state, resource));
+  });
+  app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string; groupId?: string; target?: string } }>("/api/source-policies/:resourceId/routes", async (request, reply) => {
+    const state = await options.store.read(), resource = state.sourcePolicies.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "源地址出口映射不存在");
+    const node = findNode(state, String(request.query.nodeId ?? ""));
+    if (!resourceAppliesToNode(resource, node.id)) throw routeError(400, "此节点不在源地址出口映射的作用域内");
+    const group = resource.groups.find(item => item.id === request.query.groupId);
+    if (!group) throw routeError(400, "出口组不存在");
+    const names = sourcePolicyNames(resource, group), base = { resourceId: resource.id, nodeId: node.id, family: "ipv4", table: names.table };
+    if (!resource.enabled || !sourcePolicyForNode(resource, node)?.groups.some(item => item.id === group.id)) return jsonReply(reply, 200, { ...base, routes: [], truncated: false, limit: 200 });
+    const result = await inspectProtocolRoutes(node, names.staticProtocol, "ipv4", "import", { table: names.table, tableOnly: true, target: request.query.target, limit: 200 });
+    if (!result.ok) throw routeError(502, result.error ?? "源地址出口 BIRD 路由查询失败");
+    return jsonReply(reply, 200, { ...base, routes: result.routes, truncated: result.truncated, limit: 200 });
+  });
+
+  app.get<{ Params: { resourceId: string } }>("/api/rpki/:resourceId/runtime", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.rpki.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "RPKI 资源不存在");
+    const instances = resource.sourceType === "server" ? [resource.name] : [resource.roa4Table ? `${resource.name}_v4` : null, resource.roa6Table ? `${resource.name}_v6` : null].filter((name): name is string => name !== null);
+    const nodes: RpkiRuntimeResponse["nodes"] = await Promise.all(state.nodes.filter(node => resourceAppliesToNode(resource, node.id)).map(async node => ({
+      nodeId: node.id, lastCheckedAt: new Date().toISOString(), protocols: await Promise.all(instances.map(async name => {
+        const base = { name, channels: [], rtrState: null, raw: "", error: null };
+        if (!resource.enabled) return { ...base, state: "disabled" as const };
+        try {
+          const result = await inspectProtocolDetails(node, name);
+          if (!result.ok && !/no protocols? match(?:es)?|no such protocol/i.test(`${result.error} ${result.output}`)) throw new Error(result.error ?? "无法读取 RPKI 状态");
+          return { ...base, ...parseRpkiRuntime(result.output, name, resource.sourceType === "server" ? "RPKI" : "Static"), raw: result.output };
+        } catch (error) { return { ...base, state: "error" as const, error: error instanceof Error ? error.message : "节点检查失败" }; }
+      })),
+    })));
+    return jsonReply(reply, 200, { resourceId: resource.id, nodes });
+  });
+  app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string; family?: string } }>("/api/rpki/:resourceId/roas", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.rpki.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "RPKI 资源不存在");
+    const node = findNode(state, String(request.query.nodeId ?? ""));
+    if (!resourceAppliesToNode(resource, node.id)) throw routeError(400, "该节点不在 RPKI 作用域内");
+    const family = request.query.family;
+    if (family !== "ipv4" && family !== "ipv6") throw routeError(400, "请选择合法地址族");
+    const table = family === "ipv4" ? resource.roa4Table : resource.roa6Table;
+    if (!table) throw routeError(400, "此 RPKI 未启用该地址族");
+    const base = { resourceId: resource.id, nodeId: node.id, family, table };
+    if (!resource.enabled) return jsonReply(reply, 200, { ...base, entries: [], truncated: false, limit: 200 });
+    try { return jsonReply(reply, 200, { ...base, ...await inspectRoaTable(node, table, family) }); }
+    catch (error) { throw routeError(502, error instanceof Error ? error.message : "ROA 查询失败"); }
+  });
+
+  for (const kind of ["directs", "kernels"] as const) {
+    app.get<{ Params: { resourceId: string } }>(`/api/${kind}/:resourceId/runtime`, async (request, reply) => {
+      const state = await options.store.read();
+      const resource = (kind === "directs" ? state.directProtocols : state.kernelProtocols).find(item => item.id === request.params.resourceId);
+      if (!resource) throw routeError(404, "协议资源不存在");
+      const families = [...(resource.ipv4 ? ["ipv4" as const] : []), ...(resource.ipv6 ? ["ipv6" as const] : [])];
+      const names = kind === "directs" ? [{ name: resource.name, family: families.length === 2 ? "dual" as const : families[0]! }]
+        : families.map(family => ({ name: families.length === 2 ? `${resource.name}${family === "ipv4" ? "4" : "6"}` : resource.name, family }));
+      const nodes: SystemProtocolRuntimeResponse["nodes"] = await Promise.all(state.nodes.filter(node => resourceAppliesToNode(resource, node.id)).map(async node => ({
+        nodeId: node.id, lastCheckedAt: new Date().toISOString(), protocols: await Promise.all(names.map(async instance => {
+          const base = { ...instance, imported: null, exported: null, error: null, raw: "" };
+          if (!resource.enabled) return { ...base, state: "disabled" as const };
+          try {
+            const result = await inspectProtocolDetails(node, instance.name);
+            if (!result.ok && !/no protocols? match(?:es)?|no such protocol/i.test(`${result.error} ${result.output}`)) throw new Error(result.error ?? "无法读取协议状态");
+            return { ...base, ...parseSystemProtocolRuntime(result.output, instance.name, kind === "directs" ? "Direct" : "Kernel"), raw: result.output };
+          } catch (error) { return { ...base, state: "error" as const, error: error instanceof Error ? error.message : "节点检查失败" }; }
+        })),
+      })));
+      return jsonReply(reply, 200, { resourceId: resource.id, nodes });
+    });
+    app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string; family?: string; direction?: string; target?: string } }>(`/api/${kind}/:resourceId/routes`, async (request, reply) => {
+      const state = await options.store.read();
+      const resource = (kind === "directs" ? state.directProtocols : state.kernelProtocols).find(item => item.id === request.params.resourceId);
+      if (!resource) throw routeError(404, "协议资源不存在");
+      const node = findNode(state, String(request.query.nodeId ?? ""));
+      if (!resourceAppliesToNode(resource, node.id)) throw routeError(400, "该节点不在资源作用域内");
+      const family = request.query.family;
+      if ((family !== "ipv4" && family !== "ipv6") || !resource[family]) throw routeError(400, "请选择已启用的地址族");
+      const direction = request.query.direction ?? "import";
+      if ((direction !== "import" && direction !== "export") || (kind === "directs" && direction !== "import")) throw routeError(400, "查询方向不合法");
+      const name = kind === "kernels" && resource.ipv4 && resource.ipv6 ? `${resource.name}${family === "ipv4" ? "4" : "6"}` : resource.name;
+      const table = "tables" in resource ? resource.tables?.[family]?.name ?? (family === "ipv4" ? "master4" : "master6") : family === "ipv4" ? "master4" : "master6";
+      if (!resource.enabled) return jsonReply(reply, 200, { resourceId: resource.id, nodeId: node.id, family, table, routes: [], truncated: false, limit: 200 });
+      const result = await inspectProtocolRoutes(node, name, family, direction, { table, target: request.query.target });
+      if (!result.ok) throw routeError(502, result.error ?? "无法读取协议路由");
+      return jsonReply(reply, 200, { resourceId: resource.id, nodeId: node.id, family, table, routes: result.routes, truncated: result.truncated, limit: result.limit });
+    });
+  }
+
+  app.get<{ Params: { resourceId: string } }>("/api/statics/:resourceId/runtime", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.staticProtocols.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "Static 资源不存在");
+    const node = findNode(state, resource.nodeId);
+    const base = { resourceId: resource.id, nodeId: node.id, lastCheckedAt: new Date().toISOString(), table: resource.table?.name ?? (resource.family === "ipv4" ? "master4" : "master6"), imported: null, exported: null, error: null, raw: "" };
+    if (!resource.enabled) return jsonReply(reply, 200, { ...base, state: "disabled" });
+    try {
+      const result = await inspectProtocolDetails(node, resource.name);
+      if (!result.ok && !/no protocols? match(?:es)?|no such protocol/i.test(`${result.error} ${result.output}`)) throw new Error(result.error ?? "无法读取 Static 状态");
+      return jsonReply(reply, 200, { ...base, ...parseStaticRuntime(result.output, resource.name), raw: result.output });
+    } catch (error) {
+      return jsonReply(reply, 200, { ...base, state: "error", error: error instanceof Error ? error.message : "节点检查失败" });
+    }
+  });
+
+  app.get<{ Params: { resourceId: string }; Querystring: { target?: string } }>("/api/statics/:resourceId/routes", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.staticProtocols.find(item => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "Static 资源不存在");
+    const node = findNode(state, resource.nodeId);
+    const table = resource.table?.name ?? (resource.family === "ipv4" ? "master4" : "master6");
+    if (!resource.enabled) return jsonReply(reply, 200, { resourceId: resource.id, nodeId: node.id, family: resource.family, table, routes: [], truncated: false, limit: 200 });
+    const result = await inspectProtocolRoutes(node, resource.name, resource.family, "import", { table, target: request.query.target });
+    if (!result.ok) throw routeError(502, result.error || "无法读取 Static 路由");
+    return jsonReply(reply, 200, { resourceId: resource.id, nodeId: node.id, family: resource.family, table, routes: result.routes, truncated: result.truncated, limit: result.limit });
+  });
+
+  app.get("/api/pipes/tables", async (_request, reply) => jsonReply(reply, 200, { tables: knownPipeTables(await options.store.read()) }));
+
+  app.get<{ Params: { resourceId: string } }>("/api/pipes/:resourceId/runtime", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.pipeProtocols.find((item) => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "Pipe 资源不存在");
+    const nodes = await Promise.all(state.nodes.filter((node) => resourceAppliesToNode(resource, node.id)).map(async (node): Promise<PipeRuntimeResponse["nodes"][number]> => {
+      const empty = { table: null, state: null, imported: null, exported: null };
+      if (!resource.enabled) return { nodeId: node.id, lastCheckedAt: new Date().toISOString(), ok: true, state: "disabled", primary: { ...empty }, peer: { ...empty }, error: null, raw: "" };
+      try {
+        const result = await inspectProtocolDetails(node, resource.name);
+        if (!result.ok && !/no protocols? match(?:es)?|no such protocol/i.test(`${result.error} ${result.output}`)) throw new Error(result.error ?? "无法读取 Pipe 状态");
+        return { nodeId: node.id, lastCheckedAt: new Date().toISOString(), ok: true, ...parsePipeRuntime(result.output, resource.name), error: null, raw: result.output };
+      } catch (error) {
+        return { nodeId: node.id, lastCheckedAt: new Date().toISOString(), ok: false, state: "error", primary: { ...empty }, peer: { ...empty }, error: error instanceof Error ? error.message : "节点查询失败", raw: "" };
+      }
+    }));
+    return jsonReply(reply, 200, { resourceId: resource.id, lastCheckedAt: new Date().toISOString(), nodes });
+  });
+
+  app.get<{ Params: { resourceId: string }; Querystring: { nodeId?: string; side?: string; target?: string } }>("/api/pipes/:resourceId/routes", async (request, reply) => {
+    const state = await options.store.read();
+    const resource = state.pipeProtocols.find((item) => item.id === request.params.resourceId);
+    if (!resource) throw routeError(404, "Pipe 资源不存在");
+    const node = findNode(state, String(request.query.nodeId ?? ""));
+    if (!resourceAppliesToNode(resource, node.id)) throw routeError(400, "该节点不在 Pipe 的作用域内");
+    const side = request.query.side;
+    if (side !== "primary" && side !== "peer") throw routeError(400, "路由表侧必须是 primary 或 peer");
+    const table = side === "primary" ? resource.table.name : resource.peerTable.name;
+    const result = await inspectProtocolRoutes(node, resource.name, resource.family, "import", { table, tableOnly: true, target: request.query.target });
+    if (!result.ok) throw routeError(502, result.error || "无法读取 Pipe 路由表");
+    return jsonReply(reply, 200, { resourceId: resource.id, nodeId: node.id, family: resource.family, side, table, routes: result.routes, truncated: result.truncated, limit: result.limit });
   });
 
   app.get<{ Params: { nodeId: string } }>("/api/nodes/:nodeId/runtime", async (request, reply) => {
@@ -217,6 +382,10 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
     const state = await options.store.read();
     const session = state.sessions.find((item) => item.id === request.params.sessionId);
     if (!session) throw routeError(404, "会话不存在");
+    if (!session.enabled) return jsonReply(reply, 200, {
+      session: { id: session.id, protocolName: session.protocolName },
+      ok: true, output: "配置已停用；不会生成或加载此 BGP 协议。", error: null,
+    } satisfies ProtocolDetailsResponse);
     const node = findNode(state, session.nodeId);
     const result = await inspectProtocolDetails(node, session.protocolName);
     const payload: ProtocolDetailsResponse = {

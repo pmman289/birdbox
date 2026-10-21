@@ -20,6 +20,7 @@ import {
   validateInventory,
 } from "./bird.js";
 import type { BirdboxError, StateDatabase } from "./database.js";
+import { assertExplicitProtocolResources } from "./inventory-safety.js";
 
 type LegacyRecord = Record<string, unknown>;
 
@@ -50,12 +51,21 @@ function normalizeInventory(value: unknown): Inventory {
   return validateInventory(value) as Inventory;
 }
 
-function normalizeStoredInventory(value: unknown): Inventory {
-  return validateInventory(value, { allowInvalidResourceDependencies: true }) as Inventory;
+function normalizeStoredInventory(value: unknown, original: unknown = value): Inventory {
+  const inventory = validateInventory(value, { allowInvalidResourceDependencies: true }) as Inventory;
+  if (original !== value) assertExplicitProtocolResources(original, inventory);
+  return inventory;
+}
+
+function sameStoredValue(left: unknown, right: unknown): boolean {
+  // MySQL JSON omits undefined object fields (for example an unset OSPF BFD
+  // override). Compare persisted values, otherwise every restart advances CAS
+  // and a committed write with a lost response can be mistaken for a failure.
+  return isDeepStrictEqual(JSON.parse(JSON.stringify(left)), JSON.parse(JSON.stringify(right)));
 }
 
 const INVENTORY_STATE_KEY = "inventory";
-const CURRENT_INVENTORY_VERSION = 28;
+const CURRENT_INVENTORY_VERSION = 31;
 const NORMALIZATION_RETRIES = 3;
 
 function inventoryVersionError(version: number): BirdboxError {
@@ -88,6 +98,19 @@ function upgradeResourceOrder(resources: unknown): LegacyRecord[] {
       const { order, ...upgraded } = resource;
       return upgraded;
     });
+}
+
+function upgradeKernelProtocols(resources: unknown): LegacyRecord[] {
+  return recordArray(resources, "Kernel 资源").map((resource) => {
+    // Persisted resources with omitted policies used the generic channel
+    // defaults. Only resource creation may use new Kernel defaults: canonical
+    // new resources already contain explicit policies before they are saved.
+    return {
+      ...resource,
+      importPolicy: resource.importPolicy ?? { mode: "form", steps: [], filterId: null, formAction: "all" },
+      exportPolicy: resource.exportPolicy ?? { mode: "form", steps: [], filterId: null, formAction: "none" },
+    };
+  });
 }
 
 function upgradeIbgpDomains(domainsInput: unknown, sourceVersion: unknown): LegacyRecord[] {
@@ -242,6 +265,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
       })),
       functions: upgradeResourceOrder(source.functions),
       filters: upgradeResourceOrder(source.filters),
+      kernelProtocols: upgradeKernelProtocols(source.kernelProtocols),
       rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
       staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
       sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
@@ -311,6 +335,7 @@ function upgradeInventory(input: unknown): LegacyRecord {
     ],
     functions: upgradeResourceOrder(source.functions),
     filters: upgradeResourceOrder(source.filters),
+    kernelProtocols: upgradeKernelProtocols(source.kernelProtocols),
     rpki: recordArray(source.rpki, "RPKI 资源").map((item) => ({ ...item })),
     staticProtocols: migrated.staticProtocols.map((item) => ({ ...item, routeFilters: item.routeFilters ?? {} })),
     sourcePolicies: recordArray(source.sourcePolicies, "源地址出口映射").map((item) => ({ ...item })),
@@ -379,8 +404,8 @@ export class InventoryStore {
     for (let attempt = 0; attempt < NORMALIZATION_RETRIES; attempt += 1) {
       let record = await this.database.readState<unknown>(this.stateKey);
       if (!record) throw new Error("Birdbox 库存状态不存在");
-      const normalized = normalizeStoredInventory(upgradeInventory(record.value));
-      if (isDeepStrictEqual(normalized, record.value)) return this.#track(normalized, record.revision);
+      const normalized = normalizeStoredInventory(upgradeInventory(record.value), record.value);
+      if (sameStoredValue(normalized, record.value)) return this.#track(normalized, record.revision);
       try {
         record = await this.database.replaceState<Inventory>(this.stateKey, record.revision, normalized);
         return this.#track(normalized, record.revision);
@@ -393,7 +418,8 @@ export class InventoryStore {
 
   async loadLegacyInventory(): Promise<Inventory> {
     try {
-      return normalizeStoredInventory(upgradeInventory(JSON.parse(await fs.readFile(this.inventoryPath, "utf8"))));
+      const original = JSON.parse(await fs.readFile(this.inventoryPath, "utf8"));
+      return normalizeStoredInventory(upgradeInventory(original), original);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return this.createInitialInventory();
@@ -508,7 +534,7 @@ export class InventoryStore {
       // Confirm the durable value so callers do not roll back a committed deploy.
       try {
         const record = await this.database.readState<Inventory>(this.stateKey);
-        if (record && isDeepStrictEqual(record.value, normalized)) {
+        if (record && sameStoredValue(record.value, normalized)) {
           return this.#track(normalized, record.revision);
         }
       } catch {
@@ -522,6 +548,20 @@ export class InventoryStore {
    * deployments cannot accidentally publish an unapplied OSPF change. */
   async readOspfDrafts(): Promise<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>> {
     return (await this.database.readState<Record<string, { domain: OspfDomain; inventoryRevision: number | null; savedAt: string }>>(`${this.stateKey}_ospf_drafts`))?.value ?? {};
+  }
+
+  /** UI coordinates have their own CAS record and never invalidate a reviewed
+   * routing candidate or wait for a remote deployment. */
+  async readOspfLayouts(): Promise<Record<string, OspfDomain["layout"]>> {
+    return (await this.database.readState<Record<string, OspfDomain["layout"]>>(`${this.stateKey}_ospf_layouts`))?.value ?? {};
+  }
+
+  async saveOspfLayout(scope: string, layout: OspfDomain["layout"]): Promise<OspfDomain["layout"]> {
+    const result = await this.database.mutateState<Record<string, OspfDomain["layout"]>, OspfDomain["layout"]>(`${this.stateKey}_ospf_layouts`, {}, layouts => {
+      const merged = { ...layouts[scope], ...layout };
+      return { value: { ...layouts, [scope]: merged }, result: merged };
+    });
+    return result.result ?? {};
   }
 
   async saveOspfDraft(domain: OspfDomain, inventoryRevision: number | null): Promise<void> {
@@ -544,7 +584,7 @@ export class InventoryStore {
       this.stateKey,
       { version: CURRENT_INVENTORY_VERSION, nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sourcePolicies: [], sessions: [], ibgpDomains: [], ospfDomains: [] },
       async (current) => {
-        const draft = structuredClone(normalizeStoredInventory(upgradeInventory(current)));
+        const draft = structuredClone(normalizeStoredInventory(upgradeInventory(current), current));
         const result = await mutator(draft);
         const state = normalizeInventory(draft);
         return { value: state, result };

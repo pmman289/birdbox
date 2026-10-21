@@ -1,0 +1,58 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import Fastify from "fastify";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { MemoryDatabase } from "../../src/database.js";
+import { InventoryStore } from "../../src/store.js";
+import { DeploymentService } from "../../src/deployment-service.js";
+import { createResourceApplicationService } from "../../src/resource-application-service.js";
+import { SessionApplicationService } from "../../src/session-application-service.js";
+import { mutationRoutes } from "../../src/http/mutation-routes.js";
+import { sessionRuntimeRoutes } from "../../src/http/session-runtime-routes.js";
+import { configureAgentBroker } from "../../src/node-executor.js";
+import { configBundleForNode, findNode } from "../../src/inventory-domain.js";
+import { validateInventory } from "../../src/bird.js";
+import { DashboardService } from "../../src/dashboard-service.js";
+import { dashboardRoutes } from "../../src/http/dashboard-routes.js";
+const node = id => ({ id, name: id, transport: "agent", routerId: id === "one" ? "192.0.2.1" : "192.0.2.2", deploymentMode: "include", mainConfigPath: "/etc/bird/bird.conf", generatedConfigPath: "/var/lib/birdbox/generated.conf", socketPath: "/run/bird.ctl" });
+const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
+export async function setupResourceApi(t, { inventory } = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-protocol-api-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", inventory ?? validateInventory({ nodes: [node("one"), node("two")] }));
+  const store = new InventoryStore({ database, dataDir: root, nodesPath: path.join(root, "nodes.json"), legacySessionPath: path.join(root, "session.json") });
+  const calls = []; const failures = new Map(); const outputs = new Map();
+  configureAgentBroker({ async dispatch(nodeId, method, params) {
+    calls.push({ nodeId, method, params });
+    const configuredFailure = failures.get(`${nodeId}:${method}`);
+    const failure = typeof configuredFailure === 'function' ? configuredFailure(params) : configuredFailure;
+    if (failure) return { ok: false, stdout: "", stderr: failure };
+    if (outputs.has(`${nodeId}:${method}`)) return { ok: true, stdout: outputs.get(`${nodeId}:${method}`), stderr: "" };
+    if (method === "bird.protocol") return { ok: true, stdout: "1002-api_static Static master4 up 00:00\n1006-  Channel ipv4\n    Table: master4\n    Routes: 1 imported, 0 exported", stderr: "" };
+    if (method === "bird.routes") return { ok: true, stdout: `Table ${params.table}:\n198.51.100.0/24 blackhole [api_static 00:00] * (200)\n Type: static univ`, stderr: "" };
+    return { ok: true, stdout: "", stderr: "" };
+  } });
+  t.after(() => configureAgentBroker(null));
+  await store.initialize();
+  const lock = operation => database.withLock("protocol_test", operation);
+  const deploymentService = new DeploymentService({ database, store, withDeploymentLock: lock, configForNode: configBundleForNode, emptyConfigForNode: () => ({ main: "", resources: [] }), findNode, validationError: (_config, diagnostic) => String(diagnostic), addEvent: () => {}, fail });
+  await deploymentService.initialize();
+  let sequence = 0;
+  const serviceOptions = { store, deploymentService, nodeOnboarding: {}, withDeploymentLock: lock, makeId: prefix => `${prefix}_${++sequence}`, addEvent: () => ({}), getEvents: () => [] };
+  const sessions = new SessionApplicationService(serviceOptions);
+  const service = createResourceApplicationService({ ...serviceOptions, sessions });
+  const app = Fastify();
+  app.setErrorHandler((error, _request, reply) => reply.code(error.status ?? 500).send({ error: error.message, code: error.code, deployment: error.deployment }));
+  const options = { authStore: { isAuthenticated: async token => token === "test" }, secureCookieSetting: false };
+  const dashboard = new DashboardService({ getEvents: () => [] });
+  await app.register(dashboardRoutes, { ...options, ping: () => database.ping(), isDeploymentLocked: () => false, loadDashboard: async (nodeId, peerId) => dashboard.load(await store.read(), nodeId, peerId) });
+  await app.register(mutationRoutes, { ...options, service, agentBroker: {} });
+  await app.register(sessionRuntimeRoutes, { ...options, store });
+  t.after(() => app.close());
+  const request = (method, url, payload) => app.inject({ method, url, payload, headers: { cookie: "birdbox_session=test" } });
+  // Cookie name follows the shared authentication contract.
+  return { database, store, calls, failures, outputs, service, deploymentService, request, app, lock };
+}

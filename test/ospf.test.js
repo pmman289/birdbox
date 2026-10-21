@@ -715,7 +715,7 @@ test("compact editor updates replace structured projections in server previews",
   const saved = toOspfDomainModel(normalizeOspfDomain(domain()));
   const current = validateInventory({ version: 28, nodes: [node("n1", "192.0.2.1"), { ...node("n2", "192.0.2.2"), transport: "agent" }], ospfDomains: [saved] });
   const service = createResourceApplicationService({
-    store: { read: async () => current, revisionOf: () => 4 },
+    store: { read: async () => current, readOspfDrafts: async () => ({}), revisionOf: () => 4 },
     deploymentService: { mutateAndApply: () => { throw new Error("preview must not deploy"); } },
     nodeOnboarding: {}, sessions: {}, withDeploymentLock: async (operation) => operation(),
     makeId: (prefix) => `${prefix}_test`, addEvent: () => ({}), getEvents: () => [],

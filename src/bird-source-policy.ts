@@ -535,10 +535,10 @@ export function sourcePolicyManualPlan(
     : null;
   const warning = upgradeRequired
     ? `节点“${node.name}”仍使用旧 SSH 管理方式。请先升级为 Agent，源地址出口系统规则才能自动下发。`
-    : null;
-  const instructions = management !== "manual"
+    : management === "local" ? `本机节点“${node.name}”的 BIRD 配置由 Birdbox 下发；系统 ip rule 需按下方计划手工执行。` : null;
+  const instructions = management === "agent"
     ? [
-        management === "agent" ? "系统 ip rule 将由节点 Agent 自动下发并保持幂等。" : "本机节点将由 Birdbox 自动执行系统规则。",
+        "系统 ip rule 将由节点 Agent 自动下发并保持幂等。",
         "可使用节点运行详情核对 ip rule 与策略路由表。",
       ]
     : platform === "openwrt"

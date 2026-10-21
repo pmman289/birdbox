@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
-import type { ResourceDeleteResponse, ResourceMutationResponse, StaticMutationRequest } from "@birdbox/contracts/api";
+import type { ResourceDeleteResponse, ResourceMutationResponse, StaticMutationRequest, StaticPreviewResponse } from "@birdbox/contracts/api";
 import type {
   AddressFamily,
   CidrDefine,
   StaticProtocol,
   StaticRouteFilter,
-  StaticRouteFilterOperation,
+  StaticRoute,
+  StaticRouteAction,
+  StaticRouteForwarding,
 } from "@birdbox/contracts/inventory";
 import { resourceAppliesToNode } from "@birdbox/contracts/resource-scope";
 
@@ -19,14 +21,11 @@ import { dispatchToast } from "../shared/events";
 import { clearFormValidation, markFieldInvalid, presentFormError, validateForm } from "../shared/form-validation";
 import { uniqueBirdName } from "../shared/resource-names";
 import { resourceScopeShortLabel } from "../shared/resource-scope";
-import StaticRouteOperationRow from "./StaticRouteOperationRow.vue";
+import StaticRoutesEditor from "./StaticRoutesEditor.vue";
+import PolicyEditor from "../sessions/PolicyEditor.vue";
+import { defineRoute, routeForwarding } from "../shared/static-route-sources";
 
-type RouteActionKind = "blackhole" | "reject" | "unreachable" | "prohibit" | "via";
-type OperationKind = StaticRouteFilterOperation["type"];
-
-interface StaticDraft extends Omit<StaticMutationRequest, "routeActions" | "routeFilters" | "action"> {
-  action: string | null;
-}
+type StaticDraft = Omit<StaticMutationRequest, "routeActions" | "routeFilters">;
 
 interface ReferenceItem {
   id: string;
@@ -40,16 +39,20 @@ interface ReferenceItem {
 
 const dialog = ref<HTMLDialogElement | null>(null);
 const form = ref<HTMLFormElement | null>(null);
-const customEditor = ref<HTMLTextAreaElement | null>(null);
 const editingId = ref<string | null>(null);
 const pending = ref(false);
 const nameEdited = ref(false);
-const selectedPrefix = ref<string | null>(null);
-const bulkAction = ref<RouteActionKind>("blackhole");
-const bulkVia = ref("");
-const addOperationType = ref<OperationKind>("set");
-const referenceSearch = ref("");
-const routeActions = reactive<Record<string, string>>({});
+const routeEditorVersion = ref(0);
+const serverPreview = ref<StaticPreviewResponse | null>(null);
+const previewPending = ref(false), previewError = ref("");
+const tableCatalog = ref<Array<{ nodeId: string; name: string; family: AddressFamily }>>([]);
+let previewGeneration = 0, catalogGeneration = 0, previewController: AbortController | null = null, savedSignature = "";
+
+const routeActions = reactive<Record<string, StaticRouteAction>>({});
+const defineDrafts = reactive<Record<string, StaticRoute>>({});
+const defineDefaults = reactive<Record<string, StaticRouteAction>>({});
+const originalDefineId = ref<string | null>(null);
+const hydrating = ref(false);
 const routeFilters = reactive<Record<string, StaticRouteFilter>>({});
 const { dashboard } = useDashboardStore();
 
@@ -64,6 +67,7 @@ const draft = reactive<StaticDraft>({
   export: "none",
   raw: "",
   enabled: true,
+  routes: [], table: { name: "master4", source: "existing" }, igpTable: null, checkLink: false,
 });
 
 const editing = computed(() => editingId.value !== null);
@@ -76,9 +80,6 @@ const compatibleDefines = computed<CidrDefine[]>(() => (inventory.value?.defines
 ));
 const selectedDefine = computed(() => compatibleDefines.value.find((resource) => resource.id === draft.defineId) ?? null);
 const routeEntries = computed(() => (selectedDefine.value?.entries ?? []).filter((entry) => /^[0-9A-Fa-f:.]+\/\d{1,3}$/.test(entry)));
-const selectedFilter = computed(() => selectedPrefix.value ? ensureFilter(selectedPrefix.value) : null);
-const selectedAction = computed(() => selectedPrefix.value ? actionParts(ensureAction(selectedPrefix.value)) : { action: "blackhole" as RouteActionKind, via: "" });
-
 const references = computed<ReferenceItem[]>(() => {
   const current = inventory.value;
   if (!current) return [];
@@ -86,31 +87,7 @@ const references = computed<ReferenceItem[]>(() => {
     ...current.defines.filter((item) => item.enabled && resourceAppliesToNode(item, draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: item.name, insertion: item.name, kind: "Define" as const, nodeIds: item.nodeIds })),
     ...current.functions.filter((item) => item.enabled && item.callable && resourceAppliesToNode(item, draft.nodeId)).map((item) => ({ id: item.id, label: item.label, name: item.name, symbol: `${item.name}()`, insertion: `${item.name}()`, kind: "Function" as const, nodeIds: item.nodeIds })),
   ];
-  const query = referenceSearch.value.trim().toLocaleLowerCase();
-  if (!query) return items;
-  return items.filter((item) => [item.label, item.name, item.kind, item.symbol, resourceScopeShortLabel(item)].join(" ").toLocaleLowerCase().includes(query));
-});
-
-const preview = computed(() => {
-  const prefix = selectedPrefix.value;
-  const filter = selectedFilter.value;
-  if (!prefix || !filter) return "";
-  const routeAction = ensureAction(prefix);
-  const hasBlock = filter.operations.length > 0 || Boolean(filter.custom);
-  const lines = [`route ${prefix} ${routeAction}${hasBlock ? " {" : ";"}`];
-  for (const operation of filter.operations) {
-    if (operation.type === "set") {
-      lines.push(`  ${operation.attribute} = ${operation.attribute === "bgp_origin" ? `ORIGIN_${operation.value.toUpperCase()}` : operation.value};`);
-    } else if (operation.type === "community") {
-      const attribute = operation.list === "large" ? "bgp_large_community" : "bgp_community";
-      lines.push(operation.operation === "empty" ? `  ${attribute}.empty;` : `  ${attribute}.${operation.operation}((${operation.value.join(", ")}));`);
-    } else {
-      for (let count = 0; count < operation.count; count += 1) lines.push(`  bgp_path.prepend(${operation.asn});`);
-    }
-  }
-  if (filter.custom) lines.push(...filter.custom.split("\n").map((line) => `  ${line}`));
-  if (hasBlock) lines.push("};");
-  return lines.join("\n");
+  return items;
 });
 
 const fieldMappings = [
@@ -119,9 +96,7 @@ const fieldMappings = [
   [/Static 协议名称|BIRD 全局标识符冲突/, "staticName"],
   [/Static 地址族/, "staticFamily"],
   [/Static.*CIDR Define/, "staticDefineId"],
-  [/Static CIDR .*via 地址|静态路由动作/, "staticRouteVia"],
-  [/Static CIDR .*快捷操作/, "staticFilterOperationList"],
-  [/Static CIDR .*自定义 per-route/, "staticRouteCustom"],
+
   [/Static Import/, "staticImport"],
   [/Static Export/, "staticExport"],
   [/Static 资源至少|Static 指令/, "staticRaw"],
@@ -135,38 +110,37 @@ function cloneFilter(filter: StaticRouteFilter | undefined): StaticRouteFilter {
   return cloneReactive(filter ?? emptyFilter());
 }
 
-function cloneOperation(operation: StaticRouteFilterOperation): StaticRouteFilterOperation {
-  return cloneReactive(operation);
-}
-
 function clearRecord<Value>(record: Record<string, Value>): void {
   for (const key of Object.keys(record)) delete record[key];
 }
 
-function actionParts(action: string): { action: RouteActionKind; via: string } {
-  const match = /^via(?:\s+(.*))?$/i.exec(action);
-  return match ? { action: "via", via: match[1] ?? "" } : { action: (action || "blackhole") as RouteActionKind, via: "" };
-}
-
-function ensureAction(prefix: string): string {
-  routeActions[prefix] ??= draft.action ?? "blackhole";
-  return routeActions[prefix]!;
-}
-
-function ensureFilter(prefix: string): StaticRouteFilter {
-  routeFilters[prefix] ??= emptyFilter();
-  return routeFilters[prefix]!;
-}
-
-function syncRoutes(): void {
-  if (draft.defineId && !draft.action) draft.action = "blackhole";
-  if (!draft.defineId) draft.action = null;
-  const entries = routeEntries.value;
-  for (const prefix of entries) {
-    ensureAction(prefix);
-    ensureFilter(prefix);
+function generatedRoute(prefix: string): StaticRoute {
+  const defineId = draft.defineId!;
+  const key = `${defineId}:${prefix}`;
+  if (!defineDrafts[key]) {
+    const original = defineId === originalDefineId.value;
+    defineDrafts[key] = defineRoute(prefix, defineId, (original ? routeActions[prefix] : undefined) ?? defineDefaults[defineId] ?? "blackhole", (original ? routeFilters[prefix] : undefined) ?? emptyFilter());
   }
-  selectedPrefix.value = selectedPrefix.value && entries.includes(selectedPrefix.value) ? selectedPrefix.value : (entries[0] ?? null);
+  return defineDrafts[key]!;
+}
+const generatedRoutes = computed(() => !hydrating.value && draft.defineId ? routeEntries.value.map(generatedRoute) : []);
+const origins = computed(() => Object.fromEntries(generatedRoutes.value.map(route => [route.id, selectedDefine.value?.label ?? selectedDefine.value?.name ?? "CIDR Define"])));
+const allRoutes = computed<StaticRoute[]>({
+  get: () => [...generatedRoutes.value, ...draft.routes ?? []],
+  set: routes => {
+    const generatedIds = new Set(generatedRoutes.value.map(route => route.id));
+    draft.routes = routes.filter(route => !generatedIds.has(route.id));
+    for (const route of routes.filter(route => generatedIds.has(route.id))) defineDrafts[`${draft.defineId}:${route.prefix}`] = route;
+  },
+});
+function setDefaultForwarding(value: StaticRouteForwarding): void {
+  if (draft.defineId) defineDefaults[draft.defineId] = { ...cloneReactive(value), enabled: true };
+}
+function syncRoutes(): void {
+  if (draft.defineId) {
+    defineDefaults[draft.defineId] ??= "blackhole";
+    routeEntries.value.forEach(generatedRoute);
+  }
 }
 
 function syncName(): void {
@@ -175,116 +149,22 @@ function syncName(): void {
 }
 
 function changeFamily(): void {
+  if (draft.table && ["master4", "master6"].includes(draft.table.name)) draft.table.name = draft.family === "ipv4" ? "master4" : "master6";
   if (!compatibleDefines.value.some((resource) => resource.id === draft.defineId)) draft.defineId = null;
   if (!editing.value && !nameEdited.value) syncName();
   syncRoutes();
 }
 
-function defaultOperation(type: OperationKind): StaticRouteFilterOperation {
-  if (type === "community") return { type, list: "standard", operation: "add", value: [65000, 100] };
-  if (type === "prepend") return { type, asn: 65000, count: 1 };
-  return { type: "set", attribute: "preference", value: 100 };
-}
-
-function operationSummary(filter: StaticRouteFilter): string {
-  return `${filter.operations.length ? `${filter.operations.length} 项` : "无快捷操作"}${filter.custom ? " · 自定义" : ""}`;
-}
-
-function setSelectedAction(action: RouteActionKind, via: string): void {
-  if (!selectedPrefix.value) return;
-  routeActions[selectedPrefix.value] = action === "via" ? `via ${via}` : action;
-}
-
-function addOperation(): void {
-  const filter = selectedFilter.value;
-  if (!filter) return;
-  if (filter.operations.length >= 32) {
-    dispatchToast("每条 CIDR 最多 32 项快捷操作", "error");
-    return;
-  }
-  filter.operations.push(defaultOperation(addOperationType.value));
-}
-
-function updateOperation(index: number, operation: StaticRouteFilterOperation): void {
-  const filter = selectedFilter.value;
-  if (filter) filter.operations[index] = operation;
-}
-
-function removeOperation(index: number): void {
-  selectedFilter.value?.operations.splice(index, 1);
-}
-
-function moveOperation(index: number, direction: "up" | "down"): void {
-  const operations = selectedFilter.value?.operations;
-  if (!operations) return;
-  const target = index + (direction === "up" ? -1 : 1);
-  if (target < 0 || target >= operations.length) return;
-  const current = operations[index];
-  const other = operations[target];
-  if (!current || !other) return;
-  operations[index] = other;
-  operations[target] = current;
-}
-
-function applyOperationToAll(index: number): void {
-  const source = selectedFilter.value?.operations[index];
-  if (!source || !selectedPrefix.value) return;
-  const targets = routeEntries.value.filter((prefix) => prefix !== selectedPrefix.value);
-  if (!targets.length) {
-    dispatchToast("当前 Define 只有一个可编辑 CIDR", "error");
-    return;
-  }
-  if (!window.confirm(`将第 ${index + 1} 项快捷操作追加到其余 ${targets.length} 条 CIDR，继续吗？`)) return;
-  const full = targets.find((prefix) => ensureFilter(prefix).operations.length >= 32);
-  if (full) {
-    dispatchToast(`${full} 已达到 32 项上限`, "error");
-    return;
-  }
-  for (const prefix of targets) ensureFilter(prefix).operations.push(cloneOperation(source));
-}
-
-function applyBulkAction(): void {
-  if (!draft.defineId) return;
-  if (bulkAction.value === "via" && !bulkVia.value.trim()) {
-    const input = form.value?.querySelector<HTMLInputElement>("#staticBulkVia");
-    if (form.value && input) markFieldInvalid(form.value, input);
-    dispatchToast("请输入统一使用的 via 地址", "error");
-    return;
-  }
-  if (!window.confirm(`将统一修改 ${routeEntries.value.length} 条 CIDR 的转发动作，继续吗？`)) return;
-  const action = bulkAction.value === "via" ? `via ${bulkVia.value.trim()}` : bulkAction.value;
-  draft.action = action;
-  for (const prefix of routeEntries.value) routeActions[prefix] = action;
-}
-
-function copyBlockToAll(): void {
-  if (!selectedPrefix.value || !window.confirm(`将当前 per-route 块复制到 ${routeEntries.value.length} 条 CIDR，继续吗？`)) return;
-  const source = cloneFilter(ensureFilter(selectedPrefix.value));
-  for (const prefix of routeEntries.value) routeFilters[prefix] = cloneFilter(source);
-}
-
-function clearBlocks(): void {
-  if (!window.confirm(`将清空 ${routeEntries.value.length} 条 CIDR 的快捷操作和自定义块，继续吗？`)) return;
-  for (const prefix of routeEntries.value) routeFilters[prefix] = emptyFilter();
-}
-
-function insertReference(item: ReferenceItem): void {
-  const textarea = customEditor.value;
-  const filter = selectedFilter.value;
-  if (!textarea || !filter) return;
-  const start = textarea.selectionStart;
-  const end = textarea.selectionEnd;
-  textarea.setRangeText(item.insertion, start, end, "end");
-  filter.custom = textarea.value;
-  textarea.focus();
-}
-
 function open(resource: StaticProtocol | null): void {
+  if (pending.value) return;
   const selectedNodeId = resource?.nodeId ?? dashboard.value?.node?.id ?? nodes.value[0]?.id ?? "";
   if (!selectedNodeId) {
     dispatchToast("请先添加受管节点", "error");
     return;
   }
+  invalidatePreview(); previewError.value = ""; routeEditorVersion.value++;
+  // Populate all source snapshots before reactive readers can initialize route drafts.
+  hydrating.value = true;
   editingId.value = resource?.id ?? null;
   Object.assign(draft, {
     nodeId: selectedNodeId,
@@ -297,32 +177,39 @@ function open(resource: StaticProtocol | null): void {
     export: resource?.export ?? "none",
     raw: resource?.raw ?? "",
     enabled: resource?.enabled ?? true,
+    routes: cloneReactive(resource?.routes ?? []),
+    table: cloneReactive(resource?.table ?? { name: resource?.family === "ipv6" ? "master6" : "master4", source: "existing" }),
+    igpTable: resource?.igpTable ?? null, checkLink: resource?.checkLink ?? false,
+    importPolicy: cloneReactive(resource?.importPolicy ?? { mode: "form", formAction: resource?.import ?? "all", steps: [], filterId: null }),
   });
+  clearRecord(defineDrafts); clearRecord(defineDefaults); originalDefineId.value = resource?.defineId ?? null;
+  if (resource?.defineId) defineDefaults[resource.defineId] = cloneReactive(resource.action ?? "blackhole");
   clearRecord(routeActions);
   clearRecord(routeFilters);
   Object.assign(routeActions, cloneReactive(resource?.routeActions ?? {}));
   for (const [prefix, filter] of Object.entries(resource?.routeFilters ?? {})) routeFilters[prefix] = cloneFilter(filter);
-  const defaultAction = resource?.action ?? Object.values(resource?.routeActions ?? {})[0] ?? (resource?.defineId ? "blackhole" : "");
-  const parts = actionParts(defaultAction);
-  bulkAction.value = parts.action;
-  bulkVia.value = parts.via;
-  selectedPrefix.value = null;
-  referenceSearch.value = "";
   nameEdited.value = Boolean(resource);
   syncRoutes();
+  hydrating.value = false;
   if (form.value) clearFormValidation(form.value);
+  savedSignature = signature.value;
+  dialog.value?.querySelectorAll("details[open]").forEach(item => item.removeAttribute("open"));
   if (!dialog.value?.open) dialog.value?.showModal();
+  tableCatalog.value = []; const request = ++catalogGeneration;
+  void api<{ tables: typeof tableCatalog.value }>("/api/pipes/tables").then(result => { if (request === catalogGeneration && dialog.value?.open) tableCatalog.value = result.tables; }).catch(() => {});
   dialog.value?.scrollTo({ top: 0 });
-  void nextTick(() => document.querySelector<HTMLInputElement>("#staticLabel")?.focus({ preventScroll: true }));
+  void nextTick(() => { dialog.value?.querySelector(".static-content")?.scrollTo({ top: 0 }); document.querySelector<HTMLInputElement>("#staticLabel")?.focus({ preventScroll: true }); });
 }
 
 function close(): void {
-  if (!pending.value) dialog.value?.close();
+  if (pending.value) return;
+  if (signature.value !== savedSignature && !window.confirm("放弃尚未保存的 Static 修改？")) return;
+  catalogGeneration++; invalidatePreview(); dialog.value?.close();
 }
 
 function payload(): StaticMutationRequest {
-  const entries = routeEntries.value;
-  const action = draft.defineId ? (draft.action ?? ensureAction(entries[0] ?? "")) : null;
+  const generated = generatedRoutes.value;
+  const action = draft.defineId ? defineDefaults[draft.defineId] ?? "blackhole" : null;
   return {
     nodeId: draft.nodeId,
     label: draft.label,
@@ -330,37 +217,68 @@ function payload(): StaticMutationRequest {
     family: draft.family,
     defineId: draft.defineId,
     action,
-    routeActions: draft.defineId ? Object.fromEntries(entries.map((prefix) => [prefix, ensureAction(prefix)])) : {},
-    routeFilters: draft.defineId ? Object.fromEntries(entries.map((prefix) => [prefix, cloneFilter(ensureFilter(prefix))])) : {},
+    routeActions: draft.defineId ? Object.fromEntries(generated.map(route => [route.prefix, routeForwarding(route)])) : {},
+    routeFilters: draft.defineId ? Object.fromEntries(generated.map(route => [route.prefix, cloneFilter(route.filter)])) : {},
     import: draft.import,
     export: draft.export,
     raw: draft.raw,
     enabled: draft.enabled,
+    routes: cloneReactive(draft.routes ?? []), table: cloneReactive(draft.table), igpTable: draft.igpTable || null, checkLink: draft.checkLink,
+    importPolicy: draft.importPolicy ? cloneReactive(draft.importPolicy) : undefined,
   };
+}
+
+const signature = computed(() => JSON.stringify([draft, generatedRoutes.value, defineDefaults[draft.defineId ?? ""]]));
+const tableSuggestions = computed(() => tableCatalog.value.filter(item => item.nodeId === draft.nodeId && item.family === draft.family));
+const policyFunctions = computed(() => inventory.value?.functions.filter(item => item.enabled && resourceAppliesToNode(item, draft.nodeId)) ?? []);
+const policyFilters = computed(() => inventory.value?.filters.filter(item => item.enabled && resourceAppliesToNode(item, draft.nodeId)) ?? []);
+function invalidatePreview() { previewGeneration++; previewController?.abort(); previewController = null; previewPending.value = false; serverPreview.value = null; }
+watch(signature, () => {
+  invalidatePreview();
+  for (const id of ["staticDefineId", "staticRaw"]) form.value?.querySelector<HTMLInputElement>(`#${id}`)?.setCustomValidity("");
+}, { flush: "sync" });
+async function inspect(): Promise<boolean> {
+  if (!form.value || !validateForm(form.value)) return false;
+  invalidatePreview(); const request = previewGeneration; previewController = new AbortController(); const signal = previewController.signal;
+  previewPending.value = true; previewError.value = "";
+  try {
+    const result = await api<StaticPreviewResponse>("/api/statics/preview", { method: "POST", body: JSON.stringify({ ...payload(), ...(editingId.value ? { id: editingId.value } : {}) }), signal, timeoutMs: 120_000, mutationWait: false });
+    if (request !== previewGeneration || signal.aborted) return false;
+    serverPreview.value = result; await nextTick();
+    const content = dialog.value?.querySelector<HTMLElement>(".static-content"), panel = dialog.value?.querySelector<HTMLElement>("#staticServerPreview");
+    if (content && panel) content.scrollTop += panel.getBoundingClientRect().top - content.getBoundingClientRect().top; return result.valid;
+  } catch (error) { if (request === previewGeneration && !signal.aborted) { previewError.value = error instanceof Error ? error.message : "预检失败"; presentFormError(form.value!, error, fieldMappings); } return false; }
+  finally { if (request === previewGeneration) previewPending.value = false; }
 }
 
 async function save(): Promise<void> {
   if (!form.value) return;
   const defineInput = form.value.querySelector<HTMLSelectElement>("#staticDefineId");
   const rawInput = form.value.querySelector<HTMLTextAreaElement>("#staticRaw");
-  defineInput?.setCustomValidity(draft.defineId && !routeEntries.value.length && !draft.raw.trim() ? "所选 CIDR Define 没有可用于 Static 的完整 CIDR 条目" : "");
-  rawInput?.setCustomValidity(!draft.defineId && !draft.raw.trim() ? "请配置标准路由或填写自定义 Static 指令" : "");
+  defineInput?.setCustomValidity(draft.defineId && !routeEntries.value.length && !draft.raw.trim() && !draft.routes?.length ? "所选 CIDR Define 没有可用于 Static 的完整 CIDR 条目" : "");
+  rawInput?.setCustomValidity(!draft.defineId && !draft.raw.trim() && !draft.routes?.length ? "请配置标准路由或填写自定义 Static 指令" : "");
   if (!validateForm(form.value)) return;
+  if (!serverPreview.value?.valid) {
+    await inspect();
+    if (serverPreview.value?.valid) previewError.value = "预检已通过，请查看下方配置变更，再点击保存并应用。";
+    return;
+  }
   pending.value = true;
+  const acceptedPreview = serverPreview.value;
   const id = editingId.value;
   try {
     const result = await api<ResourceMutationResponse<StaticProtocol>>(id ? `/api/statics/${encodeURIComponent(id)}` : "/api/statics", {
       method: id ? "PUT" : "POST",
-      body: JSON.stringify(payload()),
+      body: JSON.stringify({ ...(({ id: _id, ...rest }) => rest)(acceptedPreview.resource), previewId: acceptedPreview.previewId, inventoryRevision: acceptedPreview.inventoryRevision }),
     });
     const peerId = dashboard.value?.node?.id === draft.nodeId ? dashboard.value.selectedPeer?.id ?? null : null;
-    await loadDashboard(draft.nodeId, peerId);
+    try { await loadDashboard(draft.nodeId, peerId); } catch { dispatchToast("Static 已应用，请刷新资源列表", "error"); }
     window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: "statics" } }));
     dialog.value?.close();
     dispatchToast(`Static 已${id ? "更新" : "添加"}，${deploymentSummary(result.deployment)}`, "success");
   } catch (error) {
-    const prefixMatch = error instanceof Error ? /Static CIDR (\S+)/.exec(error.message) : null;
-    if (prefixMatch?.[1] && routeEntries.value.includes(prefixMatch[1])) selectedPrefix.value = prefixMatch[1];
+    invalidatePreview();
+    previewError.value = error instanceof Error ? error.message : "应用失败，编辑内容已保留";
     presentFormError(form.value, error, fieldMappings);
   } finally {
     pending.value = false;
@@ -373,7 +291,7 @@ async function remove(): Promise<void> {
   pending.value = true;
   try {
     const result = await api<ResourceDeleteResponse>(`/api/statics/${encodeURIComponent(resource.id)}`, { method: "DELETE" });
-    await loadDashboard(resource.nodeId, dashboard.value?.node?.id === resource.nodeId ? dashboard.value.selectedPeer?.id ?? null : null);
+    try { await loadDashboard(resource.nodeId, dashboard.value?.node?.id === resource.nodeId ? dashboard.value.selectedPeer?.id ?? null : null); } catch { dispatchToast("Static 已删除，请刷新资源列表", "error"); }
     window.dispatchEvent(new CustomEvent("birdbox:resource-tab-select", { detail: { target: "statics" } }));
     dialog.value?.close();
     dispatchToast(`Static 已删除，${deploymentSummary(result.deployment)}`, "success");
@@ -400,57 +318,70 @@ onMounted(() => {
   window.addEventListener("birdbox:resource-edit", handleEdit);
 });
 onBeforeUnmount(() => {
+  catalogGeneration++; invalidatePreview();
   window.removeEventListener("birdbox:resource-create", handleCreate);
   window.removeEventListener("birdbox:resource-edit", handleEdit);
 });
 </script>
 
 <template>
-  <dialog id="staticDialog" ref="dialog" class="editor-dialog static-editor-dialog" aria-labelledby="staticDialogTitle" @cancel.prevent="close">
+  <dialog id="staticDialog" ref="dialog" class="editor-dialog static-editor-dialog static-dialog protocol-editor" aria-labelledby="staticDialogTitle" @cancel.prevent="close">
     <form id="staticForm" ref="form" novalidate :aria-busy="pending" @submit.prevent="save">
-      <div class="dialog-head"><span class="dialog-icon">S</span><div><p class="eyebrow">BIRD Static</p><h2 id="staticDialogTitle">{{ editing ? "编辑 Static 资源" : "添加 Static 资源" }}</h2></div></div>
-      <div class="dialog-grid">
-        <div class="field full-width"><label for="staticNodeId">所属节点</label><select id="staticNodeId" v-model="draft.nodeId" required :disabled="editing"><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }}</option></select></div>
-        <div class="field"><label for="staticLabel">显示名称</label><input id="staticLabel" v-model.trim="draft.label" maxlength="80" required @input="syncName"></div>
-        <div class="field"><label for="staticName">BIRD 名称（自动，可编辑）</label><input id="staticName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required @input="nameEdited = true"></div>
-        <div class="field"><label for="staticFamily">地址族</label><select id="staticFamily" v-model="draft.family" @change="changeFamily"><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></select></div>
-        <div class="field"><label for="staticDefineId">CIDR Define</label><select id="staticDefineId" v-model="draft.defineId"><option :value="null">不创建标准路由</option><option v-for="resource in compatibleDefines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource, draft.nodeId) }}</option></select></div>
-        <div class="field"><label for="staticImport">Static Import</label><select id="staticImport" v-model="draft.import"><option value="all">all</option><option value="none">none</option></select></div>
-        <div class="field"><label for="staticExport">Static Export</label><select id="staticExport" v-model="draft.export"><option value="none">none</option><option value="all">all</option></select></div>
-        <section v-if="draft.defineId" id="staticRouteActionsSection" class="static-route-editor full-width" aria-labelledby="staticRouteActionsTitle">
-          <div class="static-route-editor-head"><div><h3 id="staticRouteActionsTitle">CIDR 条目与 per-route 块</h3><small id="staticRouteActionSummary">{{ routeEntries.length ? `已筛选 ${routeEntries.length} 条完整 CIDR` : "该 Define 没有完整 CIDR 条目" }}</small></div></div>
-          <div class="static-route-bulk">
-            <div class="field"><label for="staticBulkAction">统一设置动作</label><select id="staticBulkAction" v-model="bulkAction"><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option><option value="via">via</option></select></div>
-            <div v-if="bulkAction === 'via'" id="staticBulkViaField" class="field"><label for="staticBulkVia">via 地址</label><input id="staticBulkVia" v-model.trim="bulkVia" :placeholder="draft.family === 'ipv6' ? '2001:db8::1' : '198.51.100.1'" required></div>
-            <button id="applyStaticBulkActionButton" class="secondary-button" type="button" @click="applyBulkAction">统一转发动作</button>
-            <button id="copyStaticRouteBlockButton" class="secondary-button" type="button" :disabled="!selectedPrefix" @click="copyBlockToAll">复制当前块到全部</button>
-            <button id="clearStaticRouteBlocksButton" class="text-danger-button" type="button" @click="clearBlocks">清空全部块</button>
+      <div class="dialog-head protocol-dialog-head"><span class="dialog-icon">S</span><div><p class="eyebrow">BIRD Static</p><h2 id="staticDialogTitle">{{ editing ? "编辑 Static 资源" : "添加 Static 资源" }}</h2><p class="protocol-description">选择节点与路由表，添加路由，预检后确认应用。</p></div><button type="button" class="secondary-button compact-command protocol-close" aria-label="关闭 Static 编辑器" :disabled="pending" @click="close">关闭</button></div>
+      <div class="static-content"><fieldset class="static-fields" :disabled="pending">
+        <section class="protocol-section" aria-labelledby="staticBasicsTitle">
+          <div class="protocol-section-title"><span>1</span><div><h3 id="staticBasicsTitle">基本信息</h3><p>此资源只应用到所选节点。</p></div></div>
+          <div class="dialog-grid">
+            <div class="field"><label for="staticLabel">显示名称</label><input id="staticLabel" v-model.trim="draft.label" maxlength="80" required @input="syncName"></div>
+            <div class="field"><label for="staticName">BIRD 名称（自动，可编辑）</label><input id="staticName" v-model.trim="draft.name" pattern="[A-Za-z_][A-Za-z0-9_]*" maxlength="64" required @input="nameEdited = true"></div>
+            <div class="field"><label for="staticNodeId">所属节点</label><select id="staticNodeId" v-model="draft.nodeId" required :disabled="editing"><option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.name }}</option></select></div>
+            <div class="field"><label for="staticFamily">地址族</label><select id="staticFamily" v-model="draft.family" @change="changeFamily"><option value="ipv4">IPv4</option><option value="ipv6">IPv6</option></select></div>
           </div>
-          <div class="static-route-workspace">
-            <div id="staticRouteActionList" class="static-route-action-list" role="listbox" aria-label="Static CIDR 条目">
-              <button v-for="prefix in routeEntries" :key="prefix" class="static-route-row" :class="{ active: prefix === selectedPrefix }" type="button" role="option" :aria-selected="prefix === selectedPrefix" :data-static-route-prefix="prefix" @click="selectedPrefix = prefix"><code class="static-route-prefix">{{ prefix }}</code><small>{{ ensureAction(prefix) }}</small><span>{{ operationSummary(ensureFilter(prefix)) }}</span></button>
-              <p v-if="!routeEntries.length" class="static-route-empty">没有可编辑的完整 CIDR 条目</p>
-            </div>
-            <div v-if="selectedPrefix && selectedFilter" id="staticRouteDetail" class="static-route-detail">
-              <div class="static-route-detail-head"><div><span>当前 CIDR</span><code id="staticRouteDetailPrefix">{{ selectedPrefix }}</code></div><span id="staticRouteDetailStatus">{{ operationSummary(selectedFilter) }}</span></div>
-              <div class="static-route-action-fields">
-                <div class="field"><label for="staticRouteAction">转发动作</label><select id="staticRouteAction" :value="selectedAction.action" @change="setSelectedAction(($event.target as HTMLSelectElement).value as RouteActionKind, selectedAction.via)"><option value="blackhole">blackhole</option><option value="reject">reject</option><option value="unreachable">unreachable</option><option value="prohibit">prohibit</option><option value="via">via</option></select></div>
-                <div v-if="selectedAction.action === 'via'" id="staticRouteViaField" class="field"><label for="staticRouteVia">via 地址</label><input id="staticRouteVia" :value="selectedAction.via" :placeholder="draft.family === 'ipv6' ? '2001:db8::1' : '198.51.100.1'" required @input="setSelectedAction('via', ($event.target as HTMLInputElement).value)"></div>
-              </div>
-              <section class="static-filter-operations" aria-labelledby="staticFilterOperationsTitle">
-                <div class="static-filter-section-head"><div><span>快捷操作</span><strong id="staticFilterOperationsTitle">{{ operationSummary(selectedFilter) }} · 按列表顺序执行</strong></div><div class="static-filter-add-controls"><select v-model="addOperationType" aria-label="快捷操作类型"><option value="set">设置属性</option><option value="community">Community</option><option value="prepend">AS prepend</option></select><button class="secondary-button" type="button" @click="addOperation">添加</button></div></div>
-                <div id="staticFilterOperationList" class="static-filter-operation-list"><StaticRouteOperationRow v-for="(operation, index) in selectedFilter.operations" :key="`${selectedPrefix}-${index}-${operation.type}`" :operation="operation" :index="index" :total="selectedFilter.operations.length" @update="updateOperation(index, $event)" @remove="removeOperation(index)" @move="moveOperation(index, $event)" @apply-all="applyOperationToAll(index)" /><p v-if="!selectedFilter.operations.length" class="static-filter-empty">暂无快捷操作</p></div>
-              </section>
-              <div class="field static-route-custom-field"><label for="staticRouteCustom">自定义 per-route 源码</label><textarea id="staticRouteCustom" ref="customEditor" v-model="selectedFilter.custom" class="compact-code-editor" maxlength="8192" spellcheck="false" placeholder="if net.len = 24 then bgp_med = 50;"></textarea></div>
-              <section class="static-code-references" aria-labelledby="staticReferenceTitle"><div class="code-reference-toolbar"><div class="code-reference-heading"><strong id="staticReferenceTitle">可用资源</strong><span id="staticReferenceCount">{{ references.length }} 项</span></div><input id="staticReferenceSearch" v-model.trim="referenceSearch" type="search" placeholder="搜索 Define / Function"></div><div id="staticReferences" class="code-reference-groups"><section v-if="references.length" class="code-reference-group"><div class="code-reference-list"><button v-for="item in references" :key="item.id" class="code-reference-button" type="button" @click="insertReference(item)"><span class="code-reference-copy"><strong>{{ item.label }}</strong><code>{{ item.symbol }}</code></span><span class="code-reference-meta"><span>{{ item.kind }}</span><span>{{ resourceScopeShortLabel(item, draft.nodeId) }}</span></span></button></div></section><span v-else class="code-reference-empty">没有匹配的资源</span></div></section>
-              <div class="static-route-preview"><span>最终 BIRD 路由</span><pre id="staticRoutePreview">{{ preview }}</pre></div>
-            </div>
-          </div>
+          <label class="toggle-row" for="staticEnabled"><span><strong>启用资源</strong><small>{{ draft.enabled ? '应用后加载该协议' : '保留配置与管理表，停用协议' }}</small></span><input id="staticEnabled" v-model="draft.enabled" type="checkbox"><i aria-hidden="true"></i></label>
         </section>
+        <section v-if="draft.table" class="protocol-section static-table-settings" aria-labelledby="staticTableTitle">
+          <div class="protocol-section-title"><span>2</span><div><h3 id="staticTableTitle">路由表</h3><p>静态路由写入此 BIRD 表，可通过 Pipe 传递到其它表。</p></div></div>
+          <div class="dialog-grid"><label class="protocol-form-field">表来源<select v-model="draft.table.source" id="staticTableSource"><option value="existing">引用已有表</option><option value="managed">由 Birdbox 创建</option></select></label><label class="protocol-form-field">写入 BIRD 路由表<input id="staticTable" v-model.trim="draft.table.name" list="staticKnownTables" required placeholder="master4"></label></div>
+          <datalist id="staticKnownTables"><option v-for="item in tableSuggestions" :key="item.name" :value="item.name" /></datalist>
+          <p class="protocol-help">这是 BIRD 路由表，不是 Linux 内核表编号。停用协议会保留管理表。</p>
+        </section>
+        <section class="protocol-section" aria-labelledby="staticRoutesTitle">
+          <div class="protocol-section-title"><span>3</span><div><h3 id="staticRoutesTitle">配置路由</h3><p>直接添加或关联 Define，所有条目在此统一编辑。</p></div></div>
+          <div class="field protocol-source-field"><label for="staticDefineId">关联 CIDR Define（可选）</label><select id="staticDefineId" v-model="draft.defineId"><option :value="null">不关联，仅直接添加路由</option><option v-for="resource in compatibleDefines" :key="resource.id" :value="resource.id">{{ resource.label }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource, draft.nodeId) }}</option></select><p class="protocol-help">关联后自动生成网段，可与手动路由一起编辑。网段随 Define 更新，转发设置可逐条覆盖；不再需要的条目可单独停用。</p></div>
+          <StaticRoutesEditor :key="routeEditorVersion" v-model="allRoutes" :origins="origins" :references="references" :family="draft.family" @apply-forwarding="setDefaultForwarding" />
+        </section>
+        <details class="static-protocol-advanced protocol-disclosure"><summary>协议高级设置与 Import 策略</summary>
+          <div class="dialog-grid"><label class="protocol-form-field">递归查询的 IGP 表（可选）<input id="staticIgpTable" v-model.trim="draft.igpTable" list="staticKnownTables" placeholder="默认使用当前 BIRD 路由表"></label><label class="protocol-checkbox"><input id="staticCheckLink" v-model="draft.checkLink" type="checkbox">检测出口接口链路状态（check link）</label></div>
+          <div class="field protocol-source-field"><label for="staticExport">Static Export</label><select id="staticExport" v-model="draft.export"><option value="none">none（默认）</option><option value="all">all</option></select></div>
+          <p class="protocol-help">Import 控制静态路由进入 BIRD 表；向 BGP / OSPF 发布时仍由对应协议策略决定。</p>
+          <details id="staticImport" class="protocol-inline-disclosure"><summary>Import 策略 · {{ draft.importPolicy?.mode === "custom" ? "自定义 Filter" : draft.importPolicy?.mode === "combined" ? "Function 组合" : draft.importPolicy?.formAction === "none" ? "不接收静态路由" : "接收所有静态路由" }}</summary>
+          <PolicyEditor v-if="draft.importPolicy" :family="draft.family" direction="import" :policy="draft.importPolicy" :export-define-id="null" :functions="policyFunctions" :filters="policyFilters" :defines="[]" :disabled="pending" :show-policy-action="false" :allow-export-cidr="false" @update:policy="draft.importPolicy = $event" />
+          </details>
         <div class="field full-width"><label for="staticRaw">自定义 Static 指令</label><textarea id="staticRaw" v-model="draft.raw" class="compact-code-editor" spellcheck="false" placeholder="route 192.0.2.0/24 via 198.51.100.1;"></textarea></div>
-        <label class="toggle-row full-width" for="staticEnabled"><span><strong>启用资源</strong></span><input id="staticEnabled" v-model="draft.enabled" type="checkbox"><i aria-hidden="true"></i></label>
-      </div>
-      <div class="dialog-actions split-actions"><button v-if="editing" id="deleteStaticButton" class="text-danger-button" type="button" :disabled="pending" @click="remove">删除 Static</button><span></span><button class="secondary-button" type="button" data-close="staticDialog" :disabled="pending" @click="close">取消</button><button id="saveStaticButton" class="primary-button" type="submit" :disabled="pending">{{ pending ? "正在预检" : "预检、保存并应用" }}</button></div>
+        </details>
+      <p v-if="previewError" role="alert" class="protocol-notice">{{ previewError }}</p>
+      <section v-if="serverPreview" id="staticServerPreview" class="protocol-preview"><h3>{{ serverPreview.valid ? '预检通过' : '预检未通过' }}</h3><p>受影响节点：{{ nodes.find(node => node.id === draft.nodeId)?.name }}。{{ draft.enabled ? '' : '当前为停用配置；已额外检查启用后的合法性。' }}</p><article v-for="item in serverPreview.configs" :key="item.nodeId"><pre>{{ item.validation.stdout }}{{ item.validation.stderr }}</pre><details open><summary>配置变更</summary><pre>{{ item.diff }}</pre></details><details><summary>服务端生成的完整配置</summary><pre>{{ item.config }}</pre></details></article></section>
+      </fieldset></div>
+      <div class="dialog-actions protocol-editor-actions"><button v-if="editing" id="deleteStaticButton" class="text-danger-button" type="button" :disabled="pending" @click="remove">删除 Static</button><span class="protocol-save-hint">{{ pending ? '正在下发配置，请稍候' : serverPreview?.valid ? '预检通过 · 等待确认应用' : signature !== savedSignature ? '有未保存修改 · 请先预检' : editing ? '已保存 · 修改后需重新预检' : '新建资源 · 请先预检' }}</span><button class="secondary-button" type="button" data-close="staticDialog" :disabled="pending" @click.stop="close">取消</button><button v-if="serverPreview" class="secondary-button" type="button" :disabled="pending || previewPending" @click="inspect">{{ previewPending ? "预检中…" : "重新预检" }}</button><button id="saveStaticButton" class="primary-button" type="submit" :disabled="pending || previewPending">{{ pending ? "正在应用…" : previewPending ? "预检中…" : serverPreview?.valid ? "保存并应用" : "预检并查看变更" }}</button></div>
     </form>
   </dialog>
 </template>
+
+<style scoped>
+.static-dialog { width: min(1040px, calc(100vw - 32px)); max-width: calc(100vw - 24px); max-height: 92dvh; overflow: clip; padding: 0; box-sizing: border-box; }
+.static-dialog[open] { display: flex; flex-direction: column; }
+.static-dialog form { display: flex; flex-direction: column; min-height: 0; height: min(92dvh, 920px); max-height: 92dvh; padding: 0; overflow: clip; }
+.static-dialog .dialog-head { flex-shrink: 0; }
+.static-content { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 20px 24px; overscroll-behavior: contain; background: var(--surface-soft); }
+.static-fields { display: grid; gap: 16px; border: 0; min-width: 0; margin: 0; padding: 0; }
+.static-dialog .dialog-actions { flex-shrink: 0; margin: 0; }
+.static-source-field { margin: 16px 0; }
+.static-dialog .toggle-row { margin-top: 16px; }
+.static-dialog pre { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+.static-dialog :deep(.policy-block) { margin-top: 16px; }
+@media (max-width: 600px) {
+  .static-content { padding: 12px; }
+  .static-dialog .dialog-grid { grid-template-columns: minmax(0, 1fr); }
+  .static-dialog .static-route-bulk { grid-template-columns: minmax(0, 1fr); }
+}
+</style>

@@ -1,0 +1,22 @@
+import { expect, test } from '@playwright/test';
+import fs from 'node:fs/promises';
+test('real Static browser → API → Agent → BIRD → runtime → edit → disable → delete', async ({ page, context, baseURL }, info) => {
+ const cookie = (await fs.readFile(process.env.BIRDBOX_STATIC_COOKIE!, 'utf8')).trim(); const [name, ...parts] = cookie.split('=');
+ await context.addCookies([{ name, value: parts.join('='), url: baseURL! }]); await page.goto('/'); await expect(page.locator('#appMain')).toBeVisible();
+ await page.locator('#resourceWorkspaceTab').click(); await page.locator('#resourceStaticsTab').click();
+ await page.getByRole('button', { name: '+ 添加 Static', exact: true }).click(); const dialog = page.locator('#staticDialog');
+ const protocol = `browser_static_${info.project.name}`;
+ await page.locator('#staticLabel').fill(`真实流程 ${info.project.name}`); await page.locator('#staticName').fill(protocol);
+ await page.locator('#addStaticRouteButton').click(); const card = page.getByTestId('static-direct-route');
+ await card.getByLabel('目标网段', { exact: true }).fill('198.19.20.0/24'); await card.getByLabel('转发方式', { exact: true }).selectOption('blackhole');
+ await page.locator('#staticTableSource').selectOption('managed'); await page.locator('#staticTable').fill(`browser_table_${info.project.name}`);
+ await page.locator('#saveStaticButton').click(); await expect(page.locator('#staticServerPreview')).toContainText('预检通过'); await expect(dialog).toBeVisible(); await expect(page.locator('#saveStaticButton')).toHaveText('保存并应用');
+ await page.screenshot({ path: `artifacts/static-live-${info.project.name}.png` });
+ await page.locator('#saveStaticButton').click(); await expect(dialog).not.toBeVisible();
+ await page.getByRole('button', { name: `查看 Static ${protocol} 运行态`, exact: true }).click(); const runtime = page.locator('#staticRuntimeDialog'); await expect(runtime).toContainText('运行中'); await expect(runtime).toContainText('198.19.20.0/24');
+ await runtime.getByLabel('Static 路由目标 IP').fill('198.19.20.1'); await runtime.getByRole('button', { name: '查询路由', exact: true }).click(); await expect(runtime).toContainText(protocol);
+ await runtime.getByRole('button', { name: '编辑配置', exact: true }).click(); await expect(card.getByLabel('目标网段', { exact: true })).toHaveValue('198.19.20.0/24');
+ await dialog.locator('label[for=staticEnabled]').click(); await expect(page.locator('#staticEnabled')).not.toBeChecked(); await page.locator('#saveStaticButton').click(); await expect(page.locator('#staticServerPreview')).toContainText('预检通过'); await page.locator('#saveStaticButton').click(); await expect(dialog).not.toBeVisible();
+ await page.getByRole('button', { name: `查看 Static ${protocol} 运行态`, exact: true }).click(); await expect(runtime).toContainText('配置已停用'); await expect(runtime).toContainText('暂无匹配路由');
+ await runtime.getByRole('button', { name: '编辑配置', exact: true }).click(); page.once('dialog', d => d.accept()); await page.locator('#deleteStaticButton').click(); await expect(dialog).not.toBeVisible(); await expect(page.getByRole('button', { name: `编辑 Static ${protocol}`, exact: true })).toHaveCount(0);
+});

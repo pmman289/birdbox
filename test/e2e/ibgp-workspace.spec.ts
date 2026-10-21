@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 
 import { defaultBgpOptions, defaultChannel } from "../../apps/web/src/sessions/session-draft";
 
@@ -150,6 +151,7 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
   const protocolName = await protocolInputs.inputValue();
   expect(protocolName.length).toBeLessThanOrEqual(48);
   expect(protocolName).not.toContain("ibgp_adj_");
+  await page.getByRole("button", { name: "同时查看双端", exact: true }).click();
   const sessionColumns = await page.locator(".ibgp-session-grid").evaluate(
     (element) => getComputedStyle(element).gridTemplateColumns.split(" ").length,
   );

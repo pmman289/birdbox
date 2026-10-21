@@ -153,6 +153,7 @@ export class DashboardService {
         staticProtocols: [],
         directProtocols: [],
         kernelProtocols: [],
+        pipeProtocols: [],
         sourcePolicies: [],
         selectedPeer: null,
         runtime: {
@@ -204,6 +205,7 @@ export class DashboardService {
       staticProtocols: nodeStaticProtocols(state, selectedNode.id, true),
       directProtocols: state.directProtocols.filter((item) => item.nodeId === selectedNode.id && item.enabled),
       kernelProtocols: state.kernelProtocols.filter((item) => resourceAppliesToNode(item, selectedNode.id) && item.enabled),
+      pipeProtocols: state.pipeProtocols.filter((item) => resourceAppliesToNode(item, selectedNode.id)),
       sourcePolicies: nodeSourcePolicies(state, selectedNode.id, true),
       selectedPeer: selected,
       runtime,

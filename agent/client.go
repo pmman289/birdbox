@@ -116,7 +116,7 @@ func (c *Client) doRequest(ctx context.Context, client *http.Client, method, pat
 
 func (c *Client) Register(ctx context.Context, version string) error {
 	var out map[string]any
-	capabilities := []string{"system.info", "system.interfaces", "network.ip_rules", "bird.inspect", "bird.validate", "bird.stage", "bird.apply", "bird.rollback", "bird.protocol", "bird.routes", "bird.protocol_state", "bird.ospf", "bird.access", "agent.self_upgrade", "task.large_payload"}
+	capabilities := []string{"system.info", "system.interfaces", "network.ip_rules", "network.ip_rules.inspect", "bird.inspect", "bird.validate", "bird.stage", "bird.apply", "bird.rollback", "bird.protocol", "bird.routes", "bird.protocol_state", "bird.ospf", "bird.access", "agent.self_upgrade", "task.large_payload"}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("BIRDBOX_AGENT_LEGACY_EXEC")), "enabled") {
 		capabilities = append(capabilities, "legacy.exec")
 	}
@@ -196,7 +196,7 @@ func (c *Client) deliverResult(ctx context.Context, t *task, r result) error {
 
 func readOnlyTask(method string) bool {
 	switch method {
-	case "system.info", "system.interfaces", "bird.inspect", "bird.protocol", "bird.routes", "bird.ospf", "bird.access":
+	case "system.info", "system.interfaces", "network.ip_rules.inspect", "bird.inspect", "bird.protocol", "bird.routes", "bird.ospf", "bird.access":
 		return true
 	default:
 		return false
@@ -228,6 +228,9 @@ func executeTask(parent context.Context, t task) result {
 	}
 	if t.Method == "network.ip_rules" {
 		return networkIPRulesTask(parent, t.Params, r)
+	}
+	if t.Method == "network.ip_rules.inspect" {
+		return inspectIPRulesTask(parent, t.Params, r)
 	}
 	if t.Method == "agent.self_upgrade" {
 		return upgradeTask(parent, t, r)

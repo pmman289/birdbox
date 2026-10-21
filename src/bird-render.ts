@@ -1,3 +1,4 @@
+import { normalizePipeProtocol, pipeManagedTables } from "./bird-pipe.js";
 import net from "node:net";
 
 import type {
@@ -36,7 +37,7 @@ import { normalizeDefine, normalizePolicyFilter, normalizePolicyFunction } from 
 import { isExactPrefix } from "./bird-prefix.js";
 import { normalizeRPKISource } from "./bird-rpki.js";
 import { normalizeSession } from "./bird-session.js";
-import { normalizeStaticProtocol, staticRouteDefinitionSignature } from "./bird-static.js";
+import { normalizeStaticProtocol, staticRouteAction } from "./bird-static.js";
 import { normalizeSourcePolicyEgress, renderSourcePolicyEgress, sourcePolicyForNode } from "./bird-source-policy.js";
 import { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
 import { normalizeOspfDomain, ospfDomainNodeIds, ospfLinkOptions, ospfNodeHasAreas, ospfProtocolName } from "./ospf.js";
@@ -130,6 +131,7 @@ function renderNodeProtocols(node: ManagedNode, directResources: DirectProtocol[
     output += `\nprotocol direct ${direct.name} {\n`;
     const interfaces = direct.interfaces.length ? direct.interfaces : ["*"];
     output += `  interface ${interfaces.map((item) => birdString(item)).join(", ")};\n`;
+    if (direct.checkLink) output += "  check link yes;\n";
     // Direct's native defaults are import-all/export-none. Omitting the
     // policy block also keeps the generated declaration compatible with
     // BIRD versions that treat the two policies as a single channel type.
@@ -150,7 +152,11 @@ function renderNodeProtocols(node: ManagedNode, directResources: DirectProtocol[
       if (kernel.table !== null) output += `  kernel table ${kernel.table};\n`;
       if (kernel.scanTime !== null) output += `  scan time ${kernel.scanTime};\n`;
       if (kernel.persist) output += "  persist;\n";
-      const importPolicy = renderPolicy(kernel.importPolicy, "import", null, functionMap, filterMap).replace(/^    /gm, "  ");
+      if (kernel.learn) output += "  learn;\n";
+      if (kernel.gracefulRestart) output += "  graceful restart;\n";
+      if (kernel.metric !== null && kernel.metric !== undefined) output += `  metric ${kernel.metric};\n`;
+      if (kernel.mergePaths !== null && kernel.mergePaths !== undefined) output += `  merge paths on limit ${kernel.mergePaths};\n`;
+      const importPolicy = renderPolicy(kernel.importPolicies?.[family as AddressFamily] ?? kernel.importPolicy, "import", null, functionMap, filterMap).replace(/^    /gm, "  ");
       const kernelExport: KernelExportPolicy = kernel.exportPolicies?.[family as AddressFamily] ?? {
         mode: "visual",
         policy: kernel.exportPolicy,
@@ -160,7 +166,8 @@ function renderNodeProtocols(node: ManagedNode, directResources: DirectProtocol[
         ? `    export filter {\n      krt_prefsrc = ${kernelExport.prefSrc};\n      accept;\n    };\n`
         : renderPolicy(kernelExport.policy, "export", null, functionMap, filterMap);
       const renderedExportPolicy = exportPolicy.replace(/^    /gm, "  ");
-      output += `  ${family} {\n${importPolicy}${renderedExportPolicy}  };\n`;
+      const table = kernel.tables?.[family as AddressFamily]?.name;
+      output += `  ${family} {\n${table ? `    table ${table};\n` : ""}${importPolicy}${renderedExportPolicy}  };\n`;
       output += "}\n";
     }
   }
@@ -679,8 +686,10 @@ export function renderBirdConfig(
   ospfInputs: readonly unknown[] = [],
   directInputs?: readonly unknown[],
   kernelInputs?: readonly unknown[],
+  pipeInputs: readonly unknown[] = [],
 ): string {
   const node = normalizeNode(nodeInput);
+  const pipes = pipeInputs.map(normalizePipeProtocol).filter((item) => resourceAppliesToNode(item, node.id));
   const peers = peerInputs.map(normalizePeer);
   const defines = defineInputs.map(normalizeDefine).filter((item) => item.enabled);
   const functions = functionInputs.map(normalizePolicyFunction).filter((item) => item.enabled);
@@ -688,7 +697,7 @@ export function renderBirdConfig(
   // Direct and Kernel protocols are managed as explicit resources. An omitted
   // resource list means no generated protocol, preserving legacy inventories.
   const directResources = (directInputs ?? []).map(normalizeDirectProtocol).filter((item) => item.enabled);
-  const kernelResources = (kernelInputs ?? []).map(normalizeKernelProtocol).filter((item) => item.enabled);
+  const kernelResources = (kernelInputs ?? []).map(normalizeKernelProtocol);
   const rpki = rpkiInputs.map(normalizeRPKISource).filter((item) => item.enabled && resourceAppliesToNode(item, node.id));
   const staticProtocols = staticInputs.map(normalizeStaticProtocol).filter((item) => item.enabled && item.nodeId === node.id);
   const sourcePolicies = sourcePolicyInputs.map(normalizeSourcePolicyEgress)
@@ -706,7 +715,6 @@ export function renderBirdConfig(
   const table4Names = new Set(rpki.map((item) => item.roa4Table).filter((value): value is string => value !== null));
   const table6Names = new Set(rpki.map((item) => item.roa6Table).filter((value): value is string => value !== null));
   const active = normalizeActiveSessions(node, peers, sessions, defineMap, functionMap, filterMap);
-  const routeDefinitions: Record<AddressFamily, Map<string, string>> = { ipv4: new Map(), ipv6: new Map() };
   const renderedStaticProtocols = staticProtocols.map((resource) => {
     const expectedType = resource.family === "ipv4" ? "cidr4" : "cidr6";
     const staticDefine = resource.defineId === null ? null : defineMap.get(resource.defineId);
@@ -721,17 +729,14 @@ export function renderBirdConfig(
     if (staticDefine !== null && staticDefine !== undefined && staticDefine.type !== "expression") {
       for (const prefix of staticDefine.entries.filter(isExactPrefix)) {
         const action = resource.routeActions[prefix] ?? resource.action;
-        if (action === null) continue;
+        if (action === null || (typeof action !== "string" && !action.enabled)) continue;
         const routeFilter = resource.routeFilters[prefix] ?? { operations: [], custom: "" };
-        const signature = staticRouteDefinitionSignature(action, routeFilter);
-        const existing = routeDefinitions[resource.family].get(prefix);
-        assertValidation(!existing || existing === signature, `节点 ${node.name} 对 ${prefix} 配置了冲突的静态路由定义`);
-        routeDefinitions[resource.family].set(prefix, signature);
-        routes.push({ prefix, action, routeFilter });
+        routes.push({ prefix, action: typeof action === "string" ? action : staticRouteAction(action), routeFilter });
       }
     }
-    return { ...resource, routes };
-  }).filter((resource) => resource.routes.length || resource.raw);
+    routes.push(...(resource.routes ?? []).filter(route => route.enabled).map(route => ({ prefix: route.prefix, action: staticRouteAction(route), routeFilter: route.filter })));
+    return { ...resource, routes, hasDirectRoutes: Boolean(resource.routes?.length || Object.values(resource.routeActions).some(action => typeof action !== "string")) };
+  }).filter((resource) => resource.routes.length || resource.raw || resource.hasDirectRoutes);
   const renderedSourcePolicies: Array<{ resource: SourcePolicyEgress; internalDefineNames: string[] }> = sourcePolicies.flatMap((resource) => {
     const nodeScopedResource = sourcePolicyForNode(resource, node);
     if (!nodeScopedResource) return [];
@@ -753,6 +758,7 @@ export function renderBirdConfig(
   } else {
     config += "# This file is included by the system BIRD configuration.\n";
   }
+  for (const table of pipeManagedTables(pipes, staticInputs.map(normalizeStaticProtocol).filter(item => item.nodeId === node.id), kernelResources.filter(item => resourceAppliesToNode(item, node.id)))) config += `\n${table.family} table ${table.name};\n`;
   for (const resource of defines) {
     if (resource.type !== "expression" && resource.entrySource.kind === "irr-as-set") {
       const resourceDirectory = node.deploymentMode === "include"
@@ -763,7 +769,8 @@ export function renderBirdConfig(
       continue;
     }
     const value = resource.type === "expression" ? resource.value : `[ ${resource.entries.join(", ")} ]`;
-    config += `\ndefine ${resource.name} = ${value};\n`;
+    // A trailing BIRD line comment must not swallow the statement terminator.
+    config += `\ndefine ${resource.name} = ${value}${resource.type === "expression" && value.includes("#") ? "\n" : ""};\n`;
   }
   for (const table of table4Names) config += `\nroa4 table ${table};\n`;
   for (const table of table6Names) config += `\nroa6 table ${table};\n`;
@@ -774,20 +781,32 @@ export function renderBirdConfig(
   // protocol declarations after policy resources so BIRD can resolve names
   // regardless of the selected export mode.
   config += renderNodeProtocols(node, directResources, kernelResources, functionMap, filterMap);
+  for (const sourcePolicy of renderedSourcePolicies) {
+    config += renderSourcePolicyEgress(sourcePolicy.resource, sourcePolicy.internalDefineNames);
+  }
+  for (const pipe of pipes.filter((item) => item.enabled)) {
+    config += `\nprotocol pipe ${pipe.name} {\n  table ${pipe.table.name};\n  peer table ${pipe.peerTable.name};\n`;
+    config += renderPolicy(pipe.importPolicy, "import", null, functionMap, filterMap);
+    config += renderPolicy(pipe.exportPolicy, "export", null, functionMap, filterMap);
+    config += "}\n";
+  }
   const ospfConfig = renderOspfForNode(node, ospfDomainSet, functionMap, filterMap, cidrDefineMap);
   config += ospfConfig;
   // OSPF requests BFD sessions from the global BFD protocol. BIRD accepts an
   // interface-level `bfd yes` without that protocol during syntax checking,
   // but no BFD sessions can run at runtime unless an instance exists.
-  const needsBfd = active.some(({ session }) => session.bgp.bfd !== "off") || /\bbfd yes;/.test(ospfConfig);
+  const needsBfd = active.some(({ session }) => session.bgp.bfd !== "off") || /\bbfd yes;/.test(ospfConfig) || renderedStaticProtocols.some(item => item.routes.some(route => /\bbfd\b/.test(route.action)) || /\bbfd(?:\s+yes)?\s*(?:;|via|weight|\{|$)/m.test(item.raw));
   if (needsBfd) config += "\nprotocol bfd birdbox_bfd {\n}\n";
 
   for (const staticProtocol of renderedStaticProtocols) {
     config += `\nprotocol static ${staticProtocol.name} {\n` +
       `  ${staticProtocol.family} {\n` +
-      `    import ${staticProtocol.import};\n` +
+      (staticProtocol.table?.name !== (staticProtocol.family === "ipv4" ? "master4" : "master6") ? `    table ${staticProtocol.table!.name};\n` : "") +
+      (staticProtocol.importPolicy ? renderPolicy(staticProtocol.importPolicy, "import", null, functionMap, filterMap) : `    import ${staticProtocol.import};\n`) +
       `    export ${staticProtocol.export};\n` +
       "  };\n";
+    if (staticProtocol.checkLink) config += "  check link yes;\n";
+    if (staticProtocol.igpTable) config += `  igp table ${staticProtocol.igpTable};\n`;
     for (const { prefix, action, routeFilter } of staticProtocol.routes) {
       config += renderStaticRoute(staticProtocol.id, prefix, action, routeFilter);
     }
@@ -814,9 +833,6 @@ export function renderBirdConfig(
     }
     config += "}\n";
   }
-  for (const sourcePolicy of renderedSourcePolicies) {
-    config += renderSourcePolicyEgress(sourcePolicy.resource, sourcePolicy.internalDefineNames);
-  }
   return config;
 }
 
@@ -833,10 +849,11 @@ export function renderBirdConfigBundle(
   ospfInputs: readonly unknown[] = [],
   directInputs?: readonly unknown[],
   kernelInputs?: readonly unknown[],
+  pipeInputs: readonly unknown[] = [],
 ): NodeConfigBundle {
   const node = normalizeNode(nodeInput);
   const defines = defineInputs.map(normalizeDefine).filter((item) => item.enabled);
-  const main = renderBirdConfig(node, peerInputs, sessionInputs, functionInputs, filterInputs, defines, rpkiInputs, staticInputs, sourcePolicyInputs, ospfInputs, directInputs, kernelInputs);
+  const main = renderBirdConfig(node, peerInputs, sessionInputs, functionInputs, filterInputs, defines, rpkiInputs, staticInputs, sourcePolicyInputs, ospfInputs, directInputs, kernelInputs, pipeInputs);
   const resources = defines.flatMap((resource) => resource.type !== "expression" && resource.entrySource.kind === "irr-as-set"
     ? [{
         relativePath: `define_${resource.id}.conf`,

@@ -144,7 +144,7 @@ test("refuses a newer inventory format without changing the stored document", as
   const dataDir = path.join(root, "data");
   const database = new MemoryDatabase();
   const futureInventory = {
-    version: 29,
+    version: 32,
     futureOnly: { preserve: true },
     nodes: [], peers: [], defines: [], functions: [], filters: [], rpki: [], staticProtocols: [], sessions: [],
   };
@@ -190,7 +190,7 @@ test("migrates legacy shared-resource scopes to nodeIds", async (context) => {
   });
 
   const state = await store.read();
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.deepEqual(state.defines[0].nodeIds, ["left"]);
   assert.deepEqual(state.functions[0].nodeIds, null);
   assert.deepEqual(state.filters[0].nodeIds, ["right"]);
@@ -230,7 +230,7 @@ test("migrates v22 iBGP members to one transport address", async (context) => {
   });
 
   const state = await store.read();
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.deepEqual(state.ibgpDomains[0].members, [
     { nodeId: "left", address: "192.0.2.1" },
     { nodeId: "right", address: "192.0.2.2" },
@@ -270,7 +270,7 @@ test("migrates Static channel policies to node resources while upgrading v18 inv
     legacySessionPath: path.join(root, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.equal(state.sessions[0].localAddress, null);
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);
   assert.deepEqual(state.staticProtocols.map((resource) => ({
@@ -325,7 +325,7 @@ test("migrates node-level BGP settings and advertised prefixes to schema v19", a
   });
   const state = await store.read();
 
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.equal(state.nodes[0].address, undefined);
   assert.equal(state.nodes[0].asn, undefined);
   assert.equal(state.sessions[0].localAddress, "192.0.2.10");
@@ -383,7 +383,7 @@ test("migrates v8 Function order and combined policies to ordered v19 channel st
     legacySessionPath: path.join(dataDir, "session.json"),
   });
   const state = await store.read();
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.deepEqual(state.staticProtocols, []);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "none");
   assert.deepEqual(state.functions.map((resource) => resource.name), ["guard", "late"]);
@@ -429,7 +429,7 @@ test("merges v10 CIDR lists before expression Defines and preserves v19 resource
   });
   const state = await store.read();
 
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.deepEqual(state.defines.map((resource) => [resource.id, resource.type]), [
     ["prefix_global", "cidr4"],
     ["define_pref", "expression"],
@@ -471,7 +471,7 @@ test("migrates v14 export policy and Static settings to a v19 node resource", as
   await fs.writeFile(path.join(dataDir, "inventory.json"), JSON.stringify(base));
   const store = new InventoryStore({ database: new MemoryDatabase(), dataDir, nodesPath: "", legacySessionPath: "" });
   const state = await store.read();
-  assert.equal(state.version, 28);
+  assert.equal(state.version, 31);
   assert.equal(state.sessions[0].channels.ipv4.exportPolicy.formAction, "cidr");
   assert.equal(state.sessions[0].channels.ipv6.exportPolicy.formAction, "none");
   assert.equal(state.sessions[0].channels.ipv4.static, undefined);
@@ -481,4 +481,38 @@ test("migrates v14 export policy and Static settings to a v19 node resource", as
     defineId: "prefix_one", action: "blackhole", import: "all", export: "none", raw: "",
   }]);
   assert.equal(state.defines[0].type, "cidr4");
+});
+
+test("upgrades v28 inventory to v31 with an empty Pipe collection", async (context) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-store-pipe-"));
+  context.after(() => fs.rm(root, { recursive: true, force: true }));
+  const database = new MemoryDatabase();
+  await database.createState("inventory", { version: 28, nodes: [], peers: [], sessions: [] });
+  const store = new InventoryStore({ database, dataDir: root, nodesPath: path.join(root, "nodes.json"), legacySessionPath: path.join(root, "session.json") });
+  await store.initialize();
+  const inventory = await store.read();
+  assert.equal(inventory.version, 31); assert.deepEqual(inventory.pipeProtocols, []);
+  assert.equal((await database.readState("inventory")).value.version, 31);
+});
+
+test("upgrades v29 Static to v31 without losing Define routes, per-route attributes or raw directives", async context => {
+ const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-static-upgrade-")); context.after(() => fs.rm(root, { recursive: true, force: true }));
+ const database = new MemoryDatabase();
+ const original = { id: "legacy_static", nodeId: "local", name: "legacy_static", label: "Legacy", family: "ipv6", defineId: "legacy_cidr", action: "blackhole", routeActions: { "2001:db8::/48": "unreachable" }, routeFilters: { "2001:db8::/48": { operations: [{ type: "set", attribute: "preference", value: 100 }], custom: "ospf_metric1 = 20;" } }, import: "none", export: "none", enabled: false, raw: "check link yes;" };
+ await database.createState("inventory", { version: 29, nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1" }], defines: [{ id: "legacy_cidr", name: "LEGACY_PREFIXES", label: "Prefixes", type: "cidr6", nodeIds: null, entries: ["2001:db8::/48"] }], staticProtocols: [original] });
+ const store = new InventoryStore({ database, dataDir: root, nodesPath: path.join(root, "nodes.json"), legacySessionPath: path.join(root, "session.json") });
+ await store.initialize(); const state = await store.read(), item = state.staticProtocols[0];
+ assert.equal(state.version, 31); for (const [key, value] of Object.entries(original)) assert.deepEqual(item[key], value);
+ assert.deepEqual(item.table, { name: "master6", source: "existing" }); assert.deepEqual(item.routes, []); assert.equal(item.checkLink, false); assert.equal(item.igpTable, null); assert.equal(item.importPolicy.formAction, "none");
+ const revision = store.revisionOf(state); assert.equal(store.revisionOf(await store.read()), revision);
+});
+
+test("upgrades v30 Static mixed sources without changing forwarding or deploying", async context => {
+ const root = await fs.mkdtemp(path.join(os.tmpdir(), "birdbox-static-v30-")); context.after(() => fs.rm(root, { recursive: true, force: true }));
+ const database = new MemoryDatabase();
+ await database.createState("inventory", { version: 30, nodes: [{ id: "local", name: "Local", transport: "local", routerId: "192.0.2.1" }], defines: [{ id: "cidr", name: "PREFIXES", label: "Prefixes", type: "cidr4", entries: ["203.0.113.0/24"] }], staticProtocols: [{ id: "legacy", nodeId: "local", name: "legacy", label: "Legacy", defineId: "cidr", action: "blackhole", routeActions: { "203.0.113.0/24": "via 192.0.2.2" }, routes: [{ id: "manual", prefix: "198.51.100.0/24", type: "recursive", recursiveVia: "192.0.2.3", enabled: false }] }] });
+ const store = new InventoryStore({ database, dataDir: root, nodesPath: path.join(root, "nodes.json"), legacySessionPath: path.join(root, "session.json") });
+ const state = await store.read(); assert.equal(state.version, 31);
+ assert.equal(state.staticProtocols[0].routeActions["203.0.113.0/24"], "via 192.0.2.2"); assert.equal(state.staticProtocols[0].routes[0].recursiveVia, "192.0.2.3"); assert.equal(state.staticProtocols[0].routes[0].enabled, false);
+ const revision = store.revisionOf(state); assert.equal(store.revisionOf(await store.read()), revision);
 });
