@@ -346,6 +346,9 @@ function renderPolicy(
   filterMap: ReadonlyMap<string, PolicyFilter>,
 ): string {
   if (policy.mode === "custom") {
+    if (policy.inlineFilterSource !== null) {
+      return `    ${direction} filter {\n${policy.inlineFilterSource.split("\n").map((line) => `      ${line}\n`).join("")}    };\n`;
+    }
     const filter = policy.filterId === null ? undefined : filterMap.get(policy.filterId);
     assertValidation(filter, "会话引用了不可用的 Filter");
     return `    ${direction} filter ${filter.name};\n`;

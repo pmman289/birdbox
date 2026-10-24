@@ -17,7 +17,7 @@ async function authenticate(
   await expect(page.locator("#appMain")).toBeVisible();
 }
 
-test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预览", async ({ page }, testInfo) => {
+test("iBGP 工作区提供拓扑连接、双端配置和实时预览", async ({ page }, testInfo) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const existingDomain = {
@@ -131,16 +131,26 @@ test("iBGP 工作区提供顶部画布、搜索连接、双端配置和实时预
   await expect(page.locator(".ibgp-workspace")).not.toContainText("拓扑模式");
   await expect(page.locator(".ibgp-workspace")).not.toContainText("节点角色");
   await expect(page.locator(".ibgp-workspace")).not.toContainText("地址族");
-  await page
-    .locator(".ibgp-canvas .ibgp-node")
-    .filter({ hasText: "E2E Router" })
-    .click();
-  await expect(page.locator(".ibgp-transport-field input")).toHaveValue("10.0.0.1");
-  await page.locator("#ibgpConnectionSearch").fill("Edge");
-  await expect(page.locator(".quick-node")).toHaveCount(1);
-  await page.locator(".quick-node").click();
+  await page.getByRole("button", { name: "添加连接", exact: true }).click();
+  await expect(page.locator(".ibgp-connection-selection-flow")).toBeVisible();
+  await expect(page.locator(".ibgp-connection-panel")).toContainText("选择端点 A");
+  await page.locator(".ibgp-canvas .ibgp-node").filter({ hasText: "E2E Router" }).click();
+  await expect(page.locator(".ibgp-node-endpoint-a")).toHaveText("A");
+  await expect(page.locator(".ibgp-connection-panel")).toContainText("选择端点 B");
+  await page.locator(".ibgp-canvas .ibgp-node").filter({ hasText: "E2E Edge" }).click();
   await expect(page.locator(".ibgp-session-grid .ibgp-side-editor")).toHaveCount(2);
-  await expect(page.locator(".ibgp-side-label")).toHaveText(["左端", "右端"]);
+  await expect(page.locator(".ibgp-connection-selection-flow")).toContainText("配置双端");
+  await page.getByRole("button", { name: /端点 A E2E Router/ }).click();
+  await expect(page.locator(".ibgp-session-grid .ibgp-side-editor")).toHaveCount(0);
+  await page.locator(".ibgp-canvas .ibgp-node").filter({ hasText: "E2E Router" }).click();
+  await page.locator(".ibgp-canvas .ibgp-node").filter({ hasText: "E2E Edge" }).click();
+  await expect(page.locator(".ibgp-session-grid .ibgp-side-editor")).toHaveCount(2);
+  await page.locator(".ibgp-canvas .ibgp-node").filter({ hasText: "E2E Router" }).click();
+  await expect(page.locator(".ibgp-side-editor:visible .ibgp-transport-field input")).toHaveValue("10.0.0.1");
+  await expect(page.locator("#ibgpConnectionSearch")).toHaveCount(0);
+  await expect(page.locator(".quick-node")).toHaveCount(0);
+  await expect(page.locator(".ibgp-session-grid .ibgp-side-editor")).toHaveCount(2);
+  await expect(page.locator(".ibgp-side-label")).toHaveText(["端点 A", "端点 B"]);
   await expect(page.getByRole("button", { name: /编辑 E2E Router/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /编辑 E2E Edge/ })).toBeVisible();
   await expect(

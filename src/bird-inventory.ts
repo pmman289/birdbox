@@ -200,9 +200,9 @@ export function validateInventory(inputValue: unknown, options: InventoryValidat
         assertValidation(!usesCidrDefine || (define?.type === expectedType && define.enabled && resourceAppliesToNode(define, config.nodeId)), `OSPF 域 ${domain.name} 的 ${family} 导出 Define 不可用`);
         for (const policy of [config.importPolicies[family], config.exportPolicies[family]]) {
           if (policy.mode === "custom") {
-            assertValidation(policy.filterId !== null, `OSPF 域 ${domain.name} 的 ${family} 自定义策略必须选择 Filter`);
+            assertValidation(policy.filterId !== null || policy.inlineFilterSource !== null, `OSPF 域 ${domain.name} 的 ${family} 自定义策略必须配置 Filter`);
             const filter = policy.filterId === null ? undefined : filterMap.get(policy.filterId);
-            assertValidation(filter && filter.enabled && resourceAppliesToNode(filter, config.nodeId), `OSPF 域 ${domain.name} 引用了不可用的 Filter`);
+            assertValidation(policy.filterId === null || (filter && filter.enabled && resourceAppliesToNode(filter, config.nodeId)), `OSPF 域 ${domain.name} 引用了不可用的 Filter`);
           }
           if (policy.mode === "combined") {
             for (const step of policy.steps.filter((item) => item.type === "function")) {

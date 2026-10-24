@@ -66,7 +66,8 @@ test('iBGP rejects stale domain preview errors and guards workspace switch witho
 });
 test('iBGP reviewed diff and dual-end editors fit 375/390/430px', async ({ page }) => {
   const h = await fixture(page); await preflight(page);
-  const row = await page.locator('.connection-list-row').first().evaluate(el => { const rects = [...el.children].map(item => item.getBoundingClientRect()); return { topA: rects[0]!.top, topB: rects[1]!.top, width: rects[1]!.width }; }); expect(row.topA).toBe(row.topB); expect(row.width).toBeGreaterThanOrEqual(30);
+ await expect(page.getByRole('button', { name: '移除连接', exact: true })).toBeVisible();
+ await expect(page.locator('.ibgp-connection-selection-flow')).toHaveCount(0);
   for (const width of [375, 390, 430]) { await page.setViewportSize({ width, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false); await expect(page.getByRole('button', { name: '确认应用', exact: true })).toBeVisible(); }
   expect(h.errors).toEqual([]);
 });
@@ -103,7 +104,7 @@ test('iBGP selecting a disconnected member clears the previous pair without chan
  await protocol(page).fill('keep_existing_pair');
  await page.locator('.ibgp-node').filter({ hasText: 'Spare Router' }).click();
  await expect(page.locator('.ibgp-pair-workspace')).toHaveCount(0);
- await expect(page.locator('.ibgp-connection-panel')).toContainText('从 Spare Router 选择对端节点');
+ await expect(page.locator('.ibgp-connection-panel')).toContainText('在拓扑中依次选择端点 A 和端点 B');
  await page.locator('.ibgp-node').filter({ hasText: 'E2E Router' }).click();
  await expect(protocol(page)).toHaveValue('keep_existing_pair');
  await preflight(page); expect(h.previews.at(-1).adjacencies).toHaveLength(1);

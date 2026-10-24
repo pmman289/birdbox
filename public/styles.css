@@ -929,6 +929,9 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 .code-input .policy-source-editor:focus { border: 0; box-shadow: none; }
+.inline-filter-code-input { grid-template-rows: minmax(150px, 1fr) 27px; }
+.inline-filter-code-input .code-input-lines { min-height: 150px; }
+.inline-filter-code-input .policy-source-editor { min-height: 150px; }
 .code-input-status {
   grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; justify-content: space-between;
   padding: 0 9px; color: var(--muted); background: var(--code-status); border-top: 1px solid var(--line); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1204,6 +1207,10 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ibgp-node { position: absolute; z-index: 1; width: 144px; min-height: 68px; display: grid; gap: 3px; align-content: center; padding: 10px 12px; text-align: left; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; box-shadow: 0 3px 12px rgb(0 0 0 / 10%); cursor: grab; touch-action: none; }
 .ibgp-node:active { cursor: grabbing; }
 .ibgp-node.selected { border-color: var(--green); box-shadow: 0 0 0 2px color-mix(in srgb, var(--green) 25%, transparent); }
+.ibgp-node.connect-target { border-color: #2563eb; box-shadow: 0 0 0 2px rgb(37 99 235 / 14%); cursor: crosshair; }
+.ibgp-node.connect-source { border-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 28%, transparent); }
+.ibgp-node-endpoint-badge { position: absolute; top: -10px; left: -10px; width: 22px; height: 22px; display: grid; place-items: center; color: white !important; background: var(--green); border: 2px solid var(--surface); border-radius: 50%; font-size: 11px !important; font-weight: 700; line-height: 1; }
+.ibgp-node-endpoint-badge.ibgp-node-endpoint-b { background: #2563eb; }
 .ibgp-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .ibgp-node span { color: var(--green); font-size: 11px; text-transform: capitalize; }
 .ibgp-node small { color: var(--muted); font-size: 10px; }
@@ -1216,17 +1223,23 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ibgp-connection-controls { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 300px) minmax(220px, 300px); gap: 14px; align-items: end; margin-bottom: 12px; }
 .ibgp-connection-controls .subsection-head { align-self: center; margin: 0; }
 .ibgp-connection-controls .subsection-head > div { display: grid; gap: 4px; }
-.ibgp-transport-field, .ibgp-connection-search { min-width: 0; }
-.quick-node-list { max-height: 248px; display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 8px; overflow-y: auto; overscroll-behavior: contain; padding-right: 5px; scrollbar-gutter: stable; }
-.connection-list-row { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 6px; align-items: stretch; }
-.quick-node { display: flex; justify-content: space-between; gap: 8px; padding: 9px 10px; color: var(--ink-soft); text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
-.quick-node:hover:not(:disabled), .quick-node.active { color: var(--ink); border-color: var(--green); background: color-mix(in srgb, var(--green) 8%, transparent); }
-.quick-node:disabled { opacity: .55; cursor: default; }
-.quick-node > span:first-child { min-width: 0; display: grid; gap: 3px; }
-.quick-node strong, .quick-node small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quick-node strong { color: var(--ink); font-size: 12px; }
-.quick-node small, .quick-node > span:last-child { color: var(--muted); font-size: 10px; }
-.quick-node > span:last-child { flex: 0 0 auto; align-self: center; }
+.ibgp-connection-selection-flow, .ibgp-connection-selection-summary { grid-column: 1 / -1; }
+.ibgp-connection-selection-flow { display: grid; grid-template-columns: repeat(2, minmax(130px, 170px)) minmax(220px, 1fr); gap: 8px; align-items: stretch; padding: 10px; border: 1px solid color-mix(in srgb, #2563eb 28%, var(--line)); border-radius: 8px; background: color-mix(in srgb, #2563eb 5%, var(--surface)); }
+.ibgp-connection-selection-step { display: grid; grid-template-columns: 24px 1fr; column-gap: 7px; align-items: center; padding: 7px 9px; color: var(--ink-soft); text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.ibgp-connection-selection-step > span { grid-row: span 2; width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 50%; font-size: 11px; }
+.ibgp-connection-selection-step strong { font-size: 11px; }
+.ibgp-connection-selection-step small { color: var(--muted); font-size: 10px; }
+.ibgp-connection-selection-step.active, .ibgp-connection-selection-step.done { color: var(--ink); border-color: #2563eb; background: color-mix(in srgb, #2563eb 8%, transparent); }
+.ibgp-connection-selection-step.active > span, .ibgp-connection-selection-step.done > span { color: white; background: #2563eb; border-color: #2563eb; }
+.ibgp-connection-selection-step:disabled { opacity: .5; cursor: default; }
+.ibgp-connection-selection-hint { align-self: center; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.ibgp-connection-selection-summary { display: flex; align-items: center; gap: 8px; }
+.ibgp-connection-endpoint-card { flex: 1 1 0; display: grid; gap: 3px; min-width: 0; padding: 8px 10px; color: var(--ink-soft); text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.ibgp-connection-endpoint-card small { color: var(--muted); font-size: 10px; }
+.ibgp-connection-endpoint-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.ibgp-connection-endpoint-card.active, .ibgp-connection-endpoint-card.ready { border-color: #2563eb; }
+.ibgp-connection-endpoint-card:disabled { opacity: .6; cursor: default; }
+.ibgp-transport-field { min-width: 0; }
 .ibgp-pair-heading { margin-bottom: 14px; }
 .ibgp-pair-heading > div { display: grid; gap: 4px; }
 .ibgp-session-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: start; }
@@ -1248,8 +1261,14 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .preview-invalid, .ibgp-preview-error { color: var(--red); }
 .ibgp-preview-error { display: block; padding: 8px 10px; border: 1px solid var(--line); border-top: 0; white-space: pre-wrap; font-size: 10px; }
 
+/* Keep the save/review controls in the document flow so they never cover
+ * topology nodes or links while the page is being inspected. */
+.ibgp-workspace .protocol-action-bar { position: static; margin-top: 12px; }
+
 @media (max-width: 980px) {
   .ibgp-connection-controls, .ibgp-session-grid { grid-template-columns: 1fr; }
+  .ibgp-connection-selection-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ibgp-connection-selection-hint { grid-column: 1 / -1; }
   .ibgp-side-column { max-height: none; overflow: visible; padding-right: 0; }
 }
 @media (max-width: 620px) {
@@ -1257,9 +1276,9 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
   .ibgp-form-grid { grid-template-columns: 1fr; }
   .ibgp-form-grid .full-width { grid-column: 1; }
   .ibgp-canvas { min-height: 420px; overflow: auto; }
-  .quick-node-list { grid-template-columns: 1fr; }
+  .ibgp-connection-selection-flow { grid-template-columns: 1fr; }
+  .ibgp-connection-selection-hint { grid-column: auto; }
 }
-.quick-node-meta { display: inline-flex; align-items: center; gap: 8px; }
 .ibgp-pair-status { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-left: auto; }
 .ibgp-status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; }
 .ibgp-status i { width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; display: inline-block; }
@@ -1278,7 +1297,7 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 }
 
 .ospf-topology-panel { display: grid; gap: 12px; margin-bottom: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-.ospf-topology-actions { display: flex; align-items: center; gap: 10px; }.ospf-load-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }.ospf-load-status.error { color: var(--danger, #b42318); }.ospf-add-link { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-add-link-head, .ospf-add-link-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.ospf-add-link-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }.ospf-form-error { margin: 10px 0 0; color: var(--danger, #b42318); font-size: 12px; }.ospf-add-link-actions { justify-content: flex-end; margin-top: 12px; }
+.ospf-topology-actions { display: flex; align-items: center; gap: 10px; }.ospf-load-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }.ospf-add-link { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); scroll-margin-top: 12px; }.ospf-add-link-head, .ospf-add-link-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.ospf-add-link-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }.ospf-form-error { margin: 10px 0 0; color: var(--danger, #b42318); font-size: 12px; }.ospf-add-link-actions { justify-content: flex-end; margin-top: 12px; }
 .ospf-endpoint-mode { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
 .ospf-endpoint-mode .compact-button { min-height: 30px; }
 .ospf-endpoint-mode .compact-button.active { border-color: var(--green); background: var(--surface-soft); color: var(--green); }
@@ -1302,6 +1321,37 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ospf-topology-node:hover, .ospf-topology-node:active, .ospf-topology-node.dragging { transform: translate(-50%, -50%); cursor: grabbing; }
 .ospf-topology-node.selected { border-left-color: var(--green); box-shadow: 0 0 0 2px rgba(25,113,73,.18), 0 10px 26px var(--shadow-strong); }.ospf-topology-node strong, .ospf-topology-node small, .ospf-topology-node em { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.ospf-topology-node small, .ospf-topology-node em { color: var(--muted); font-size: 11px; font-style: normal; }.ospf-node-status { grid-row: 1 / span 3; width: 9px; height: 9px; margin-top: 3px; border-radius: 999px; background: var(--green); box-shadow: 0 0 0 3px rgba(43,138,87,.14); }
 .ospf-topology-node.connect-source { border-color: var(--accent); border-left-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent), 0 10px 26px var(--shadow-strong); }
+.ospf-topology-canvas.ospf-link-selection-active { cursor: default; }
+.ospf-link-selection-flow { position: static; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-bottom: 2px; pointer-events: auto; }
+.ospf-link-selection-step { display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 1px 7px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--surface) 95%, transparent); color: var(--muted); text-align: left; box-shadow: 0 5px 14px var(--shadow-soft); pointer-events: auto; }
+.ospf-link-selection-step > span { grid-row: 1 / span 2; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; background: var(--surface-soft); color: var(--muted); font-size: 12px; }
+.ospf-link-selection-step strong, .ospf-link-selection-step small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ospf-link-selection-step strong { color: var(--ink); font-size: 12px; font-weight: 600; }
+.ospf-link-selection-step small { font-size: 11px; }
+.ospf-link-selection-step.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent), 0 5px 14px var(--shadow-soft); }
+.ospf-link-selection-step.active > span { background: var(--accent); color: var(--accent-foreground, #fff); }
+.ospf-link-selection-step.done > span { background: var(--green); color: #fff; }
+.ospf-link-selection-step:disabled { opacity: .55; cursor: not-allowed; }
+.ospf-link-selection-hint { grid-column: 1 / -1; margin: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--surface) 95%, transparent); color: var(--muted); font-size: 12px; box-shadow: 0 5px 14px var(--shadow-soft); pointer-events: none; }
+.ospf-link-selecting-a .ospf-topology-node.connect-target::after, .ospf-link-selecting-b .ospf-topology-node.connect-target::after { position: absolute; right: 8px; top: -10px; padding: 2px 6px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+.ospf-link-selecting-a .ospf-topology-node.connect-target::after { content: "选择 A"; background: var(--surface-soft); border: 1px solid var(--accent); color: var(--accent); }
+.ospf-link-selecting-b .ospf-topology-node.connect-target::after { content: "选择 B"; background: color-mix(in srgb, var(--green) 16%, var(--surface)); border: 1px solid var(--green); color: var(--green); }
+.ospf-link-selection-active .ospf-topology-node.connect-target { border-color: color-mix(in srgb, var(--accent) 66%, var(--line)); }
+.ospf-link-selecting-b .ospf-topology-node.connect-target { border-color: color-mix(in srgb, var(--green) 66%, var(--line)); }
+.ospf-link-selection-active .ospf-topology-node.connect-source { border-color: var(--accent); border-left-color: var(--accent); }
+.ospf-topology-node.connect-target-selected { border-color: var(--green); border-left-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent), 0 10px 26px var(--shadow-strong); }
+.ospf-node-endpoint-badge { position: absolute; right: 8px; bottom: 8px; z-index: 1; min-width: 20px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 600; text-align: center; }
+.ospf-node-endpoint-a { background: var(--accent); }
+.ospf-node-endpoint-b { background: var(--green); }
+.ospf-link-selection-summary { display: grid; grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr); align-items: center; gap: 8px; margin: 12px 0 0; }
+.ospf-link-selection-summary > span { color: var(--muted); text-align: center; }
+.ospf-link-endpoint-card { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); text-align: left; }
+.ospf-link-endpoint-card small, .ospf-link-endpoint-card strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ospf-link-endpoint-card small { color: var(--muted); font-size: 11px; }
+.ospf-link-endpoint-card strong { margin-top: 3px; font-size: 13px; font-weight: 600; }
+.ospf-link-endpoint-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent); }
+.ospf-link-endpoint-card.ready { border-color: var(--green); }
+.ospf-link-endpoint-card:disabled { opacity: .55; cursor: not-allowed; }
 .ospf-link-editor { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }.ospf-link-endpoints { display: flex; align-items: end; gap: 8px; flex: 1 1 360px; min-width: 280px; }.ospf-link-endpoints > div { display: grid; gap: 4px; flex: 1 1 0; min-width: 0; }.ospf-link-endpoints small { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }.ospf-link-endpoints input { width: 100%; min-width: 0; }.ospf-link-endpoints > span { color: var(--muted); padding-bottom: 8px; }.ospf-link-editor .field { display: grid; gap: 3px; min-width: 74px; }.ospf-link-editor .field label { font-size: 10px; color: var(--muted); }.ospf-link-editor input { width: 74px; }.ospf-link-editor select { min-width: 90px; }.ospf-checkbox { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; }.ospf-checkbox input, .ospf-options input, .switch-label input { width: 16px !important; height: 16px !important; min-height: 16px !important; padding: 0 !important; accent-color: var(--green); box-shadow: none !important; }.ospf-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }.ospf-policy-grid .policy-block { min-width: 0; margin: 0; }
 .ospf-connect-hint { margin: 10px 0 0; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 8%, var(--surface)); color: var(--muted); font-size: 11px; line-height: 1.45; }
 .ospf-version-checks { display: flex; flex-wrap: wrap; gap: 8px; }.ospf-version-checks label { display: inline-flex; align-items: center; gap: 6px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }.ospf-version-checks input { width: 16px; height: 16px; accent-color: var(--accent); }.ospf-version-policy { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }.ospf-version-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }.ospf-version-heading small { color: var(--muted); font-size: 11px; }
@@ -1352,7 +1402,7 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ospf-virtual-link-row { display: grid; grid-template-columns: 1.2fr 1fr repeat(5, minmax(70px, .7fr)) 1fr 30px; gap: 7px; margin-top: 7px; }
 .ospf-virtual-link-row input, .ospf-virtual-link-row select { min-width: 0; width: 100%; }
 @media (max-width: 1180px) { .ospf-layout { grid-template-columns: 220px minmax(0, 1fr); }.ospf-runtime { grid-column: 1 / -1; position: static; max-height: none; }.ospf-add-link-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 700px) { .ospf-layout, .ospf-form-grid, .ospf-policy-grid { grid-template-columns: 1fr; }.ospf-actions { flex-wrap: wrap; }.ospf-node-panel { order: 0; }.ospf-editor { order: 1; }.ospf-runtime { order: 2; }.ospf-link-endpoints { flex-basis: 100%; }.ospf-version-heading { align-items: flex-start; flex-direction: column; }.ospf-topology-actions { align-items: flex-end; flex-direction: column; gap: 6px; }.ospf-add-link-grid { grid-template-columns: 1fr; }.ospf-topology-canvas { height: min(75vh, 700px); min-height: 420px; } }
+@media (max-width: 700px) { .ospf-layout, .ospf-form-grid, .ospf-policy-grid { grid-template-columns: 1fr; }.ospf-actions { flex-wrap: wrap; }.ospf-node-panel { order: 0; }.ospf-editor { order: 1; }.ospf-runtime { order: 2; }.ospf-link-endpoints { flex-basis: 100%; }.ospf-version-heading { align-items: flex-start; flex-direction: column; }.ospf-topology-actions { align-items: flex-end; flex-direction: column; gap: 6px; }.ospf-add-link-grid { grid-template-columns: 1fr; }.ospf-topology-canvas { height: min(75vh, 700px); min-height: 420px; }.ospf-link-selection-flow { grid-template-columns: 1fr; gap: 5px; }.ospf-link-selection-step { grid-template-columns: 22px minmax(0, 1fr) auto; padding: 6px 8px; }.ospf-link-selection-step small { grid-column: 3; grid-row: 1; }.ospf-link-selection-hint { font-size: 11px; }.ospf-link-selection-summary { grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); gap: 4px; } }
 
 /* OSPF controls stay readable on narrow screens instead of collapsing into a
  * single squeezed flex line. Keep the primary actions in the first viewport
@@ -1366,6 +1416,7 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
 .ospf-overview-head > .ospf-actions > button { flex: 0 0 auto; white-space: nowrap; }
 .ospf-overview-head > .ospf-actions > .ospf-domain-name { flex: 1 1 180px; width: 180px; }
 .ospf-overview-head > .ospf-actions > .ospf-domain-picker { flex: 0 1 180px; }
+.ospf-action-help { flex: 1 1 100%; color: var(--muted); font-size: 11px; }
 .ospf-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .ospf-health-card { display: grid; gap: 4px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .ospf-health-card.warning { border-color: color-mix(in srgb, var(--amber, #f59e0b) 55%, var(--line)); background: color-mix(in srgb, var(--amber, #f59e0b) 6%, var(--surface)); }
@@ -1418,6 +1469,7 @@ dialog.ospf-path-dialog { width: min(980px, calc(100vw - 32px)); }
   .ospf-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ospf-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; gap: 8px; width: 100%; min-width: 0; }
   .ospf-actions .ospf-domain-picker, .ospf-actions .ospf-domain-name { grid-column: 1 / -1; }
+  .ospf-action-help { grid-column: 1 / -1; }
   .ospf-actions > button { width: 100%; min-width: 0; }
   .ospf-overview-head > .ospf-actions > .ospf-domain-name { width: 100%; }
   .ospf-overview-head > .ospf-actions > button:last-child { grid-column: 1 / -1; }
@@ -1638,7 +1690,6 @@ dialog.protocol-runtime[open] { display: flex; flex-direction: column; }
 .ibgp-change-review > details { min-width: 0; margin-block: 12px; }
 .ibgp-change-review pre { max-height: 360px; overflow: auto; white-space: pre; max-width: 100%; }
 
-.connection-list-row > .text-danger-button { grid-column: auto; width: 32px; min-height: 36px; align-self: stretch; justify-self: stretch; border: 1px solid var(--line); border-radius: 5px; }
 .ibgp-status-notice { margin-block: 12px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow-wrap: anywhere; }
 .ibgp-status-notice p { margin-block: 6px; }
 .ibgp-status-notice button { margin: 4px 8px 4px 0; }

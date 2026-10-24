@@ -85,12 +85,16 @@ export function normalizeChannelPolicy(inputValue: unknown, label: string, direc
   const filterId = input.filterId === null || input.filterId === undefined || input.filterId === ""
     ? null
     : normalizeId(input.filterId, `${label} Filter ID`);
+  const inlineFilterSource = input.inlineFilterSource === null || input.inlineFilterSource === undefined || input.inlineFilterSource === ""
+    ? null
+    : normalizeBirdBlockSource(input.inlineFilterSource, `${label} Filter 源码`);
+  assertValidation(inlineFilterSource === null || inlineFilterSource.length > 0, `${label} Filter 源码不能为空`);
   const functionSteps = steps.filter((step): step is PolicyFunctionStep => step.type === "function");
   const formStepCount = steps.filter((step) => step.type === "form").length;
   assertValidation(functionSteps.length <= 16, `${label}最多可组合 16 个 Function`);
   assertValidation(new Set(functionSteps.map((step) => step.functionId)).size === functionSteps.length, `${label}包含重复 Function`);
   if (mode === "combined") assertValidation(formStepCount === 1, `${label}组合模式必须包含一个表单策略步骤`);
-  if (mode === "custom") assertValidation(filterId !== null, `${label}自定义模式必须选择 Filter`);
+  if (mode === "custom") assertValidation((filterId !== null) !== (inlineFilterSource !== null), `${label}自定义模式必须且只能配置一个 Filter`);
   const formAction = direction === "import"
     ? normalizeEnum(input.formAction, new Set(["all", "none"] as const), "all", "导入表单动作")
     : normalizeEnum(input.formAction, new Set(["all", "none", "cidr"] as const), "none", "导出表单动作");
@@ -98,6 +102,7 @@ export function normalizeChannelPolicy(inputValue: unknown, label: string, direc
     mode,
     steps: mode === "combined" ? steps : [],
     filterId: mode === "custom" ? filterId : null,
+    inlineFilterSource: mode === "custom" ? inlineFilterSource : null,
     formAction,
   };
 }

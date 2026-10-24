@@ -35,6 +35,31 @@ async function fixture(page: Page, draftOnly = false, runtime: any = { nodes: []
  return { writes, errors, failPreview() { failPreview = true; }, failApply() { failApply = true; }, conflict() { conflict = true; } };
 }
 async function applyPlan(page: Page) { await page.getByRole('button', { name: '保存并应用', exact: true }).click(); await expect(page.locator('.ospf-apply-dialog')).toBeVisible(); }
+test('OSPF topology link creation makes the second endpoint step explicit', async ({ page }) => {
+ await fixture(page);
+ await page.getByRole('button', { name: '＋ 添加链路', exact: true }).click();
+ const flow = page.locator('.ospf-link-selection-flow');
+ await expect(flow).toBeVisible();
+ await expect(flow.getByRole('button', { name: /选择端点 A/ })).toHaveClass(/active/);
+ await expect(page.locator('.ospf-link-selection-hint')).toContainText('第 1 步');
+ await page.locator('.ospf-topology-node').filter({ hasText: 'E2E Router' }).click();
+ await expect(flow.getByRole('button', { name: /选择端点 B/ })).toHaveClass(/active/);
+ await expect(page.locator('.ospf-link-selection-hint')).toContainText('第 2 步');
+ await expect(page.locator('.ospf-link-endpoint-card').nth(0)).toContainText('E2E Router');
+ await expect(page.locator('.ospf-link-endpoint-card').nth(1)).toContainText('待选择');
+ await expect(page.locator('.ospf-topology-node.connect-target')).toHaveCount(1);
+ await page.locator('.ospf-topology-node').filter({ hasText: 'E2E Edge' }).click();
+ await expect(flow.getByRole('button', { name: /配置链路/ })).toHaveClass(/active/);
+ await expect(page.locator('.ospf-link-selection-hint')).toContainText('已完成端点选择');
+ await expect(page.locator('.ospf-link-endpoint-card').nth(1)).toContainText('E2E Edge');
+ await expect(page.locator('.ospf-node-endpoint-b')).toHaveCount(1);
+ const add = page.locator('.ospf-add-link');
+ for (const endpoint of ['本端接口', '对端接口']) {
+  await add.locator('.field').filter({ hasText: endpoint }).locator('select').selectOption('eth1');
+ }
+ await add.getByRole('button', { name: '创建链路', exact: true }).click();
+ await expect(page.locator('.ospf-link-editor')).toBeVisible();
+});
 test('OSPF Area drawer displays actual per-version statistics separately from the current draft', async ({ page }) => {
  const protocol = (area: string, type: string) => ({ state: 'up', areasAvailable: true, areaError: null, error: null, raw: 'native protocol up with zero neighbors', areas: [{ area, type, interfaces: 2, neighbors: 0, adjacentNeighbors: 0, raw: `Area: ${area}\n Number of neighbors: 0` }] });
  await fixture(page, false, { nodes: ['local', 'edge'].map(nodeId => ({ nodeId, runtime: { v2: { state: null, neighbors: 0, routes: 0, protocol: protocol('0.0.0.0', 'normal') }, v3: { state: null, neighbors: 0, routes: 0, protocol: protocol('0.0.0.3', 'nssa') }, neighbors: [], routes: [] } })) });

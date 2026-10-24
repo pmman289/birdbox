@@ -347,8 +347,8 @@ test("migrates node-level BGP settings and advertised prefixes to schema v19", a
   assert.deepEqual(state.functions, []);
   assert.deepEqual(state.filters, []);
   assert.equal(state.prefixLists, undefined);
-  assert.deepEqual(state.sessions[0].channels.ipv4.importPolicy, { mode: "form", steps: [], filterId: null, formAction: "all" });
-  assert.deepEqual(state.sessions[0].channels.ipv4.exportPolicy, { mode: "form", steps: [], filterId: null, formAction: "cidr" });
+  assert.deepEqual(state.sessions[0].channels.ipv4.importPolicy, { mode: "form", steps: [], filterId: null, inlineFilterSource: null, formAction: "all" });
+  assert.deepEqual(state.sessions[0].channels.ipv4.exportPolicy, { mode: "form", steps: [], filterId: null, inlineFilterSource: null, formAction: "cidr" });
   assert.deepEqual(await store.read(), state);
 });
 

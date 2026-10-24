@@ -158,7 +158,7 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
   assert.deepEqual(normalizeStaticProtocol(staticProtocols[1]), {
     id: "static_ix", nodeId: "local", label: "IX static", name: "birdbox_static4_ix_bgp", family: "ipv4",
     defineId: "prefix_ix", action: "reject", routeActions: {}, routeFilters: {}, import: "all", export: "none", raw: "",
-    enabled: true, table: { name: "master4", source: "existing" }, igpTable: null, checkLink: false, routes: [], importPolicy: { mode: "form", formAction: "all", filterId: null, steps: [] },
+    enabled: true, table: { name: "master4", source: "existing" }, igpTable: null, checkLink: false, routes: [], importPolicy: { mode: "form", formAction: "all", filterId: null, inlineFilterSource: null, steps: [] },
   });
   assert.equal(normalizeSession({ ...sessions[0], localAddress: null }).localAddress, null);
   assert.throws(
@@ -190,6 +190,36 @@ test("normalizes managed nodes, peers, typed Defines, and session-local settings
     () => normalizeSession({ ...sessions[0], bgp: { description: "Bad\rdescription" } }),
     /控制字符/,
   );
+});
+
+test("renders a current-item custom filter inline without registering a shared Filter", () => {
+  const inlineSource = "if net ~ [ 192.0.2.0/24 ] then accept;\nreject;";
+  const base = normalizeSession(sessions[0]);
+  const session = normalizeSession({
+    ...base,
+    channels: {
+      ...base.channels,
+      ipv4: {
+        ...base.channels.ipv4,
+        exportDefineId: null,
+        exportPolicy: { mode: "form", steps: [{ type: "form" }], filterId: null, inlineFilterSource: null, formAction: "none" },
+        importPolicy: { mode: "custom", steps: [], filterId: null, inlineFilterSource: inlineSource, formAction: "all" },
+      },
+    },
+  });
+  const config = renderBirdConfig(node, peers, [session]);
+  assert.match(config, /import filter \{\n      if net ~ \[ 192\.0\.2\.0\/24 \] then accept;\n      reject;\n    \};/);
+  assert.doesNotMatch(config, /filter\s+custom_import\s*\{/);
+  assert.throws(() => normalizeSession({
+    ...base,
+    channels: {
+      ...base.channels,
+      ipv4: {
+        ...base.channels.ipv4,
+        importPolicy: { mode: "custom", steps: [], filterId: null, inlineFilterSource: null, formAction: "all" },
+      },
+    },
+  }), /必须且只能配置一个 Filter/);
 });
 
 test("extracts only the requested verbose BIRD protocol block", () => {

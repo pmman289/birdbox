@@ -180,7 +180,7 @@ function open(resource: StaticProtocol | null): void {
     routes: cloneReactive(resource?.routes ?? []),
     table: cloneReactive(resource?.table ?? { name: resource?.family === "ipv6" ? "master6" : "master4", source: "existing" }),
     igpTable: resource?.igpTable ?? null, checkLink: resource?.checkLink ?? false,
-    importPolicy: cloneReactive(resource?.importPolicy ?? { mode: "form", formAction: resource?.import ?? "all", steps: [], filterId: null }),
+    importPolicy: cloneReactive(resource?.importPolicy ?? { mode: "form", formAction: resource?.import ?? "all", steps: [], filterId: null, inlineFilterSource: null }),
   });
   clearRecord(defineDrafts); clearRecord(defineDefaults); originalDefineId.value = resource?.defineId ?? null;
   if (resource?.defineId) defineDefaults[resource.defineId] = cloneReactive(resource.action ?? "blackhole");

@@ -283,6 +283,7 @@ const search = ref("");
 const links = ref<OspfLink[]>([]);
 const selectedLinkId = ref<string | null>(null);
 const showAddLink = ref(false);
+const addLinkPanel = ref<HTMLElement | null>(null);
 const linkConnectMode = ref(false);
 const linkConnectFirstNodeId = ref<string | null>(null);
 const linkDraftFrom = ref("mrouter");
@@ -291,16 +292,43 @@ const linkDraftLocalInterface = ref("");
 const linkDraftRemoteInterface = ref("");
 const linkDraftArea = ref("0.0.0.0");
 const linkDraftError = ref("");
+const linkSelectionStep = computed<"a" | "b" | "config">(() => {
+  if (!showAddLink.value || !linkConnectMode.value) return "config";
+  return linkConnectFirstNodeId.value ? "b" : "a";
+});
+const linkSelectionFromId = computed(() =>
+  linkConnectMode.value ? linkConnectFirstNodeId.value : linkDraftFrom.value,
+);
+const linkSelectionToId = computed(() =>
+  linkConnectMode.value ? null : linkDraftTo.value,
+);
+const linkSelectionFromNode = computed(() =>
+  nodes.value.find((node) => node.id === linkSelectionFromId.value) ?? null,
+);
+const linkSelectionToNode = computed(() =>
+  nodes.value.find((node) => node.id === linkSelectionToId.value) ?? null,
+);
+const linkSelectionHint = computed(() => {
+  if (linkSelectionStep.value === "a") {
+    return "第 1 步 · 选择端点 A：点击拓扑中的一个节点。";
+  }
+  if (linkSelectionStep.value === "b") {
+    return `第 2 步 · 选择端点 B：已选 A“${linkSelectionFromNode.value?.name ?? "当前节点"}”，点击任意其他节点完成配对。`;
+  }
+  return `已完成端点选择：${linkSelectionFromNode.value?.name ?? linkDraftFrom.value} ↔ ${linkSelectionToNode.value?.name ?? linkDraftTo.value}。请确认两端接口和 Area。`;
+});
 const defaultImportPolicy = (): ChannelPolicy => ({
   mode: "combined",
   formAction: "all",
   filterId: null,
+  inlineFilterSource: null,
   steps: [{ type: "form" }],
 });
 const defaultExportPolicy = (): ChannelPolicy => ({
   mode: "combined",
   formAction: "none",
   filterId: null,
+  inlineFilterSource: null,
   steps: [{ type: "form" }],
 });
 const ospfImportPolicies = ref<Record<OspfVersion, ChannelPolicy>>({
@@ -878,8 +906,8 @@ function linkGeometry(link: OspfLink): {
   x2: number;
   y2: number;
 } {
-  const from = linkPosition(link.from);
-  const to = linkPosition(link.to);
+  const from = topologyPosition(link.from);
+  const to = topologyPosition(link.to);
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const length = Math.hypot(dx, dy) || 1;
@@ -1454,6 +1482,16 @@ function linkPosition(id: string): { x: number; y: number } {
   return nodePosition.value[id] ?? { x: 0, y: 0 };
 }
 
+function topologyPosition(id: string): { x: number; y: number } {
+  const canvasWidth = topologyCanvas.value?.clientWidth ?? 0;
+  if (canvasWidth > 0 && canvasWidth < 700) {
+    const index = Math.max(0, nodes.value.findIndex((node) => node.id === id));
+    // Stack cards in the compact canvas so the full node remains visible.
+    return { x: TOPOLOGY_WIDTH / 2, y: 650 + index * 180 };
+  }
+  return linkPosition(id);
+}
+
 function clampTopologyScale(value: number): number {
   return Math.max(0.6, Math.min(1.8, Number(value.toFixed(2))));
 }
@@ -1474,16 +1512,24 @@ function centerTopologyView(positions: Record<string, OspfNodePosition>): void {
   const maxX = Math.max(...points.map((point) => point.x));
   const minY = Math.min(...points.map((point) => point.y));
   const maxY = Math.max(...points.map((point) => point.y));
+  const canvasWidth = topologyCanvas.value?.clientWidth ?? 0;
+  if (canvasWidth > 0 && canvasWidth < 700) {
+    topologyScale.value = 1;
+    const averageY = 650 + Math.max(0, nodes.value.length - 1) * 90;
+    topologyPan.value = { x: 0, y: TOPOLOGY_HEIGHT / 2 - averageY };
+    return;
+  }
+  if (canvasWidth > 0 && canvasWidth < 1100) {
+    topologyScale.value = Math.min(1, Math.max(0.6, canvasWidth / (maxX - minX + 220)));
+  }
+  const scale = topologyScale.value;
   topologyPan.value = {
-    // Keep the first managed node inside the initial viewport. The world is
-    // intentionally larger than the canvas for panning, so mathematically
-    // centering a sparse graph can place its first node just outside the
-    // viewport (especially on desktop where the canvas is narrower than the
-    // world). A small rightward bias makes the initial state immediately
-    // actionable while preserving free pan/zoom.
-    x: TOPOLOGY_WIDTH / 2 - (minX + maxX) / 2 + 220,
-    y: TOPOLOGY_HEIGHT / 2 - (minY + maxY) / 2,
+    x: (TOPOLOGY_WIDTH / 2 - (minX + maxX) / 2) * scale,
+    y: (TOPOLOGY_HEIGHT / 2 - (minY + maxY) / 2) * scale,
   };
+}
+function handleTopologyViewportResize(): void {
+  if (Object.keys(nodePosition.value).length) centerTopologyView(nodePosition.value);
 }
 function startTopologyPan(event: PointerEvent): void {
   if (event.button !== 0 || dragging.value) return;
@@ -1596,6 +1642,26 @@ function handleDraftToChange(): void {
     linkDraftFrom.value = nodes.value.find((node) => node.id !== linkDraftTo.value)?.id ?? "";
   }
 }
+function selectLinkSelectionStep(step: "a" | "b" | "config"): void {
+  if (!showAddLink.value || ospfActionPending.value) return;
+  linkDraftError.value = "";
+  if (step === "a") {
+    linkConnectMode.value = true;
+    linkConnectFirstNodeId.value = null;
+    linkDraftLocalInterface.value = "";
+    linkDraftRemoteInterface.value = "";
+    return;
+  }
+  if (step === "b") {
+    if (!linkConnectFirstNodeId.value) return;
+    linkConnectMode.value = true;
+    linkDraftRemoteInterface.value = "";
+    return;
+  }
+  if (linkConnectFirstNodeId.value && linkDraftTo.value && linkDraftTo.value !== linkConnectFirstNodeId.value) {
+    linkConnectMode.value = false;
+  }
+}
 function openAddLink(): void {
   const first = nodes.value[0]?.id ?? "";
   const second = nodes.value.find((node) => node.id !== first)?.id ?? first;
@@ -1605,6 +1671,10 @@ function openAddLink(): void {
   linkConnectMode.value = true;
   linkConnectFirstNodeId.value = null;
   resetLinkDraft();
+}
+function revealAddLinkConfig(): void {
+  if (!window.matchMedia("(max-width: 700px)").matches) return;
+  void nextTick(() => addLinkPanel.value?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 function closeAddLink(): void {
   showAddLink.value = false;
@@ -1784,6 +1854,7 @@ function handleNodeClick(node: OspfNode): void {
     linkDraftRemoteInterface.value = "";
     linkDraftError.value = "已选择两端节点，请确认自动发现的接口后创建链路";
     linkConnectMode.value = false;
+    revealAddLinkConfig();
     return;
   }
   selectNode(node);
@@ -2068,11 +2139,14 @@ watch(
 onMounted(() => {
   window.addEventListener("beforeunload", protectOspfDraft);
   window.addEventListener("birdbox:authenticated", handleAuthenticated);
+  window.addEventListener("resize", handleTopologyViewportResize);
+  void nextTick(handleTopologyViewportResize);
   if (dashboard.value) void loadOspfDomains();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("beforeunload", protectOspfDraft);
   window.removeEventListener("birdbox:authenticated", handleAuthenticated);
+  window.removeEventListener("resize", handleTopologyViewportResize);
 });
 onMounted(() => {
   runtimeTimer = window.setInterval(() => void refreshOspfRuntime(), 15_000);
@@ -2136,8 +2210,7 @@ onBeforeUnmount(() => {
         <div>
           <h3>OSPF 拓扑</h3>
           <small
-            >拖动节点调整位置，拖动空白区域平移大型画布，点击线路编辑两端接口和链路参数；同一对节点的 Cost
-            保持一致</small
+            >拖动节点调整位置，拖动空白区域平移大型画布；添加链路时按步骤选择端点 A 和端点 B</small
           >
         </div>
         <div class="ospf-topology-actions">
@@ -2172,9 +2245,37 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+      <div v-if="showAddLink" class="ospf-link-selection-flow" aria-label="添加 OSPF 链路步骤">
+        <button
+          type="button"
+          class="ospf-link-selection-step"
+          :class="{ active: linkSelectionStep === 'a', done: !!linkSelectionFromNode }"
+          @click="selectLinkSelectionStep('a')"
+        ><span>1</span><strong>选择端点 A</strong><small>拓扑节点</small></button>
+        <button
+          type="button"
+          class="ospf-link-selection-step"
+          :class="{ active: linkSelectionStep === 'b', done: !!linkSelectionToNode }"
+          :disabled="!linkSelectionFromNode"
+          @click="selectLinkSelectionStep('b')"
+        ><span>2</span><strong>选择端点 B</strong><small>拓扑节点</small></button>
+        <button
+          type="button"
+          class="ospf-link-selection-step"
+          :class="{ active: linkSelectionStep === 'config' }"
+          :disabled="!linkSelectionToNode"
+          @click="selectLinkSelectionStep('config')"
+        ><span>3</span><strong>配置链路</strong><small>接口与 Area</small></button>
+        <p class="ospf-link-selection-hint" role="status" aria-live="polite">{{ linkSelectionHint }}</p>
+      </div>
       <div
         ref="topologyCanvas"
         class="ospf-topology-canvas"
+        :class="{
+          'ospf-link-selection-active': showAddLink,
+          'ospf-link-selecting-a': showAddLink && linkSelectionStep === 'a',
+          'ospf-link-selecting-b': showAddLink && linkSelectionStep === 'b',
+        }"
         @wheel.prevent="handleTopologyWheel"
         @click="handleTopologyClick"
         @pointerdown="startTopologyPan"
@@ -2246,10 +2347,16 @@ onBeforeUnmount(() => {
           type="button"
           class="ospf-topology-node"
           :draggable="false"
-          :class="{ selected: selectedNodeId === node.id, dragging: dragging?.id === node.id, 'connect-source': linkConnectFirstNodeId === node.id }"
+          :class="{
+            selected: selectedNodeId === node.id,
+            dragging: dragging?.id === node.id,
+            'connect-source': showAddLink && linkConnectFirstNodeId === node.id,
+            'connect-target': showAddLink && (linkSelectionStep === 'a' || (linkSelectionStep === 'b' && linkConnectFirstNodeId !== node.id)),
+            'connect-target-selected': showAddLink && linkSelectionStep === 'config' && linkDraftTo === node.id,
+          }"
           :style="{
-            left: `${(linkPosition(node.id).x / TOPOLOGY_WIDTH) * 100}%`,
-            top: `${(linkPosition(node.id).y / TOPOLOGY_HEIGHT) * 100}%`,
+            left: `${(topologyPosition(node.id).x / TOPOLOGY_WIDTH) * 100}%`,
+            top: `${(topologyPosition(node.id).y / TOPOLOGY_HEIGHT) * 100}%`,
           }"
           @pointerdown.stop="startNodeDrag($event, node)"
           @pointermove.stop="dragNode"
@@ -2258,6 +2365,8 @@ onBeforeUnmount(() => {
           @dragstart.prevent
           @click.stop.prevent="handleNodeClick(node)"
         >
+          <span v-if="showAddLink && linkConnectFirstNodeId === node.id" class="ospf-node-endpoint-badge ospf-node-endpoint-a">A</span>
+          <span v-else-if="showAddLink && !linkConnectMode && linkDraftTo === node.id" class="ospf-node-endpoint-badge ospf-node-endpoint-b">B</span>
           <span class="ospf-node-status" /><strong>{{ node.name }}</strong
           ><small>{{ node.routerId }}</small
           ><em>{{ node.neighbors }} 邻居 · {{ node.routes }} 路由</em>
@@ -2270,7 +2379,7 @@ onBeforeUnmount(() => {
           <button type="button" class="secondary-button compact-button" @click="resetTopologyZoom">重置</button>
         </div>
       </div>
-      <div v-if="showAddLink" class="ospf-add-link">
+      <div v-if="showAddLink" ref="addLinkPanel" class="ospf-add-link">
         <div class="ospf-add-link-head">
           <strong>添加 OSPF 链路</strong
           ><button
@@ -2282,50 +2391,51 @@ onBeforeUnmount(() => {
             ×
           </button>
         </div>
-        <p v-if="linkConnectMode" class="ospf-connect-hint">连接模式：在拓扑上点击第一个节点，再点击第二个节点。也可以直接使用下方选择器。</p>
-        <p v-else class="ospf-connect-hint">已选择两端节点。接口列表来自自动发现，发现失败时可手动输入。</p>
+        <p class="ospf-connect-hint" role="status" aria-live="polite">{{ linkSelectionHint }}</p>
+        <div class="ospf-link-selection-summary" aria-label="当前链路端点">
+          <button
+            type="button"
+            class="ospf-link-endpoint-card"
+            :class="{ active: linkSelectionStep === 'a', ready: !!linkSelectionFromNode }"
+            @click="selectLinkSelectionStep('a')"
+          ><small>端点 A</small><strong>{{ linkSelectionFromNode?.name ?? '待选择' }}</strong></button>
+          <span aria-hidden="true">↔</span>
+          <button
+            type="button"
+            class="ospf-link-endpoint-card"
+            :class="{ active: linkSelectionStep === 'b', ready: !!linkSelectionToNode }"
+            :disabled="!linkSelectionFromNode"
+            @click="selectLinkSelectionStep('b')"
+          ><small>端点 B</small><strong>{{ linkSelectionToNode?.name ?? '待选择' }}</strong></button>
+        </div>
         <div class="ospf-add-link-grid">
           <div class="field">
-            <label>本端节点</label
-            ><select v-model="linkDraftFrom" @change="handleDraftFromChange">
-              <option v-for="node in nodes" :key="node.id" :value="node.id">
-                {{ node.name }}
-              </option>
-            </select>
-          </div>
-          <div class="field">
             <label>本端接口</label
-            ><select v-if="linkDraftLocalOptions.length" v-model="linkDraftLocalInterface">
+            ><select v-if="linkDraftLocalOptions.length" v-model="linkDraftLocalInterface" :disabled="!linkSelectionToNode">
               <option value="">请选择 {{ nodes.find((node) => node.id === linkDraftFrom)?.name ?? "本端" }} 接口</option>
               <option v-for="item in linkDraftLocalOptions" :key="`draft-local-${item}`" :value="item">{{ item }}</option>
             </select><input
               v-else
               v-model.trim="linkDraftLocalInterface"
+              :disabled="!linkSelectionToNode"
               :placeholder="`手动填写 ${nodes.find((node) => node.id === linkDraftFrom)?.name ?? '本端'} 接口名`"
             />
           </div>
           <div class="field">
-            <label>对端节点</label
-            ><select v-model="linkDraftTo" @change="handleDraftToChange">
-              <option v-for="node in nodes" :key="node.id" :value="node.id">
-                {{ node.name }}
-              </option>
-            </select>
-          </div>
-          <div class="field">
             <label>对端接口</label
-            ><select v-if="linkDraftRemoteOptions.length" v-model="linkDraftRemoteInterface">
+            ><select v-if="linkDraftRemoteOptions.length" v-model="linkDraftRemoteInterface" :disabled="!linkSelectionToNode">
               <option value="">请选择 {{ nodes.find((node) => node.id === linkDraftTo)?.name ?? "对端" }} 接口</option>
               <option v-for="item in linkDraftRemoteOptions" :key="`draft-remote-${item}`" :value="item">{{ item }}</option>
             </select><input
               v-else
               v-model.trim="linkDraftRemoteInterface"
+              :disabled="!linkSelectionToNode"
               :placeholder="`手动填写 ${nodes.find((node) => node.id === linkDraftTo)?.name ?? '对端'} 接口名`"
             />
           </div>
           <div class="field">
             <label>Area</label
-            ><input v-model="linkDraftArea" placeholder="0.0.0.0" />
+            ><input v-model="linkDraftArea" :disabled="!linkSelectionToNode" placeholder="0.0.0.0" />
           </div>
         </div>
         <p v-if="linkDraftError" class="ospf-form-error" role="alert">

@@ -228,7 +228,7 @@ function validateDraft(report: boolean): boolean {
       return fail("Next Hop Keep 与 Next Hop Self 不能同时启用", "channels");
     }
     for (const policy of [channel.importPolicy, channel.exportPolicy]) {
-      if (policy.mode === "custom" && !policy.filterId) return fail("自定义策略必须选择 Filter", "channels");
+      if (policy.mode === "custom" && !policy.filterId && !policy.inlineFilterSource?.trim()) return fail("自定义策略必须选择 Filter 或编写当前项 Filter", "channels");
     }
     if (channel.exportPolicy.mode !== "custom" && channel.exportPolicy.formAction === "cidr" && !channel.exportDefineId) {
       return fail("导出指定 CIDR 模式必须选择 CIDR Define", "channels");
@@ -552,7 +552,7 @@ function insertPolicyFunction(resource: PolicyFunction): void {
   const formIndex = steps.findIndex((step) => step.type === "form");
   steps.splice(formIndex < 0 ? steps.length : formIndex, 0, { type: "function", functionId: resource.id, action: "execute" });
   if (!steps.some((step) => step.type === "form")) steps.push({ type: "form" });
-  channel[policyKey] = { ...policy, mode: "combined", steps, filterId: null };
+  channel[policyKey] = { ...policy, mode: "combined", steps, filterId: null, inlineFilterSource: null };
   policyActionContext.value = null;
 }
 

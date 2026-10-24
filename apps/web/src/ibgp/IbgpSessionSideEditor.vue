@@ -71,7 +71,7 @@ const visibleFilters = computed(() =>
   <section class="ibgp-side-editor" :data-node-id="model.nodeId" @input="emit('dirty')" @change="emit('dirty')">
     <div class="subsection-head ibgp-side-heading">
       <div>
-        <div class="ibgp-side-title"><span class="ibgp-side-label">{{ side === "left" ? "左端" : "右端" }}</span><h3>{{ nodeName }}</h3></div>
+        <div class="ibgp-side-title"><span class="ibgp-side-label">{{ side === "left" ? "端点 A" : "端点 B" }}</span><h3>{{ nodeName }}</h3></div>
         <span>连接到 {{ peer.name }} · {{ peer.address }}</span>
       </div>
       <span class="status-pill unconfigured">iBGP</span>
@@ -87,9 +87,15 @@ const visibleFilters = computed(() =>
           maxlength="48"
         />
       </div>
-      <div class="field">
-        <label>本地连接地址</label>
-        <div class="field-readonly">{{ model.localAddress }}</div>
+      <div class="field ibgp-transport-field">
+        <label :for="`${formId}-local-address`">本端 BGP 地址（IGP / Loopback）</label>
+        <input
+          :id="`${formId}-local-address`"
+          v-model.trim="model.localAddress"
+          placeholder="IPv4 或 IPv6 地址"
+          autocomplete="off"
+        />
+        <small class="field-hint">此地址属于节点，会影响该节点的其他 iBGP 会话。</small>
       </div>
       <div class="field">
         <label :for="`${formId}-port`">本地端口</label

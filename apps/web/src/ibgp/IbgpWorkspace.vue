@@ -42,8 +42,10 @@ const loading = ref(false);
 const saving = ref(false);
 const layoutSaving = ref(false);
 const error = ref("");
-const connectionSearch = ref("");
+const connectionSelectionStep = ref<"idle" | "a" | "b" | "config">("idle");
+const connectionSelectionFirstNodeId = ref<string | null>(null);
 const canvas = ref<HTMLElement | null>(null);
+const canvasViewportWidth = ref(0);
 const dragging = ref<{ nodeId: string; dx: number; dy: number; moved?: boolean } | null>(null);
 const previewPending = ref(false);
 const previewValid = ref<boolean | null>(null);
@@ -85,15 +87,6 @@ const currentInventory = computed<Inventory | null>(
 const nodes = computed<ManagedNode[]>(
   () => currentInventory.value?.nodes ?? [],
 );
-const selectedNode = computed(
-  () => nodes.value.find((node) => node.id === selectedNodeId.value) ?? null,
-);
-const selectedMember = computed(
-  () =>
-    draft.value?.members.find(
-      (member) => member.nodeId === selectedNodeId.value,
-    ) ?? null,
-);
 const selectedAdjacency = computed(
   () =>
     draft.value?.adjacencies.find(
@@ -117,16 +110,21 @@ const policySession = computed(() => {
 const inventoryDefines = computed(() => currentInventory.value?.defines ?? []);
 const inventoryFunctions = computed(() => currentInventory.value?.functions ?? []);
 const inventoryFilters = computed(() => currentInventory.value?.filters ?? []);
-const connectionCandidates = computed(() => {
-  const domain = draft.value;
-  if (!domain || !selectedNodeId.value) return [];
-  const query = connectionSearch.value.trim().toLowerCase();
-  return domainNodes(domain).filter((node) => {
-    if (node.id === selectedNodeId.value) return false;
-    if (!query) return true;
-    const address = domain.members.find((member) => member.nodeId === node.id)?.address ?? "";
-    return `${node.name} ${node.id} ${address}`.toLowerCase().includes(query);
-  });
+const connectionSelectionFromNode = computed(() =>
+  nodes.value.find((node) => node.id === connectionSelectionFirstNodeId.value) ?? null,
+);
+const connectionSelectionToNode = computed(() => {
+  const adjacency = selectedAdjacency.value;
+  const firstNodeId = connectionSelectionFirstNodeId.value;
+  if (!adjacency || !firstNodeId) return null;
+  const remoteNodeId = adjacency.leftNodeId === firstNodeId ? adjacency.rightNodeId : adjacency.leftNodeId;
+  return nodes.value.find((node) => node.id === remoteNodeId) ?? null;
+});
+const connectionSelectionStepLabel = computed(() => {
+  if (connectionSelectionStep.value === "a") return "第 1 步 · 选择端点 A：点击拓扑中的一个节点。";
+  if (connectionSelectionStep.value === "b") return `第 2 步 · 选择端点 B：已选 A“${connectionSelectionFromNode.value?.name ?? "当前节点"}”，点击另一个节点完成配对。`;
+  if (connectionSelectionStep.value === "config") return "第 3 步 · 配置双端：连接已建立，分别编辑两端会话参数。";
+  return "点击“添加连接”，再按拓扑中的 A → B 顺序选择两端。";
 });
 
 function peerForSide(side: "left" | "right"): Peer | null {
@@ -250,7 +248,7 @@ async function focusPairSide(side: "left" | "right"): Promise<void> {
 
 const workflowSteps = computed(() => [
   { id: "domain", title: "域与节点", detail: `${draft.value?.members.length ?? 0} 个成员 · AS${draft.value?.asn ?? '未设置'}` },
-  { id: "connections", title: "连接与双端", detail: draft.value?.adjacencies.length ? `${draft.value.adjacencies.length} 条连接 · 分端编辑` : "点选本机，再选择对端建立连接" },
+  { id: "connections", title: "连接与双端", detail: draft.value?.adjacencies.length ? `${draft.value.adjacencies.length} 条连接 · 分端编辑` : "在拓扑中选择端点 A 和端点 B" },
   { id: "review", title: "预检与应用", detail: previewValid.value ? "当前草稿已通过预检" : "检查所有受影响节点", disabled: previewPending.value },
 ]);
 async function focusWorkflowStep(id: string): Promise<void> {
@@ -290,7 +288,28 @@ function layoutFor(
   nodeId: string,
   index: number,
 ): { x: number; y: number; locked: boolean } {
-  return draft.value?.layout[nodeId] ?? defaultLayoutFor(index);
+  const saved = draft.value?.layout[nodeId] ?? defaultLayoutFor(index);
+  // Keep the topology readable on narrow screens without changing the
+  // persisted desktop coordinates. On narrow screens all nodes use a compact
+  // two-column presentation so the saved desktop layout cannot crop them.
+  // The canvas is mounted after the draft is loaded. During that first
+  // render its clientWidth can still be zero, so fall back to the viewport
+  // width and apply the compact presentation immediately on mobile.
+  const viewportWidth =
+    canvasViewportWidth.value ||
+    (typeof window !== "undefined" ? window.innerWidth : 0);
+  if (viewportWidth > 0 && viewportWidth < 620) {
+    return {
+      ...saved,
+      x: 24 + (index % 2) * 166,
+      y: 36 + Math.floor(index / 2) * 122,
+    };
+  }
+  return saved;
+}
+
+function refreshCanvasViewport(): void {
+  canvasViewportWidth.value = canvas.value?.clientWidth ?? 0;
 }
 
 function layoutForId(nodeId: string): { x: number; y: number; locked: boolean } {
@@ -453,7 +472,8 @@ function selectDomain(domainId: string, reload = false): void {
     suppressDraftDirty = false;
   }
   draftDirty.value = false;
-  connectionSearch.value = "";
+  connectionSelectionStep.value = "idle";
+  connectionSelectionFirstNodeId.value = null;
   void refreshIbgpRuntimes();
 }
 
@@ -468,7 +488,8 @@ function newDomain(): void {
   suppressDraftDirty = true;
   sessionDrafts.value = {};
   suppressDraftDirty = false;
-  connectionSearch.value = "";
+  connectionSelectionStep.value = "idle";
+  connectionSelectionFirstNodeId.value = null;
   previewSides.value = [];
   previewValid.value = null;
   draftDirty.value = false;
@@ -603,11 +624,49 @@ async function saveLayout(): Promise<void> {
 }
 
 function selectNode(nodeId: string): void {
+  if (connectionSelectionStep.value === "a") {
+    connectionSelectionFirstNodeId.value = nodeId;
+    selectedNodeId.value = nodeId;
+    selectedAdjacencyId.value = null;
+    connectionSelectionStep.value = "b";
+    return;
+  }
+  if (connectionSelectionStep.value === "b") {
+    const firstNodeId = connectionSelectionFirstNodeId.value;
+    if (!firstNodeId) {
+      connectionSelectionStep.value = "a";
+      return;
+    }
+    if (firstNodeId === nodeId) return;
+    selectedNodeId.value = firstNodeId;
+    connectNode(nodeId);
+    connectionSelectionStep.value = "config";
+    // A new adjacency is a two-sided editing task. Show both endpoint
+    // editors immediately instead of making the user discover the toggle.
+    endpointView.value = "both";
+    return;
+  }
   selectedNodeId.value = nodeId;
   const adjacency = draft.value?.adjacencies.find(
     (item) => item.leftNodeId === nodeId || item.rightNodeId === nodeId,
   );
   selectedAdjacencyId.value = adjacency?.id ?? null;
+}
+
+function startConnectionSelection(): void {
+  if (!draft.value || draft.value.members.length < 2) return;
+  connectionSelectionStep.value = "a";
+  connectionSelectionFirstNodeId.value = null;
+  selectedAdjacencyId.value = null;
+}
+
+function selectConnectionSelectionStep(step: "a" | "b" | "config"): void {
+  if (step === "a") {
+    startConnectionSelection();
+    return;
+  }
+  if (connectionSelectionFirstNodeId.value) connectionSelectionStep.value = "b";
+  if (step === "config" && selectedAdjacency.value) connectionSelectionStep.value = "config";
 }
 
 function startDrag(event: PointerEvent, nodeId: string): void {
@@ -693,18 +752,13 @@ function removeConnection(adjacency: IbgpAdjacency): void {
     selectedAdjacencyId.value = draft.value.adjacencies[0]?.id ?? null;
 }
 
-function setMember<K extends keyof IbgpMember>(
-  key: K,
-  value: IbgpMember[K],
-): void {
-  if (!selectedMember.value) return;
+function updateSessionDraft(sessionId: string, session: BgpSession): void {
+  if (!draft.value) return;
   markDraftDirty();
-  selectedMember.value[key] = value;
-  if (key !== "address") return;
-  for (const session of Object.values(sessionDrafts.value)) {
-    if (session.nodeId === selectedMember.value.nodeId) {
-      session.localAddress = String(value);
-    }
+  sessionDrafts.value[sessionId] = session;
+  const member = draft.value.members.find((item) => item.nodeId === session.nodeId);
+  if (member) {
+    member.address = session.localAddress ?? "";
   }
 }
 
@@ -739,7 +793,7 @@ function insertPolicyFunction(resource: PolicyFunction): void {
     action: "execute",
   });
   if (!steps.some((step) => step.type === "form")) steps.push({ type: "form" });
-  channel[policyKey] = { ...policy, mode: "combined", steps, filterId: null };
+  channel[policyKey] = { ...policy, mode: "combined", steps, filterId: null, inlineFilterSource: null };
   policyActionContext.value = null;
 }
 
@@ -814,6 +868,7 @@ watch(
   },
   { deep: true },
 );
+watch(draft, () => void nextTick(refreshCanvasViewport), { flush: "post" });
 
 function handleAppReady(): void {
   void loadDomains();
@@ -823,6 +878,8 @@ onMounted(() => {
   mounted = true;
   window.addEventListener("birdbox:app-ready", handleAppReady);
   window.addEventListener("beforeunload", beforeUnload);
+  window.addEventListener("resize", refreshCanvasViewport);
+  void nextTick(refreshCanvasViewport);
   runtimeTimer = window.setInterval(() => void refreshIbgpRuntimes(), 10000);
 });
 onBeforeUnmount(() => {
@@ -831,6 +888,7 @@ onBeforeUnmount(() => {
   runtimeRefreshSequence += 1;
   window.removeEventListener("birdbox:app-ready", handleAppReady);
   window.removeEventListener("beforeunload", beforeUnload);
+  window.removeEventListener("resize", refreshCanvasViewport);
   if (previewTimer !== null) window.clearTimeout(previewTimer);
   if (runtimeTimer !== null) window.clearInterval(runtimeTimer);
 });
@@ -843,7 +901,7 @@ onBeforeUnmount(() => {
         <p class="eyebrow">INTERNAL BGP</p>
         <h2 id="ibgpTitle">iBGP 管理</h2>
         <p class="section-note">
-          域内节点默认不建立连接；请在画布中选择节点并手工建立双向邻接。
+          域内节点默认不建立连接；点击“添加连接”，再在拓扑中选择端点 A 和端点 B。
         </p>
       </div>
       <div class="ibgp-toolbar">
@@ -928,7 +986,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="panel-head">
           <div>
-            <h3>手工邻接画布</h3>
+            <h3>iBGP 拓扑</h3>
             <small
               >{{ draft.members.length }} 个节点 ·
               {{ draft.adjacencies.length }} 条双向连接</small
@@ -965,7 +1023,11 @@ onBeforeUnmount(() => {
             v-for="(node, index) in domainNodes(draft)"
             :key="node.id"
             class="ibgp-node"
-            :class="{ selected: selectedNodeId === node.id }"
+            :class="{
+              selected: selectedNodeId === node.id,
+              'connect-source': connectionSelectionStep === 'b' && connectionSelectionFirstNodeId === node.id,
+              'connect-target': connectionSelectionStep === 'a' || (connectionSelectionStep === 'b' && connectionSelectionFirstNodeId !== node.id),
+            }"
             type="button"
             :style="{
               left: `${layoutFor(node.id, index).x}px`,
@@ -974,6 +1036,8 @@ onBeforeUnmount(() => {
             @pointerdown="startDrag($event, node.id)"
             @click="selectNode(node.id)"
           >
+            <span v-if="connectionSelectionStep === 'b' && connectionSelectionFirstNodeId === node.id" class="ibgp-node-endpoint-badge ibgp-node-endpoint-a">A</span>
+            <span v-else-if="connectionSelectionStep === 'config' && selectedAdjacency && (selectedAdjacency.leftNodeId === node.id || selectedAdjacency.rightNodeId === node.id)" class="ibgp-node-endpoint-badge ibgp-node-endpoint-b">{{ connectionSelectionFirstNodeId === node.id ? 'A' : 'B' }}</span>
             <strong>{{ node.name }}</strong
             ><span
               >{{
@@ -994,74 +1058,24 @@ onBeforeUnmount(() => {
         <div class="ibgp-connection-controls">
           <div class="subsection-head">
             <div>
-              <h3>手工连接</h3>
-              <span v-if="selectedNode">从 {{ selectedNode.name }} 选择对端节点</span>
-              <span v-else>请先在画布中选择节点</span>
+              <h3>拓扑连接</h3>
+              <span v-if="connectionSelectionStep !== 'idle'" role="status" aria-live="polite">{{ connectionSelectionStepLabel }}</span>
+              <span v-else>点击“添加连接”，在拓扑中依次选择端点 A 和端点 B</span>
             </div>
+            <button class="primary-button compact-button" type="button" :disabled="draft.members.length < 2" @click="startConnectionSelection">添加连接</button>
           </div>
-          <div v-if="selectedNode" class="field ibgp-transport-field">
-            <label>节点连接地址</label
-              ><input
-                :value="selectedMember?.address ?? ''"
-                placeholder="IPv4 或 IPv6 地址"
-                @input="
-                  setMember(
-                    'address',
-                    ($event.target as HTMLInputElement).value,
-                  )
-                "
-              />
+          <div v-if="connectionSelectionStep !== 'idle'" class="ibgp-connection-selection-flow" aria-label="添加 iBGP 连接步骤">
+            <button type="button" class="ibgp-connection-selection-step" :class="{ active: connectionSelectionStep === 'a', done: !!connectionSelectionFromNode }" @click="selectConnectionSelectionStep('a')"><span>1</span><strong>选择端点 A</strong><small>拓扑节点</small></button>
+            <button type="button" class="ibgp-connection-selection-step" :class="{ active: connectionSelectionStep === 'b' }" :disabled="!connectionSelectionFromNode" @click="selectConnectionSelectionStep('b')"><span>2</span><strong>选择端点 B</strong><small>拓扑节点</small></button>
+            <button type="button" class="ibgp-connection-selection-step" :class="{ active: connectionSelectionStep === 'config' }" :disabled="!selectedAdjacency" @click="selectConnectionSelectionStep('config')"><span>3</span><strong>配置双端</strong><small>分别编辑会话</small></button>
+            <p class="ibgp-connection-selection-hint">{{ connectionSelectionStepLabel }}</p>
           </div>
-          <div class="field ibgp-connection-search">
-            <label for="ibgpConnectionSearch">搜索节点</label>
-            <input
-              id="ibgpConnectionSearch"
-              v-model.trim="connectionSearch"
-              type="search"
-              placeholder="名称、ID 或连接地址"
-              :disabled="!selectedNode"
-            />
+          <div v-if="connectionSelectionStep !== 'idle'" class="ibgp-connection-selection-summary" aria-label="当前连接端点">
+            <button type="button" class="ibgp-connection-endpoint-card" :class="{ active: connectionSelectionStep === 'a', ready: !!connectionSelectionFromNode }" @click="selectConnectionSelectionStep('a')"><small>端点 A</small><strong>{{ connectionSelectionFromNode?.name ?? '待选择' }}</strong></button>
+            <span aria-hidden="true">↔</span>
+            <button type="button" class="ibgp-connection-endpoint-card" :class="{ active: connectionSelectionStep === 'b' }" :disabled="!connectionSelectionFromNode" @click="selectConnectionSelectionStep('b')"><small>端点 B</small><strong>{{ connectionSelectionToNode?.name ?? (connectionSelectionStep === 'b' ? '点击拓扑节点' : '待选择') }}</strong></button>
           </div>
         </div>
-        <div class="quick-node-list" role="list" aria-label="可连接节点">
-            <div
-              v-for="node in connectionCandidates"
-              :key="node.id"
-              class="connection-list-row"
-              role="listitem"
-            >
-              <button
-                class="quick-node"
-                :class="{
-                  active: connectionTo(node.id)?.id === selectedAdjacencyId,
-                }"
-                type="button"
-                @click="connectNode(node.id)"
-              >
-                <span><strong>{{ node.name }}</strong><small>{{
-                  draft.members.find((member) => member.nodeId === node.id)?.address
-                }}</small></span>
-                <span class="quick-node-meta">
-                  <span v-if="connectionTo(node.id)" :class="['ibgp-status', sessionStatusClass(sessionDrafts[connectionTo(node.id)!.leftSessionId] ?? null)]">
-                    <i />{{ sessionStatus(sessionDrafts[connectionTo(node.id)!.leftSessionId] ?? null) }}
-                  </span>
-                  <span>{{ connectionTo(node.id) ? "编辑双端配置" : "建立连接" }}</span>
-                </span></button
-              ><button
-                v-if="connectionTo(node.id)"
-                class="compact-icon text-danger-button"
-                type="button"
-                title="移除连接"
-                aria-label="移除连接"
-                @click="removeConnection(connectionTo(node.id)!)"
-              >
-                ×
-              </button>
-            </div>
-            <div v-if="selectedNode && !connectionCandidates.length" class="empty-cell">
-              没有匹配的节点
-            </div>
-          </div>
       </section>
 
       <section v-if="selectedAdjacency" class="ibgp-pair-workspace">
@@ -1075,6 +1089,7 @@ onBeforeUnmount(() => {
             <span :class="['ibgp-status', sessionStatusClass(rightSession)]"><i />{{ rightNode?.name }}：{{ sessionStatus(rightSession) }}</span>
           </div>
           <label class="compact-toggle"><span>启用当前连接</span><input v-model="selectedAdjacency.enabled" type="checkbox" @change="markDraftDirty" /><i aria-hidden="true" /></label>
+          <button class="secondary-button compact-button text-danger-button" type="button" @click="removeConnection(selectedAdjacency)">移除连接</button>
           <div class="ibgp-pair-jump" role="group" aria-label="选择编辑端点">
             <button class="secondary-button compact-button" type="button" :aria-pressed="endpointView === 'left'" @click="focusPairSide('left')">编辑 {{ leftNode?.name }}</button>
             <button class="secondary-button compact-button" type="button" :aria-pressed="endpointView === 'right'" @click="focusPairSide('right')">编辑 {{ rightNode?.name }}</button>
@@ -1111,10 +1126,7 @@ onBeforeUnmount(() => {
               :functions="inventoryFunctions"
               :filters="inventoryFilters"
               @dirty="markDraftDirty"
-              @update:model-value="
-                markDraftDirty();
-                sessionDrafts[selectedAdjacency.leftSessionId] = $event
-              "
+              @update:model-value="updateSessionDraft(selectedAdjacency.leftSessionId, $event)"
               @open-policy-action="
                 openPolicyAction(
                   selectedAdjacency.leftSessionId,
@@ -1150,10 +1162,7 @@ onBeforeUnmount(() => {
               :functions="inventoryFunctions"
               :filters="inventoryFilters"
               @dirty="markDraftDirty"
-              @update:model-value="
-                markDraftDirty();
-                sessionDrafts[selectedAdjacency.rightSessionId] = $event
-              "
+              @update:model-value="updateSessionDraft(selectedAdjacency.rightSessionId, $event)"
               @open-policy-action="
                 openPolicyAction(
                   selectedAdjacency.rightSessionId,

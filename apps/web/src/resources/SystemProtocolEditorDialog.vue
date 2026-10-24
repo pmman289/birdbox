@@ -23,7 +23,7 @@ const baseline = ref("");
 let initialResource: DirectProtocol | KernelProtocol | null = null;
 const { dashboard } = useDashboardStore();
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
-const defaultPolicy = (direction: "import" | "export"): ChannelPolicy => ({ mode: "form", steps: [], filterId: null, formAction: direction === "import" ? "none" : "all" });
+const defaultPolicy = (direction: "import" | "export"): ChannelPolicy => ({ mode: "form", steps: [], filterId: null, inlineFilterSource: null, formAction: direction === "import" ? "none" : "all" });
 const defaultExport = (): KernelExportPolicy => ({ mode: "visual", policy: defaultPolicy("export"), prefSrc: null });
 const draft = reactive({ label: "", name: "", nodeId: "", nodeIds: [] as string[], kernelGlobal: false, interfaces: [] as string[], ipv4: true, ipv6: true, importPolicies: { ipv4: defaultPolicy("import"), ipv6: defaultPolicy("import") }, tables: { ipv4: { name: "master4", source: "existing" } as PipeTableReference, ipv6: { name: "master6", source: "existing" } as PipeTableReference }, exportPolicies: { ipv4: defaultExport(), ipv6: defaultExport() }, table: null as number | null, scanTime: 60 as number | null, persist: false, enabled: true, checkLink: false, learn: false, gracefulRestart: false, metric: null as number | null, mergePaths: null as number | null });
 const editing = computed(() => editingId.value !== null), title = computed(() => kind.value === "directs" ? "Direct" : "Kernel");

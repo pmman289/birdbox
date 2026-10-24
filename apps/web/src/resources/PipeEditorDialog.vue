@@ -13,7 +13,7 @@ const pending = ref(false), previewPending = ref(false), error = ref("");
 const preview = ref<PipePreviewResponse | null>(null);
 const editingId = ref<string | null>(null), scopeAll = ref(false);
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
-const policy = (action: "all" | "none"): ChannelPolicy => ({ mode: "form", steps: [], filterId: null, formAction: action });
+const policy = (action: "all" | "none"): ChannelPolicy => ({ mode: "form", steps: [], filterId: null, inlineFilterSource: null, formAction: action });
 const draft = reactive<Omit<PipeProtocol, "id">>({ label: "", name: "birdbox_pipe", nodeIds: [], family: "ipv4", table: { name: "master4", source: "existing" }, peerTable: { name: "", source: "managed" }, importPolicy: policy("none"), exportPolicy: policy("all"), enabled: true });
 const targetIds = computed(() => scopeAll.value ? nodes.value.map(n => n.id) : draft.nodeIds ?? []);
 const functions = computed(() => dashboard.value?.inventory.functions.filter(f => f.enabled && resourceScopeContains(f, { nodeIds: scopeAll.value ? null : draft.nodeIds })) ?? []);

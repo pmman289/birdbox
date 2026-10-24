@@ -3,6 +3,7 @@ import net from "node:net";
 import { isDeepStrictEqual } from "node:util";
 import type { ChannelPolicy, OspfArea, OspfAreaOptions, OspfDomain, OspfInterfaceOptions, OspfLink, OspfLinkEndpoint, OspfNodeConfig, OspfPasswordOptions, OspfProtocolOptions, OspfVersion, OspfVirtualLink } from "../packages/contracts/src/inventory.js";
 import { assertValidation, normalizeId, normalizeLabel } from "./bird-normalize-common.js";
+import { normalizeBirdBlockSource } from "./bird-source.js";
 
 type RecordValue = Record<string, unknown>;
 const versions: OspfVersion[] = ["ospfv2", "ospfv3"];
@@ -23,7 +24,13 @@ function policy(value: unknown, defaultAction: "all" | "none"): ChannelPolicy {
     }
     return { type: "form" as const };
   }) : [{ type: "form" as const }];
-  return { mode, steps, filterId: input.filterId == null ? null : String(input.filterId), formAction };
+  const inlineFilterSource = input.inlineFilterSource == null || input.inlineFilterSource === ""
+    ? null
+    : normalizeBirdBlockSource(input.inlineFilterSource, "OSPF Filter 源码");
+  assertValidation(inlineFilterSource === null || inlineFilterSource.length > 0, "OSPF Filter 源码不能为空");
+  const filterId = input.filterId == null || input.filterId === "" ? null : String(input.filterId);
+  if (mode === "custom") assertValidation((filterId !== null) !== (inlineFilterSource !== null), "OSPF 自定义策略必须选择 Filter 或编写当前项 Filter");
+  return { mode, steps, filterId: mode === "custom" ? filterId : null, inlineFilterSource: mode === "custom" ? inlineFilterSource : null, formAction };
 }
 
 function interfaceOptions(value: unknown, label: string): OspfInterfaceOptions {

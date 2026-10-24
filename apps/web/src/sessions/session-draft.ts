@@ -21,6 +21,7 @@ function defaultPolicy(direction: "import" | "export"): ChannelPolicy {
     mode: "combined",
     steps: [{ type: "form" }],
     filterId: null,
+    inlineFilterSource: null,
     formAction: direction === "import" ? "all" : "none",
   };
 }

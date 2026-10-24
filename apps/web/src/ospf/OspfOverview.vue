@@ -61,7 +61,7 @@ const statusLabel = computed(() => {
       <div>
         <p class="eyebrow">INTERIOR GATEWAY PROTOCOL</p>
         <h2 id="ospfTitle">OSPF 管理</h2>
-        <p class="section-note">按“选择节点 → 添加连接 → 检查 Area → 预检应用”完成配置；高级参数只在需要时展开。</p>
+        <p class="section-note">按“添加链路 → 在拓扑选择端点 A/B → 配置接口和 Area → 预检应用”完成配置；高级参数只在需要时展开。</p>
       </div>
       <div v-if="loadingState === 'loading'" class="ospf-load-status" role="status" aria-live="polite">正在加载 OSPF 域…</div>
       <div v-else-if="loadingState === 'error'" class="ospf-load-status error" role="alert">
@@ -69,7 +69,7 @@ const statusLabel = computed(() => {
         <button class="secondary-button compact-button" type="button" @click="emit('retry')">重试</button>
       </div>
       <div class="ospf-actions" :aria-busy="actionPending !== null">
-        <label class="ospf-domain-picker">OSPF 域
+        <label class="ospf-domain-picker">选择已有 OSPF 域
           <select :value="domainId ?? ''" :disabled="actionPending !== null || !ready" @change="emit('select', ($event.currentTarget as HTMLSelectElement).value)">
             <option value="" disabled>选择域</option>
             <option v-for="domain in domains" :key="domain.id" :value="domain.id">{{ domain.name }}</option>
@@ -79,8 +79,8 @@ const statusLabel = computed(() => {
           class="ospf-domain-name"
           :value="domainName"
           :disabled="actionPending !== null || !ready"
-          aria-label="OSPF 域名称"
-          placeholder="OSPF 域名称"
+          aria-label="OSPF 域名称（可编辑）"
+          placeholder="域名称（可编辑）"
           @input="emit('update:domainName', ($event.currentTarget as HTMLInputElement).value)"
         />
         <button class="secondary-button compact-button" type="button" :disabled="actionPending !== null || !ready" @click="emit('new')">新建域</button>
@@ -95,6 +95,7 @@ const statusLabel = computed(() => {
         <button class="primary-button" type="button" aria-label="保存并应用" :disabled="actionPending !== null || !ready" @click="emit('save')">
           {{ actionPending === "save" ? "正在应用" : dirty ? "应用 · 有未保存修改" : "应用" }}
         </button>
+        <small class="ospf-action-help">保存草稿只保留当前编辑；应用会先预检，再下发到节点。</small>
       </div>
     </div>
 

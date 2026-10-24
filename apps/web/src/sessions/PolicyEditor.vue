@@ -35,6 +35,9 @@ const emit = defineEmits<{
   "open-policy-action": [];
 }>();
 const selectedFunctionId = ref("");
+const inlineFilterEditor = ref<HTMLTextAreaElement | null>(null);
+const inlineFilterLine = ref(1);
+const inlineFilterColumn = ref(1);
 
 const label = computed(() => props.family === "ipv4" ? "IPv4" : "IPv6");
 const directionLabel = computed(() => props.direction === "import" ? "导入" : "导出");
@@ -58,6 +61,7 @@ function setMode(mode: "combined" | "custom"): void {
       ? (props.policy.steps.some((step) => step.type === "form") ? props.policy.steps : [...props.policy.steps, { type: "form" }])
       : [],
     filterId: mode === "custom" ? props.policy.filterId : null,
+    inlineFilterSource: mode === "custom" ? props.policy.inlineFilterSource : null,
   });
 }
 
@@ -70,7 +74,58 @@ function setFormAction(value: string): void {
 }
 
 function setFilter(value: string): void {
-  updatePolicy({ filterId: value || null });
+  updatePolicy({ filterId: value || null, inlineFilterSource: null });
+}
+
+function setInlineFilterSource(value: string): void {
+  updatePolicy({ filterId: null, inlineFilterSource: value });
+}
+
+function useInlineFilter(): void {
+  updatePolicy({ filterId: null, inlineFilterSource: props.policy.inlineFilterSource ?? "" });
+}
+
+function useResourceFilter(): void {
+  updatePolicy({ filterId: props.policy.filterId ?? "", inlineFilterSource: null });
+}
+
+const inlineFilterLineNumbers = computed(() => {
+  const count = Math.max(1, (props.policy.inlineFilterSource ?? "").split("\n").length);
+  return Array.from({ length: count }, (_, index) => index + 1).join("\n");
+});
+
+function updateInlineFilterCursor(): void {
+  const editor = inlineFilterEditor.value;
+  if (!editor) return;
+  const before = editor.value.slice(0, editor.selectionStart);
+  const lines = before.split("\n");
+  inlineFilterLine.value = lines.length;
+  inlineFilterColumn.value = (lines.at(-1)?.length ?? 0) + 1;
+}
+
+function replaceInlineFilterSource(start: number, end: number, text: string, cursor: number): void {
+  const editor = inlineFilterEditor.value;
+  if (!editor) return;
+  editor.setRangeText(text, start, end, "end");
+  editor.setSelectionRange(cursor, cursor);
+  setInlineFilterSource(editor.value);
+  updateInlineFilterCursor();
+}
+
+function handleInlineFilterKeydown(event: KeyboardEvent): void {
+  const editor = inlineFilterEditor.value;
+  if (!editor) return;
+  if (event.key === "Tab") {
+    event.preventDefault();
+    replaceInlineFilterSource(editor.selectionStart, editor.selectionEnd, "  ", editor.selectionStart + 2);
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const start = editor.selectionStart;
+  const before = editor.value.slice(0, start);
+  const indent = before.slice(before.lastIndexOf("\n") + 1).match(/^\s*/)?.[0] ?? "";
+  replaceInlineFilterSource(start, editor.selectionEnd, `\n${indent}`, start + indent.length + 1);
 }
 
 function setFunctionAction(functionId: string, action: PolicyFunctionStep["action"]): void {
@@ -193,11 +248,22 @@ function openResource(target: ResourceWorkspaceTarget): void {
     </div>
 
     <div v-else class="policy-mode-fields">
-      <div class="field-label-row"><label>完整 Filter</label><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Filter" aria-label="前往资源管理 Tab 管理 Filter" @click="openResource('filters')">?</button></div>
-      <select :value="policy.filterId ?? ''" :disabled="disabled" required @change="setFilter(($event.currentTarget as HTMLSelectElement).value)">
+      <div class="segmented-control" role="radiogroup" aria-label="Filter 来源">
+        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource === null" :disabled="disabled" @change="useResourceFilter"><span>引用已有 Filter</span></label>
+        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource !== null" :disabled="disabled" @change="useInlineFilter"><span>当前项编写</span></label>
+      </div>
+      <div v-if="policy.inlineFilterSource === null" class="field-label-row"><label>完整 Filter</label><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Filter" aria-label="前往资源管理 Tab 管理 Filter" @click="openResource('filters')">?</button></div>
+      <select v-if="policy.inlineFilterSource === null" :value="policy.filterId ?? ''" :disabled="disabled" required @change="setFilter(($event.currentTarget as HTMLSelectElement).value)">
         <option value="">选择 Filter</option>
         <option v-for="resource in filters" :key="resource.id" :value="resource.id">{{ resource.label ?? resource.name }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource) }}</option>
       </select>
+      <div v-else class="field"><label>当前项 Filter 规则</label>
+        <div class="code-input inline-filter-code-input">
+          <pre class="code-input-lines" aria-hidden="true">{{ inlineFilterLineNumbers }}</pre>
+          <textarea ref="inlineFilterEditor" :value="policy.inlineFilterSource" class="policy-source-editor" :disabled="disabled" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" placeholder="if net ~ [ 192.0.2.0/24 ] then accept;" @input="setInlineFilterSource(($event.currentTarget as HTMLTextAreaElement).value); updateInlineFilterCursor()" @keydown="handleInlineFilterKeydown" @click="updateInlineFilterCursor" @keyup="updateInlineFilterCursor"></textarea>
+          <div class="code-input-status"><span>BIRD</span><span>Ln {{ inlineFilterLine }}, Col {{ inlineFilterColumn }}</span></div>
+        </div>
+      </div>
     </div>
   </section>
 </template>

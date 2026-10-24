@@ -307,6 +307,7 @@ export interface ChannelPolicy {
   mode: "form" | "combined" | "custom";
   steps: Array<PolicyFunctionStep | PolicyFormStep>;
   filterId: string | null;
+  inlineFilterSource: string | null;
   formAction: "all" | "none" | "cidr";
 }
 
