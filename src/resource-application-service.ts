@@ -34,6 +34,7 @@ import {
   stageAndValidate,
   validateInventory,
   executeNodeRpc,
+  inspectNode,
 } from "./bird.js";
 import { normalizeDirectProtocol, normalizeKernelProtocol } from "./bird-system-protocols.js";
 import { rpkiReferences } from "./bird-rpki.js";
@@ -785,8 +786,12 @@ export function createResourceApplicationService(
       if (immutableDeploymentFields.some((field) => updated[field] !== previous[field])) {
         fail(409, "节点的管理方式、SSH 用户、部署模式和配置路径不可直接修改；请先删除节点并重新添加");
       }
-      draft.nodes[index] = updated;
-      return updated;
+      return inspectNode(updated).then((runtime) => {
+        if (!runtime.reachable) fail(422, runtime.error || `${updated.name} 的 BIRD 控制 Socket 不可用，请先恢复 BIRD 运行状态`);
+        if (!runtime.bird2) fail(422, `${updated.name} 需要运行 BIRD 2，当前版本无法执行配置更新`);
+        draft.nodes[index] = updated;
+        return updated;
+      });
     }, () => [nodeId]);
     event("success", `已更新受管节点 ${node.name}`, node.id);
     return { status: 200, payload: { node, inventory: state, deployment, events: events() } };

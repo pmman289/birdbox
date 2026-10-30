@@ -66,6 +66,33 @@ test('Kernel: multi-node preview/runtime isolate errors; dual-stack queries sele
  const fn = (await h.service.createPolicy('functions', { label: 'only one', name: 'only_one', nodeIds: ['one'], source: 'function only_one() { return true; }' })).payload.resource;
  await assert.rejects(() => h.service.previewSystemProtocol('kernels', { id, importPolicy: { mode: 'combined', steps: [{ type: 'function', functionId: fn.id, action: 'accept' }], formAction: 'none' } }), /Function/);
 });
+test('Kernel inline Filters remain independent for both families and directions without shared resources', async t => {
+ const h = await setupResourceApi(t);
+ const inline = (source, formAction) => ({ mode: 'custom', steps: [], filterId: null, inlineFilterSource: source, formAction });
+ const payload = resource('kernels', {
+  importPolicies: {
+   ipv4: inline('if net ~ [ 203.0.113.0/24 ] then accept;\nreject;', 'none'),
+   ipv6: inline('if net ~ [ 2001:db8:1::/48 ] then accept;\nreject;', 'none'),
+  },
+  exportPolicies: {
+   ipv4: { mode: 'visual', policy: inline('if net ~ [ 198.51.100.0/24 ] then accept;\nreject;', 'none') },
+   ipv6: { mode: 'visual', policy: inline('if net ~ [ 2001:db8:2::/48 ] then accept;\nreject;', 'none') },
+  },
+ });
+ const preview = (await h.service.previewSystemProtocol('kernels', payload)).payload;
+ assert.equal(preview.valid, true);
+ assert.match(preview.configs[0].config, /203\.0\.113\.0\/24/);
+ assert.match(preview.configs[0].config, /2001:db8:1::\/48/);
+ assert.match(preview.configs[0].config, /198\.51\.100\.0\/24/);
+ assert.match(preview.configs[0].config, /2001:db8:2::\/48/);
+ assert.deepEqual(preview.resource.importPolicies.ipv4, payload.importPolicies.ipv4);
+ assert.deepEqual(preview.resource.importPolicies.ipv6, payload.importPolicies.ipv6);
+ assert.deepEqual(preview.resource.exportPolicies.ipv4.policy, payload.exportPolicies.ipv4.policy);
+ assert.deepEqual(preview.resource.exportPolicies.ipv6.policy, payload.exportPolicies.ipv6.policy);
+ assert.equal((await h.service.createKernel({ ...preview.resource, mode: 'apply', previewId: preview.previewId, candidateHash: preview.candidateHash, inventoryRevision: preview.inventoryRevision })).status, 201);
+ assert.throws(() => normalizeKernelProtocol(resource('kernels', { importPolicies: { ipv4: inline('', 'none') } })), /自定义模式必须且只能配置一个 Filter/);
+ assert.throws(() => normalizeKernelProtocol(resource('kernels', { importPolicies: { ipv4: { ...inline('accept;', 'none'), filterId: 'shared_filter' } } })), /自定义模式必须且只能配置一个 Filter/);
+});
 test('Direct/Kernel field bounds and parser distinguish missing/unknown from up and channel sums', () => {
  const defaults = normalizeKernelProtocol(resource('kernels', { id: 'k' })); assert.equal(defaults.importPolicy.formAction, 'none'); assert.equal(defaults.exportPolicy.formAction, 'all');
  assert.throws(() => normalizeDirectProtocol(resource('directs', { id: 'd', ipv4: false, ipv6: false })), /地址族/);

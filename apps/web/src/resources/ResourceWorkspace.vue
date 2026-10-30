@@ -270,5 +270,5 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .resource-heading-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
-.selection-count { color: var(--text-muted, #68707a); font-size: .9rem; white-space: nowrap; }
+.selection-count { color: var(--muted); font-size: .9rem; white-space: nowrap; }
 </style>

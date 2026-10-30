@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, ref } from "vue";
 
+import type { AddressFamily } from "@birdbox/contracts/inventory";
 import type { DashboardPeer } from "@birdbox/contracts/api";
 
 import type { ResourceWorkspaceTarget } from "../shared/events";
@@ -10,30 +11,13 @@ import { protocolPresentation as presentProtocol } from "./presentation";
 
 const { dashboard, loading, updatedAt } = useDashboardStore();
 
-interface CanvasPosition {
-  x: number;
-  y: number;
-}
+type StatusFilter = "all" | "established" | "waiting" | "unconfigured" | "disabled" | "error";
+type ConfigFilter = "all" | "configured" | "unconfigured";
 
-interface CanvasDrag {
-  key: string;
-  dx: number;
-  dy: number;
-  startX: number;
-  startY: number;
-  moved: boolean;
-}
-
-const ROOT_KEY = "__local__";
-const PEER_CARD_WIDTH = 260;
-const PEER_CARD_HEIGHT = 144;
-const PEER_ROW_HEIGHT = 164;
-const board = ref<HTMLElement | null>(null);
-const canvasLayout = ref<Record<string, CanvasPosition>>({});
-const dragging = ref<CanvasDrag | null>(null);
-const canvasMedia = window.matchMedia("(max-width: 700px)");
-const compactCanvas = ref(canvasMedia.matches);
-let suppressPeerClick = false;
+const searchTerm = ref("");
+const statusFilter = ref<StatusFilter>("all");
+const configFilter = ref<ConfigFilter>("all");
+const mobileDetailVisible = ref(false);
 
 const nodes = computed(() => dashboard.value?.inventory.nodes ?? []);
 const peers = computed(() => (dashboard.value?.peers ?? []).filter(isEbgpDashboardPeer));
@@ -43,48 +27,101 @@ const selectedPeerId = computed(() => {
   const peerId = dashboard.value?.selection.peerId ?? "";
   return peers.value.some((peer) => peer.id === peerId) ? peerId : "";
 });
-const selectedPeer = computed(() => peers.value.find((peer) => peer.id === selectedPeerId.value) ?? null);
-const boardWidth = computed(() => compactCanvas.value
-  ? 360
-  : Math.max(760, 360 + Math.min(Math.max(peers.value.length, 1), 4) * 285));
-const boardHeight = computed(() => compactCanvas.value
-  ? Math.max(410, 175 + peers.value.length * PEER_ROW_HEIGHT)
-  : Math.max(410, 70 + Math.ceil(Math.max(peers.value.length, 1) / 4) * PEER_ROW_HEIGHT));
-const nodeOnline = computed(() => Boolean(dashboard.value?.runtime?.reachable && dashboard.value.runtime.bird2));
+const selectedPeerCandidate = computed(() => peers.value.find((peer) => peer.id === selectedPeerId.value) ?? null);
+const nodeOnline = computed(() => Boolean(dashboard.value?.runtime.reachable && dashboard.value.runtime.bird2));
 const updatedAtLabel = computed(() => updatedAt.value === null
   ? "尚未刷新"
   : `更新于 ${new Date(updatedAt.value).toLocaleTimeString("zh-CN", { hour12: false })}`);
-const selectionSummary = computed(() => {
-  if (!node.value) return "尚未添加受管节点";
-  return selectedPeer.value
-    ? `${node.value.name} → ${selectedPeer.value.name}`
-    : `${node.value.name} → 未选择`;
-});
 
 function protocolPresentation(peer: DashboardPeer) {
   return presentProtocol(dashboard.value, peer);
 }
+
+function statusGroup(peer: DashboardPeer): Exclude<StatusFilter, "all"> {
+  const presentation = protocolPresentation(peer);
+  if (presentation.className === "established") return "established";
+  if (presentation.className === "unconfigured") return "unconfigured";
+  if (presentation.className === "disabled") return "disabled";
+  if (presentation.label === "等待运行" || presentation.className === "unknown") return "waiting";
+  return "error";
+}
+
+function statusRank(peer: DashboardPeer): number {
+  const group = statusGroup(peer);
+  return group === "error" ? 0 : group === "established" ? 1 : group === "waiting" ? 2 : 3;
+}
+
+function enabledFamilies(peer: DashboardPeer): AddressFamily[] {
+  return (["ipv4", "ipv6"] as const).filter((family) => peer.session?.channels[family]?.enabled);
+}
+
+function familyLabel(family: AddressFamily): string {
+  return family === "ipv4" ? "IPv4" : "IPv6";
+}
+
+function routeCount(peer: DashboardPeer, family: AddressFamily, direction: "imported" | "exported"): number | null {
+  const families = enabledFamilies(peer);
+  const channel = peer.protocol?.channels?.[family];
+  const fallback = families.length === 1 ? peer.protocol : null;
+  return channel?.[direction] ?? fallback?.[direction] ?? null;
+}
+
+function routesAvailable(peer: DashboardPeer): boolean {
+  return Boolean(
+    peer.session?.enabled !== false
+      && enabledFamilies(peer).length
+      && dashboard.value?.runtime.reachable
+      && peer.protocol?.configured !== false,
+  );
+}
+
+const filteredPeers = computed(() => {
+  const term = searchTerm.value.trim().toLocaleLowerCase();
+  return peers.value
+    .filter((peer) => {
+      const searchable = [peer.name, peer.address, String(peer.asn), peer.session?.protocolName ?? ""].join(" ").toLocaleLowerCase();
+      if (term && !searchable.includes(term)) return false;
+      if (statusFilter.value !== "all" && statusGroup(peer) !== statusFilter.value) return false;
+      if (configFilter.value === "configured" && !peer.session) return false;
+      if (configFilter.value === "unconfigured" && peer.session) return false;
+      return true;
+    })
+    .sort((left, right) => statusRank(left) - statusRank(right) || left.name.localeCompare(right.name, "zh-CN"));
+});
+
+const selectedPeer = computed(() => {
+  const candidate = selectedPeerCandidate.value;
+  return candidate && filteredPeers.value.some((peer) => peer.id === candidate.id) ? candidate : null;
+});
+const selectionSummary = computed(() => {
+  if (!node.value) return "尚未添加受管节点";
+  return selectedPeer.value ? `${node.value.name} → ${selectedPeer.value.name}` : `${node.value.name} → 未选择`;
+});
+const controlLabel = computed(() => selectedPeer.value?.protocol?.disabled ? "启动当前会话" : "停止当前会话");
 
 function requestSelection(nodeId: string | null, peerId: string | null): void {
   window.dispatchEvent(new CustomEvent("birdbox:dashboard-selection", { detail: { nodeId, peerId } }));
 }
 
 function selectNode(event: Event): void {
-  const select = event.currentTarget as HTMLSelectElement;
-  const value = select.value;
-  select.value = selectedNodeId.value;
+  const value = (event.currentTarget as HTMLSelectElement).value;
+  mobileDetailVisible.value = false;
   requestSelection(value || null, null);
 }
 
 function selectPeer(event: Event): void {
-  const select = event.currentTarget as HTMLSelectElement;
-  const value = select.value;
-  select.value = selectedPeerId.value;
-  requestSelection(node.value?.id ?? null, value || null);
+  const value = (event.currentTarget as HTMLSelectElement).value;
+  if (!value) {
+    mobileDetailVisible.value = false;
+    requestSelection(node.value?.id ?? null, null);
+    return;
+  }
+  mobileDetailVisible.value = true;
+  requestSelection(node.value?.id ?? null, value);
 }
 
-function selectTopologyPeer(peerId: string): void {
-  if (suppressPeerClick) return;
+function selectPeerRow(peerId: string): void {
+  mobileDetailVisible.value = true;
   requestSelection(node.value?.id ?? null, peerId);
 }
 
@@ -92,123 +129,29 @@ function openResource(target: ResourceWorkspaceTarget): void {
   window.dispatchEvent(new CustomEvent("birdbox:workspace-resource-open", { detail: { target } }));
 }
 
-function storageKey(): string | null {
-  return node.value ? `birdbox-ebgp-canvas:v2:${node.value.id}:${compactCanvas.value ? "compact" : "wide"}` : null;
+function openRoutes(peerId: string): void {
+  window.dispatchEvent(new CustomEvent("birdbox:routes-open", { detail: { peerId } }));
 }
 
-function defaultPosition(key: string, index: number): CanvasPosition {
-  if (compactCanvas.value) {
-    return key === ROOT_KEY
-      ? { x: Math.round((boardWidth.value - 248) / 2), y: 28 }
-      : { x: Math.round((boardWidth.value - PEER_CARD_WIDTH) / 2), y: 174 + index * PEER_ROW_HEIGHT };
-  }
-  if (key === ROOT_KEY) return { x: 42, y: Math.max(42, Math.round(boardHeight.value / 2 - 58)) };
-  return {
-    x: 350 + (index % 4) * 285,
-    y: 42 + Math.floor(index / 4) * PEER_ROW_HEIGHT,
-  };
+function openProtocolDetails(peerId: string): void {
+  window.dispatchEvent(new CustomEvent("birdbox:protocol-details-open", { detail: { peerId } }));
 }
 
-function clampPosition(key: string, value: CanvasPosition): CanvasPosition {
-  const width = key === ROOT_KEY ? 248 : PEER_CARD_WIDTH;
-  const height = key === ROOT_KEY ? 116 : PEER_CARD_HEIGHT;
-  return {
-    x: Math.max(8, Math.min(Math.round(value.x), boardWidth.value - width - 8)),
-    y: Math.max(8, Math.min(Math.round(value.y), boardHeight.value - height - 8)),
-  };
+function scrollToEditor(): void {
+  const editor = document.querySelector<HTMLElement>("#sessionEditorApp");
+  editor?.scrollIntoView({ behavior: "smooth", block: "start" });
+  void nextTick(() => editor?.querySelector<HTMLElement>("input, select, textarea, button")?.focus());
 }
 
-function loadCanvasLayout(): void {
-  let stored: Record<string, CanvasPosition> = {};
-  const key = storageKey();
-  if (key) {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(key) ?? "{}");
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) stored = parsed;
-    } catch {
-      stored = {};
-    }
-  }
-  const next: Record<string, CanvasPosition> = {};
-  if (node.value) next[ROOT_KEY] = clampPosition(ROOT_KEY, stored[ROOT_KEY] ?? defaultPosition(ROOT_KEY, 0));
-  peers.value.forEach((peer, index) => {
-    next[peer.id] = clampPosition(peer.id, stored[peer.id] ?? defaultPosition(peer.id, index));
-  });
-  canvasLayout.value = next;
+function triggerSessionControl(): void {
+  document.querySelector<HTMLButtonElement>("#sessionControlApp button")?.click();
 }
 
-function saveCanvasLayout(): void {
-  const key = storageKey();
-  if (!key) return;
-  try {
-    localStorage.setItem(key, JSON.stringify(canvasLayout.value));
-  } catch {
-    // Layout persistence is optional in restricted browser contexts.
-  }
+function clearFilters(): void {
+  searchTerm.value = "";
+  statusFilter.value = "all";
+  configFilter.value = "all";
 }
-
-function resetCanvasLayout(): void {
-  canvasLayout.value = Object.fromEntries([
-    ...(node.value ? [[ROOT_KEY, defaultPosition(ROOT_KEY, 0)] as const] : []),
-    ...peers.value.map((peer, index) => [peer.id, defaultPosition(peer.id, index)] as const),
-  ]);
-  saveCanvasLayout();
-}
-
-function positionFor(key: string, index = 0): CanvasPosition {
-  return canvasLayout.value[key] ?? defaultPosition(key, index);
-}
-
-function startCanvasDrag(event: PointerEvent, key: string): void {
-  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  dragging.value = {
-    key,
-    dx: event.clientX - rect.left,
-    dy: event.clientY - rect.top,
-    startX: event.clientX,
-    startY: event.clientY,
-    moved: false,
-  };
-  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-}
-
-function moveCanvasNode(event: PointerEvent): void {
-  const drag = dragging.value;
-  if (!drag || !board.value) return;
-  const rect = board.value.getBoundingClientRect();
-  if (Math.abs(event.clientX - drag.startX) > 3 || Math.abs(event.clientY - drag.startY) > 3) drag.moved = true;
-  canvasLayout.value = {
-    ...canvasLayout.value,
-    [drag.key]: clampPosition(drag.key, {
-      x: event.clientX - rect.left - drag.dx,
-      y: event.clientY - rect.top - drag.dy,
-    }),
-  };
-}
-
-function stopCanvasDrag(): void {
-  if (!dragging.value) return;
-  suppressPeerClick = dragging.value.moved;
-  dragging.value = null;
-  saveCanvasLayout();
-  window.setTimeout(() => {
-    suppressPeerClick = false;
-  }, 0);
-}
-
-watch(
-  [() => node.value?.id, () => peers.value.map((peer) => peer.id).join("|"), compactCanvas],
-  loadCanvasLayout,
-  { immediate: true },
-);
-
-function handleCanvasMedia(event: MediaQueryListEvent): void {
-  compactCanvas.value = event.matches;
-}
-
-canvasMedia.addEventListener("change", handleCanvasMedia);
-onBeforeUnmount(() => canvasMedia.removeEventListener("change", handleCanvasMedia));
-
 </script>
 
 <template>
@@ -234,95 +177,66 @@ onBeforeUnmount(() => canvasMedia.removeEventListener("change", handleCanvasMedi
         <button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 eBGP 远端" aria-label="前往资源管理 Tab 管理 eBGP 远端" @click="openResource('peers')">?</button>
       </div>
     </div>
-    <div class="selection-summary">
-      <span>当前会话</span>
-      <strong>{{ selectionSummary }}</strong>
-    </div>
+    <div class="selection-summary"><span>当前会话</span><strong>{{ selectionSummary }}</strong></div>
     <span class="selection-loading-status" role="status" aria-live="polite" :hidden="!loading">正在加载会话状态…</span>
   </section>
 
-  <section class="topology-section" aria-labelledby="topologyTitle">
+  <section class="ebgp-overview-section" aria-labelledby="ebgpOverviewTitle">
     <div class="section-heading">
-      <div><p class="eyebrow">当前节点 · 根节点</p><h2 id="topologyTitle">BGP 会话拓扑</h2></div>
-      <div class="topology-actions">
-        <span class="updated-at">{{ updatedAtLabel }}</span>
-        <button class="secondary-button compact-button" type="button" :disabled="!node" @click="resetCanvasLayout">重置位置</button>
-      </div>
+      <div><p class="eyebrow">EBGP SESSION WORKSPACE</p><h2 id="ebgpOverviewTitle">Peer 会话总览</h2></div>
+      <span class="updated-at">{{ updatedAtLabel }}</span>
     </div>
-    <div class="ebgp-canvas" aria-label="eBGP 会话画布">
-      <div
-        ref="board"
-        class="ebgp-canvas-board"
-        :style="{ width: `${boardWidth}px`, height: `${boardHeight}px` }"
-        @pointermove="moveCanvasNode"
-        @pointerup="stopCanvasDrag"
-        @pointercancel="stopCanvasDrag"
-      >
-        <div v-if="!node" class="topology-empty">尚无受管节点</div>
-        <template v-else>
-          <svg class="ebgp-canvas-edges" aria-hidden="true">
-            <line
-              v-for="(peer, index) in peers"
-              :key="peer.id"
-              :class="{
-                established: peer.protocol?.established,
-                selected: peer.id === selectedPeerId,
-              }"
-              :x1="positionFor(ROOT_KEY).x + 124"
-              :y1="positionFor(ROOT_KEY).y + 58"
-              :x2="positionFor(peer.id, index).x + PEER_CARD_WIDTH / 2"
-              :y2="positionFor(peer.id, index).y + PEER_CARD_HEIGHT / 2"
-            />
-          </svg>
 
-          <article
-            class="ebgp-canvas-node ebgp-local-node"
-            :class="{ online: nodeOnline }"
-            :style="{
-              left: `${positionFor(ROOT_KEY).x}px`,
-              top: `${positionFor(ROOT_KEY).y}px`,
-            }"
-            @pointerdown="startCanvasDrag($event, ROOT_KEY)"
-          >
-            <div class="ebgp-canvas-node-head">
-              <span class="node-icon">N</span>
-              <span class="status-pill" :class="nodeOnline ? 'online' : 'offline'">
-                {{ nodeOnline ? "可管理" : "不可达" }}
-              </span>
-            </div>
-            <strong>{{ node.name }}</strong>
-            <small>{{ node.routerId }} · IGP {{ node.igpAddress ?? "自动选择" }} · Port {{ node.listenPort }}</small>
+    <div class="ebgp-workbench" :class="{ 'mobile-detail-open': mobileDetailVisible }">
+      <div class="ebgp-peer-list-panel" aria-label="eBGP Peer 列表">
+        <div class="ebgp-list-toolbar">
+          <label class="ebgp-search-field" for="ebgpPeerSearch"><span>搜索 Peer</span><input id="ebgpPeerSearch" v-model="searchTerm" type="search" placeholder="名称、地址、ASN 或协议名"></label>
+          <div class="ebgp-filter-row">
+            <label for="ebgpStatusFilter">状态</label>
+            <select id="ebgpStatusFilter" v-model="statusFilter">
+              <option value="all">全部状态</option><option value="established">Established</option><option value="waiting">等待运行</option><option value="unconfigured">未配置</option><option value="disabled">已停用</option><option value="error">异常</option>
+            </select>
+            <label for="ebgpConfigFilter">配置</label>
+            <select id="ebgpConfigFilter" v-model="configFilter"><option value="all">全部</option><option value="configured">已配置</option><option value="unconfigured">未配置</option></select>
+          </div>
+        </div>
+        <div v-if="!node" class="ebgp-list-empty">尚无受管节点</div>
+        <div v-else-if="peers.length === 0" class="ebgp-list-empty">尚无远端 Peer</div>
+        <div v-else-if="filteredPeers.length === 0" class="ebgp-list-empty"><span>没有匹配的 Peer</span><button class="secondary-button compact-button" type="button" @click="clearFilters">清除筛选</button></div>
+        <div v-else class="ebgp-peer-list" role="listbox" aria-label="eBGP Peer">
+          <article v-for="peer in filteredPeers" :key="peer.id" class="ebgp-peer-row" :class="{ selected: peer.id === selectedPeerId }" role="option" :aria-selected="peer.id === selectedPeerId" tabindex="0" @click="selectPeerRow(peer.id)" @keydown.enter="selectPeerRow(peer.id)" @keydown.space.prevent="selectPeerRow(peer.id)">
+            <span class="ebgp-peer-row-main"><strong>{{ peer.name }}</strong><span>{{ peer.address }}:{{ peer.port }}</span></span>
+            <span class="ebgp-peer-row-meta"><span>AS{{ peer.asn }}</span><span>{{ peer.session?.protocolName ?? "未配置协议" }}</span><span class="status-pill" :class="protocolPresentation(peer).className">{{ protocolPresentation(peer).label }}</span></span>
+            <span class="ebgp-peer-row-routes"><span v-for="family in enabledFamilies(peer)" :key="family">{{ familyLabel(family) }} {{ routeCount(peer, family, "imported") ?? "-" }} 入 / {{ routeCount(peer, family, "exported") ?? "-" }} 出</span><span v-if="!enabledFamilies(peer).length">未启用 Channel</span></span>
+            <span class="ebgp-peer-row-actions"><button class="secondary-button compact-command" type="button" :disabled="!peer.session || !routesAvailable(peer)" @click.stop="openRoutes(peer.id)">路由</button><button class="secondary-button compact-command" type="button" :disabled="!peer.session" @click.stop="openProtocolDetails(peer.id)">协议详情</button><button class="secondary-button compact-command" type="button" @click.stop="selectPeerRow(peer.id); scrollToEditor()">编辑配置</button></span>
           </article>
-
-          <button
-            v-for="(peer, index) in peers"
-            :key="peer.id"
-            class="ebgp-canvas-node ebgp-peer-node"
-            :class="{
-              selected: peer.id === selectedPeerId,
-              established: peer.protocol?.established,
-            }"
-            type="button"
-            :title="`${peer.name} · AS${peer.asn} · ${peer.address}:${peer.port}`"
-            :style="{
-              left: `${positionFor(peer.id, index).x}px`,
-              top: `${positionFor(peer.id, index).y}px`,
-            }"
-            :aria-label="`选择 eBGP Peer ${peer.name}`"
-            @pointerdown="startCanvasDrag($event, peer.id)"
-            @click="selectTopologyPeer(peer.id)"
-          >
-            <div class="ebgp-canvas-node-head">
-              <span class="node-icon">P</span>
-              <span class="status-pill" :class="protocolPresentation(peer).className">{{ protocolPresentation(peer).label }}</span>
-            </div>
-            <strong>{{ peer.name }} · AS{{ peer.asn }}</strong>
-            <small>{{ peer.address }}:{{ peer.port }}</small>
-          </button>
-
-          <div v-if="peers.length === 0" class="ebgp-canvas-empty">尚无远端 Peer</div>
-        </template>
+        </div>
       </div>
+
+      <aside class="ebgp-peer-detail-panel" aria-label="Peer 会话详情">
+        <button class="ebgp-mobile-back secondary-button compact-button" type="button" @click="mobileDetailVisible = false">‹ 返回 Peer 列表</button>
+        <template v-if="selectedPeer && node">
+          <div class="ebgp-detail-head"><div><p class="eyebrow">SELECTED PEER</p><h3>{{ selectedPeer.name }}</h3><span>{{ selectedPeer.address }}:{{ selectedPeer.port }} · AS{{ selectedPeer.asn }}</span></div><span class="status-pill" :class="protocolPresentation(selectedPeer).className">{{ protocolPresentation(selectedPeer).label }}</span></div>
+          <div class="ebgp-relationship-strip" aria-label="当前节点与 Peer 的会话关系">
+            <div><small>本地节点</small><strong>{{ node.name }}</strong><span>{{ selectedPeer.session?.localAddress ?? node.igpAddress ?? "自动选择" }} · Router ID {{ node.routerId }}</span></div>
+            <i aria-hidden="true">→<small>BGP 会话</small></i>
+            <div><small>远端 Peer</small><strong>{{ selectedPeer.name }}</strong><span>{{ selectedPeer.address }} · AS{{ selectedPeer.asn }}</span></div>
+          </div>
+          <div class="ebgp-detail-grid">
+            <div><span>协议</span><strong>{{ selectedPeer.session?.protocolName ?? "未配置" }}</strong></div>
+            <div><span>运行状态</span><strong>{{ nodeOnline ? "节点可管理" : "节点不可达" }}</strong></div>
+            <div v-for="family in (['ipv4', 'ipv6'] as const)" :key="family"><span>{{ familyLabel(family) }} Channel</span><strong>{{ selectedPeer.session?.channels[family].enabled ? `${selectedPeer.protocol?.channels?.[family]?.state ?? "等待运行"}` : "未启用" }}</strong></div>
+            <div><span>最近刷新</span><strong>{{ updatedAtLabel }}</strong></div>
+          </div>
+          <div class="ebgp-detail-actions">
+            <button class="primary-button" type="button" :disabled="!selectedPeer.session || !routesAvailable(selectedPeer)" @click="openRoutes(selectedPeer.id)">查看路由</button>
+            <button class="secondary-button" type="button" :disabled="!selectedPeer.session" @click="openProtocolDetails(selectedPeer.id)">协议详情</button>
+            <button class="secondary-button" type="button" @click="scrollToEditor">编辑配置</button>
+            <button class="secondary-button" type="button" :disabled="!selectedPeer.session || !selectedPeer.protocol || selectedPeer.session.enabled === false || selectedPeer.protocol.configured === false" @click="triggerSessionControl">{{ controlLabel }}</button>
+          </div>
+        </template>
+        <div v-else class="ebgp-detail-empty"><strong>{{ !node ? "尚无受管节点" : selectedPeerCandidate ? "当前 Peer 被筛选隐藏" : "请选择一个 Peer" }}</strong><span>{{ !node ? "请先添加并选择受管节点。" : selectedPeerCandidate ? "清除左侧筛选后可继续查看该会话。" : "从左侧列表选择一个 Peer 查看会话详情。" }}</span></div>
+      </aside>
     </div>
   </section>
 </template>

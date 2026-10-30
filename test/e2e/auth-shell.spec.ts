@@ -27,27 +27,18 @@ test("Vue 认证壳完成认证、退出和重新登录", async ({ page }, testI
   await expect(page.locator("#appMain")).toBeVisible();
   await expect(authView).toBeHidden();
   await expect(page.locator("#globalState")).not.toHaveText("正在连接");
-  await expect(page.locator("#dashboardOverviewApp #topologyTitle")).toHaveText("BGP 会话拓扑");
+  await expect(page.locator("#dashboardOverviewApp #ebgpOverviewTitle")).toHaveText("Peer 会话总览");
   await expect(page.locator("#dashboardOverviewApp #nodeSelect")).toContainText("E2E Router");
-  await expect(page.locator("#dashboardOverviewApp .ebgp-canvas")).toBeVisible();
-  await expect(page.locator("#dashboardOverviewApp .ebgp-local-node")).toContainText("E2E Router");
-  const peerCanvasNode = page.locator("#dashboardOverviewApp .ebgp-peer-node");
-  await expect(peerCanvasNode).toContainText("Documentation Peer With An Intentionally Long Remote Name");
-  const peerNameLayout = await peerCanvasNode.locator("strong").evaluate((element) => ({
+  await expect(page.locator("#dashboardOverviewApp .ebgp-peer-list-panel")).toBeVisible();
+  const peerRow = page.locator("#dashboardOverviewApp .ebgp-peer-row").filter({ hasText: "Documentation Peer With An Intentionally Long Remote Name" });
+  await expect(peerRow).toBeVisible();
+  const peerNameLayout = await peerRow.locator("strong").evaluate((element) => ({
     clipped: element.scrollHeight > element.clientHeight,
     lineClamp: getComputedStyle(element).webkitLineClamp,
   }));
   expect(peerNameLayout.clipped).toBe(false);
   expect(peerNameLayout.lineClamp).toBe("none");
-  const peerBox = await peerCanvasNode.boundingBox();
-  if (peerBox) {
-    await page.mouse.move(peerBox.x + 20, peerBox.y + 20);
-    await page.mouse.down();
-    await page.mouse.move(peerBox.x + 55, peerBox.y + 45, { steps: 4 });
-    await page.mouse.up();
-    const movedPeerBox = await peerCanvasNode.boundingBox();
-    expect(movedPeerBox?.x).not.toBe(peerBox.x);
-  }
+  await expect(page.locator("#dashboardOverviewApp .ebgp-peer-detail-panel")).toContainText("Documentation Peer With An Intentionally Long Remote Name");
   await expect(page.locator("#dashboardRuntimeApp .protocol-table-wrap")).toContainText("e2e_peer");
   await expect(page.locator("#sessionEditorApp #protocolName")).toHaveValue("e2e_peer");
   await expect(page.locator('#sessionEditorApp [data-field="localAsn"] input')).toHaveValue("64512");

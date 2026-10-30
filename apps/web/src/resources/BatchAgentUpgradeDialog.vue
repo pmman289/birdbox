@@ -145,10 +145,10 @@ onBeforeUnmount(() => { openSequence += 1; stopPolling(); window.removeEventList
 <style scoped>
 .batch-upgrade-dialog { max-width: 620px; width: min(calc(100vw - 32px), 620px); padding: 22px; }
 .batch-upgrade-list { display: grid; gap: 6px; margin: 16px 0; max-height: 320px; overflow: auto; }
-.batch-upgrade-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--line, #d7dce2); border-radius: 6px; }
-.batch-upgrade-row small { color: var(--muted, #68707a); }
+.batch-upgrade-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; }
+.batch-upgrade-row small { color: var(--muted); }
 .batch-upgrade-summary { display: flex; gap: 16px; margin: 14px 0; font-variant-numeric: tabular-nums; }
-.batch-state-success, .ready { color: #18794e; }
-.batch-state-failed { color: #b42318; }
-.batch-state-skipped, .muted { color: #8a5a00; }
+.batch-state-success, .ready { color: var(--green); }
+.batch-state-failed { color: var(--red); }
+.batch-state-skipped, .muted { color: var(--amber); }
 </style>

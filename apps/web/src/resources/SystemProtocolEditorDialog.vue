@@ -39,6 +39,17 @@ const policySummary = (p: ChannelPolicy) => p.mode === "custom" ? "自定义 Fil
 const tableCatalog = ref<Array<{ nodeId: string; name: string; family: AddressFamily }>>([]);
 const tableSuggestions = (family: AddressFamily) => [...new Set(tableCatalog.value.filter(t => t.family === family && targetIds.value.every(id => tableCatalog.value.some(other => other.nodeId === id && other.name === t.name && other.family === family))).map(t => t.name))];
 const nameForNode = (id: string) => nodes.value.find(n => n.id === id)?.name ?? id;
+function draftPolicy(value: ChannelPolicy | undefined, direction: "import" | "export"): ChannelPolicy {
+  const fallback = defaultPolicy(direction);
+  const source = value ? clone(value) : fallback;
+  return {
+    ...fallback,
+    ...source,
+    steps: Array.isArray(source.steps) ? source.steps : [],
+    filterId: source.filterId ?? null,
+    inlineFilterSource: source.inlineFilterSource ?? null,
+  };
+}
 function body() {
   return kind.value === "directs" ? { label: draft.label, name: draft.name, nodeId: draft.nodeId, interfaces: [...draft.interfaces], ipv4: draft.ipv4, ipv6: draft.ipv6, enabled: draft.enabled, checkLink: draft.checkLink }
     : { label: draft.label, name: draft.name, nodeIds: draft.kernelGlobal ? null : [...draft.nodeIds], ipv4: draft.ipv4, ipv6: draft.ipv6, importPolicy: clone(draft.importPolicies.ipv4), importPolicies: clone(draft.importPolicies), tables: clone(draft.tables), exportPolicy: clone(draft.exportPolicies.ipv4.policy), exportPolicies: clone(draft.exportPolicies), table: draft.table, scanTime: draft.scanTime, persist: draft.persist, enabled: draft.enabled, learn: draft.learn, gracefulRestart: draft.gracefulRestart, metric: draft.metric, mergePaths: draft.mergePaths };
@@ -56,7 +67,16 @@ function reset(resource: DirectProtocol | KernelProtocol | null) {
     Object.assign(draft, { nodeId: item?.nodeId ?? selectedNodeId, interfaces: [...item?.interfaces ?? []], checkLink: item?.checkLink ?? false });
   } else {
     const item = resource as KernelProtocol | null;
-    Object.assign(draft, { kernelGlobal: item?.nodeIds === null, nodeIds: [...item?.nodeIds ?? [selectedNodeId].filter(Boolean)], importPolicies: { ipv4: clone(item?.importPolicies?.ipv4 ?? item?.importPolicy ?? defaultPolicy("import")), ipv6: clone(item?.importPolicies?.ipv6 ?? item?.importPolicy ?? defaultPolicy("import")) }, tables: { ipv4: clone(item?.tables?.ipv4 ?? { name: "master4", source: "existing" }), ipv6: clone(item?.tables?.ipv6 ?? { name: "master6", source: "existing" }) }, exportPolicies: { ipv4: clone(item?.exportPolicies?.ipv4 ?? { ...defaultExport(), policy: item?.exportPolicy ?? defaultPolicy("export") }), ipv6: clone(item?.exportPolicies?.ipv6 ?? { ...defaultExport(), policy: item?.exportPolicy ?? defaultPolicy("export") }) }, table: item?.table ?? null, scanTime: item?.scanTime ?? 60, persist: item?.persist ?? false, learn: item?.learn ?? false, gracefulRestart: item?.gracefulRestart ?? false, metric: item?.metric ?? null, mergePaths: item?.mergePaths ?? null });
+    const fallbackExport = draftPolicy(item?.exportPolicy, "export");
+    const exportPolicy = (family: AddressFamily): KernelExportPolicy => {
+      const saved = item?.exportPolicies?.[family];
+      return {
+        mode: saved?.mode === "krt_prefsrc" ? "krt_prefsrc" : "visual",
+        policy: draftPolicy(saved?.policy ?? fallbackExport, "export"),
+        prefSrc: saved?.prefSrc ?? null,
+      };
+    };
+    Object.assign(draft, { kernelGlobal: item?.nodeIds === null, nodeIds: [...item?.nodeIds ?? [selectedNodeId].filter(Boolean)], importPolicies: { ipv4: draftPolicy(item?.importPolicies?.ipv4 ?? item?.importPolicy, "import"), ipv6: draftPolicy(item?.importPolicies?.ipv6 ?? item?.importPolicy, "import") }, tables: { ipv4: clone(item?.tables?.ipv4 ?? { name: "master4", source: "existing" }), ipv6: clone(item?.tables?.ipv6 ?? { name: "master6", source: "existing" }) }, exportPolicies: { ipv4: exportPolicy("ipv4"), ipv6: exportPolicy("ipv6") }, table: item?.table ?? null, scanTime: item?.scanTime ?? 60, persist: item?.persist ?? false, learn: item?.learn ?? false, gracefulRestart: item?.gracefulRestart ?? false, metric: item?.metric ?? null, mergePaths: item?.mergePaths ?? null });
   }
   baseline.value = signature.value;
 }
@@ -98,6 +118,23 @@ function selectDirectNode() { draft.interfaces = []; void loadInterfaces(draft.n
 function toggleInterface(name: string) { draft.interfaces = draft.interfaces.includes(name) ? draft.interfaces.filter(i => i !== name) : [...draft.interfaces, name]; }
 function setManualInterfaces(e: Event) { draft.interfaces = [...new Set((e.target as HTMLInputElement).value.split(",").map(i => i.trim()).filter(Boolean))]; }
 function toggleNode(id: string) { draft.nodeIds = draft.nodeIds.includes(id) ? draft.nodeIds.filter(i => i !== id) : [...draft.nodeIds, id]; }
+function kernelPolicy(family: AddressFamily, direction: "import" | "export"): ChannelPolicy {
+  return direction === "import" ? draft.importPolicies[family] : draft.exportPolicies[family].policy;
+}
+function setKernelPolicy(family: AddressFamily, direction: "import" | "export", policy: ChannelPolicy): void {
+  if (direction === "import") draft.importPolicies[family] = policy;
+  else draft.exportPolicies[family].policy = policy;
+}
+function quickEditKernelPolicy(family: AddressFamily, direction: "import" | "export"): void {
+  const policy = kernelPolicy(family, direction);
+  if (direction === "export") draft.exportPolicies[family].mode = "visual";
+  setKernelPolicy(family, direction, { ...policy, mode: "custom", filterId: null, inlineFilterSource: policy.inlineFilterSource ?? "" });
+  void nextTick(() => {
+    const details = dialog.value?.querySelector<HTMLDetailsElement>(`details[data-kernel-policy="${family}-${direction}"]`);
+    if (details) details.open = true;
+    details?.querySelector<HTMLTextAreaElement>(`[data-policy-editor="kernel-${family}-${direction}"]`)?.focus();
+  });
+}
 function validate() {
   if (!form.value?.reportValidity()) return false;
   if (!targetIds.value.length) { error.value = "请至少选择一个下发节点"; return false; }
@@ -191,12 +228,12 @@ onBeforeUnmount(() => { contextGeneration++; invalidate(); stopInterfaces(); win
               <div v-for="family in enabledKernelFamilies" :key="`kernel-table-${family}`" class="system-kernel-table">
                 <h4>{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} 路由表</h4><div class="dialog-grid"><label class="protocol-form-field">BIRD 表来源<select v-model="draft.tables[family].source" :aria-label="`${family} BIRD 表来源`"><option value="existing">引用已有表</option><option value="managed">由 Birdbox 创建</option></select></label><label class="protocol-form-field" :for="`kernelBirdTable-${family}`">BIRD 路由表<input :id="`kernelBirdTable-${family}`" v-model.trim="draft.tables[family].name" :list="`kernelTables-${family}`" required pattern="[A-Za-z_][A-Za-z0-9_]*"><datalist :id="`kernelTables-${family}`"><option v-for="table in tableSuggestions(family)" :key="table" :value="table" /></datalist></label></div>
                 <p class="protocol-help">{{ draft.tables[family].source === 'managed' ? '管理表与 Pipe / Static 共享去重；停用协议后仍保留表。' : '可选库存已知表或填写节点上已有的表名，最终由节点预检验证。' }}</p>
-                <details class="protocol-disclosure system-policy"><summary>Linux → BIRD（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Import）<span class="protocol-policy-summary">{{ policySummary(draft.importPolicies[family]) }}</span></summary><p class="protocol-help">从内核学习其它程序安装的路由还需在高级设置启用 learn。</p><PolicyEditor :family="family" direction="import" :policy="draft.importPolicies[family]" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" @update:policy="draft.importPolicies[family] = $event" /></details>
-              <details class="protocol-disclosure system-policy"><summary>BIRD → Linux（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Export）<span class="protocol-policy-summary">{{ draft.exportPolicies[family].mode === 'krt_prefsrc' ? `源地址 ${draft.exportPolicies[family].prefSrc || '未填写'}` : policySummary(draft.exportPolicies[family].policy) }}</span></summary>
+                <div class="kernel-policy-row"><details class="protocol-disclosure system-policy" :data-kernel-policy="`${family}-import`"><summary>Linux → BIRD（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Import）<span class="protocol-policy-summary">{{ policySummary(draft.importPolicies[family]) }}</span></summary><p class="protocol-help">从内核学习其它程序安装的路由还需在高级设置启用 learn。</p><PolicyEditor :family="family" direction="import" :editor-key="`kernel-${family}-import`" inline-filter-label="当前 Kernel Filter" inline-filter-source-label="当前 Kernel Filter 规则" inline-filter-help="源码只绑定当前 Kernel 的该地址族 Import，不会创建共享 Filter。" :policy="draft.importPolicies[family]" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" @update:policy="draft.importPolicies[family] = $event" /></details><button class="secondary-button compact-command kernel-inline-filter-action" type="button" :aria-label="`${family} Import 直接编写 Filter`" @click="quickEditKernelPolicy(family, 'import')">{{ draft.importPolicies[family].inlineFilterSource !== null ? '编辑当前项 Filter' : '直接编写 Filter' }}</button></div>
+              <div class="kernel-policy-row"><details class="protocol-disclosure system-policy" :data-kernel-policy="`${family}-export`"><summary>BIRD → Linux（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }} Export）<span class="protocol-policy-summary">{{ draft.exportPolicies[family].mode === 'krt_prefsrc' ? `源地址 ${draft.exportPolicies[family].prefSrc || '未填写'}` : policySummary(draft.exportPolicies[family].policy) }}</span></summary>
                 <label class="protocol-form-field protocol-source-field">导出方式<select v-model="draft.exportPolicies[family].mode" :aria-label="`${family} Kernel 导出策略模式`"><option value="visual">可视化编辑</option><option value="krt_prefsrc">快速设置 krt_prefsrc</option></select></label>
                 <label v-if="draft.exportPolicies[family].mode === 'krt_prefsrc'" class="protocol-form-field protocol-source-field" :for="`kernelPrefSrc-${family}`">源地址（{{ family === 'ipv4' ? 'IPv4' : 'IPv6' }}）<input :id="`kernelPrefSrc-${family}`" v-model.trim="draft.exportPolicies[family].prefSrc" required :placeholder="family === 'ipv4' ? '192.0.2.1' : '2001:db8::1'"><small class="field-help">向 Linux 导出的路由指定首选源地址并接受全部路由。</small></label>
-                <PolicyEditor v-else :family="family" direction="export" :policy="draft.exportPolicies[family].policy" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" :allow-export-cidr="false" @update:policy="draft.exportPolicies[family].policy = $event" />
-              </details>
+                <PolicyEditor v-else :family="family" direction="export" :editor-key="`kernel-${family}-export`" inline-filter-label="当前 Kernel Filter" inline-filter-source-label="当前 Kernel Filter 规则" inline-filter-help="源码只绑定当前 Kernel 的该地址族 Export，不会创建共享 Filter。" :policy="draft.exportPolicies[family].policy" :export-define-id="null" :functions="functions" :filters="filters" :defines="[]" :disabled="pending" :show-policy-action="false" :allow-export-cidr="false" @update:policy="draft.exportPolicies[family].policy = $event" />
+              </details><button class="secondary-button compact-command kernel-inline-filter-action" type="button" :aria-label="`${family} Export 直接编写 Filter`" @click="quickEditKernelPolicy(family, 'export')">{{ draft.exportPolicies[family].policy.inlineFilterSource !== null ? '编辑当前项 Filter' : '直接编写 Filter' }}</button></div>
               </div>
             </section>
             <details class="protocol-disclosure"><summary>高级内核设置<span class="protocol-policy-summary">Linux 表 {{ draft.table ?? 'main' }} · 扫描 {{ draft.scanTime ?? '默认' }} 秒</span></summary><div class="dialog-grid"><label class="protocol-form-field">Linux 路由表<NullableNumberInput v-model="draft.table" min="1" max="4294967295" placeholder="留空使用 main" /></label><label class="protocol-form-field">扫描周期（秒）<NullableNumberInput v-model="draft.scanTime" min="1" max="86400" /></label><label class="protocol-form-field">默认 Metric<NullableNumberInput v-model="draft.metric" min="0" max="4294967295" placeholder="使用 BIRD 默认值" /></label><label class="protocol-form-field">ECMP 路径上限<NullableNumberInput v-model="draft.mergePaths" min="1" max="64" placeholder="留空关闭合并" /></label></div><label class="protocol-checkbox"><input v-model="draft.persist" type="checkbox">退出 BIRD 时保留内核路由（persist）</label><label class="protocol-checkbox"><input v-model="draft.learn" type="checkbox">学习其它程序安装的路由（learn）</label><label class="protocol-checkbox"><input v-model="draft.gracefulRestart" type="checkbox">平滑重启（graceful restart）</label><p class="protocol-help">Linux 路由表是系统 FIB，不是上方的 BIRD 表名；两侧表一一对应，每个地址族分别同步。</p></details>

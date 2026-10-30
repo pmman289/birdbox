@@ -1787,3 +1787,17 @@ Table customer6:
   assert.deepEqual(details.routes.map((route) => route.prefix), ["2001:db8:100::/48", "2001:db8:200::/48"]);
   assert.match(details.routes[0].details, /BGP\.next_hop: 2001:db8::2/);
 });
+
+test("parses a paged route window without losing route details", () => {
+  const raw = `Table master4:
+198.51.100.0/24 unicast [bgp 10:00:00] * (100)
+  via 192.0.2.1
+203.0.113.0/24 unicast [bgp 10:00:01] * (100)
+  via 192.0.2.2
+---BIRDBOX-ROUTE-TRUNCATED---`;
+  const details = parseRouteDetails(raw, "ipv4", 1, 1);
+  assert.deepEqual(details.routes.map((route) => route.prefix), ["203.0.113.0/24"]);
+  assert.equal(details.truncated, true);
+  const agentPage = parseRouteDetails(`---BIRDBOX-ROUTE-PAGED---\n${raw.split("\n").slice(2, 5).join("\n")}`, "ipv4", 1, 1);
+  assert.deepEqual(agentPage.routes.map((route) => route.prefix), ["203.0.113.0/24"]);
+});

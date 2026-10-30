@@ -760,7 +760,7 @@ export class NodeOnboardingService {
       const result = await this.createSetupScript({ ...node }, { preserveCredential: true });
       this.#options.addEvent("info", `已生成节点 ${node.name} 的重新安装脚本`, node.id);
       return result;
-    });
+    }, { allowPendingJournal: true });
   }
 
   async createAgentUpgradeScript(nodeId: string) {

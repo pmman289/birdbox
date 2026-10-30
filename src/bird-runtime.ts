@@ -32,6 +32,7 @@ interface RouteInspectionOptions {
   tableOnly?: boolean;
   target?: string;
   limit?: number;
+  offset?: number;
   table?: string | null;
 }
 
@@ -42,6 +43,7 @@ interface RouteInspectionResult {
   routes: RouteDetail[];
   truncated: boolean;
   limit: number;
+  offset: number;
   error: string | null;
 }
 
@@ -236,13 +238,17 @@ printf '%s\\n---BIRDBOX---\\n%s\\n---BIRDBOX-STATUS---\\nversion=%s\\nprotocols=
     : await executeNodeCommand(node, command, { timeout: Math.min(boundedTimeout, 12_000) });
   const [payload = "", statusRaw = ""] = result.stdout.split("---BIRDBOX-STATUS---");
   const [version = "", raw = ""] = payload.split("---BIRDBOX---");
+  const diagnostic = [result.stderr, raw]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join("\n");
   return {
     nodeId: node.id,
     reachable: result.ok,
     bird2: /BIRD version 2\./.test(version),
     version: version.trim() || null,
     protocols: parseProtocolStatuses(raw),
-    error: result.ok ? null : (result.stderr || "节点不可达"),
+    error: result.ok ? null : (diagnostic || "节点不可达"),
     raw: raw.trim(),
   };
 }
@@ -519,6 +525,8 @@ export async function inspectProtocolRoutes(
   assertValidation(direction === "import" || direction === "export", "路由方向不合法");
   const limit = options.limit ?? 200;
   assertValidation(Number.isSafeInteger(limit) && limit >= 1 && limit <= 1000, "路由明细数量限制不合法");
+  const offset = options.offset ?? 0;
+  assertValidation(Number.isSafeInteger(offset) && offset >= 0 && offset <= 1_000_000, "路由明细偏移量不合法");
   const table = normalizeOptionalName(options.table, "Channel 路由表名称") ?? (family === "ipv4" ? "master4" : "master6");
   const target = options.target?.trim() ?? "";
   assertValidation(!target || net.isIP(target) === (family === "ipv4" ? 4 : 6), "查询目标必须与协议地址族一致");
@@ -529,10 +537,13 @@ export async function inspectProtocolRoutes(
       protocolName: options.tableOnly ? undefined : protocolName,
       direction: options.tableOnly ? undefined : direction,
       ...(target ? { target } : {}),
+      limit,
+      offset,
     }, 25_000);
     return {
       ok: result.ok,
-      ...parseRouteDetails(result.stdout, family, limit),
+      ...parseRouteDetails(result.stdout, family, limit, offset),
+      offset,
       error: result.ok ? null : (result.stderr || result.stdout || "无法读取 BIRD 路由明细"),
     };
   }
@@ -546,15 +557,19 @@ trap cleanup_route_query EXIT HUP INT TERM
 output=$(
   (birdc -s '${node.socketPath}' '${query}' 2>&1; printf '%s' "$?" > "$status_file") |
   (
-    awk -v limit='${limit}' '
+    awk -v offset='${offset}' -v limit='${limit}' '
+      BEGIN { if (offset > 0) print "---BIRDBOX-ROUTE-PAGED---" }
       /^[[:space:]]*[[:xdigit:].:]+\\/[0-9]+[[:space:]]/ {
         route_count += 1
-        if (route_count > limit) {
+        if (route_count > offset + limit) {
           print "---BIRDBOX-ROUTE-TRUNCATED---"
           exit
         }
+        selected = route_count > offset
+        if (selected) print
+        next
       }
-      { print }
+      { if (route_count == 0 || (route_count > offset && route_count <= offset + limit)) print }
     '
     printf '%s' "$?" > "$filter_status_file"
   )
@@ -574,7 +589,8 @@ fi
   const result = await executeNodeCommand(node, command, { timeout: 20_000, maxBuffer: 2 * 1024 * 1024 });
   return {
     ok: result.ok,
-    ...parseRouteDetails(result.stdout, family, limit),
+    ...parseRouteDetails(result.stdout, family, limit, offset),
+    offset,
     error: result.ok ? null : (result.stderr || result.stdout || "无法读取 BIRD 路由明细"),
   };
 }

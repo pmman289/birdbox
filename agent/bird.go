@@ -26,6 +26,7 @@ const maxBirdConfig = 16 * 1024 * 1024
 var safeResourceName = regexp.MustCompile(`^define_[A-Za-z_][A-Za-z0-9_]*\.conf$`)
 var safeBirdName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var safeInterfaceName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
+var birdRouteHeader = regexp.MustCompile(`^[[:space:]]*[[:xdigit:].:]+/[0-9]+[[:space:]]`)
 var activeDeviceProtocol = regexp.MustCompile(`(?m)^\s*protocol\s+device(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{`)
 
 func interfaceNames(raw string) string {
@@ -1185,14 +1186,78 @@ func birdRouteQuery(params map[string]any) (string, bool) {
 	return command, true
 }
 
+// Keep route paging bounded at the Agent boundary as well as in the
+// controller. This avoids transferring an entire large BIRD table for every
+// page request while preserving the same marker consumed by the controller's
+// route parser.
+func pageBirdRoutes(raw string, offset, limit int) string {
+	if offset < 0 || limit < 1 {
+		return raw
+	}
+	lines := strings.Split(raw, "\n")
+	selected := make([]string, 0, len(lines))
+	if offset > 0 {
+		selected = append(selected, "---BIRDBOX-ROUTE-PAGED---")
+	}
+	routeCount := 0
+	selectedRoute := false
+	for _, line := range lines {
+		if birdRouteHeader.MatchString(line) {
+			routeCount++
+			if routeCount > offset+limit {
+				selected = append(selected, "---BIRDBOX-ROUTE-TRUNCATED---")
+				break
+			}
+			selectedRoute = routeCount > offset
+			if selectedRoute {
+				selected = append(selected, line)
+			}
+			continue
+		}
+		if routeCount == 0 || (selectedRoute && routeCount <= offset+limit) {
+			selected = append(selected, line)
+		}
+	}
+	return strings.Join(selected, "\n")
+}
+
+func routePageParam(params map[string]any, key string, defaultValue, max int) (int, bool) {
+	value, exists := params[key]
+	if !exists {
+		return defaultValue, true
+	}
+	var number int
+	switch typed := value.(type) {
+	case float64:
+		number = int(typed)
+		if typed != float64(number) {
+			return 0, false
+		}
+	case int:
+		number = typed
+	default:
+		return 0, false
+	}
+	if number < 0 || number > max {
+		return 0, false
+	}
+	return number, true
+}
+
 func birdRoutesTask(parent context.Context, params map[string]any, r result) result {
 	command, valid := birdRouteQuery(params)
 	if !valid {
 		r.Stderr, r.Code = "invalid route query parameters", "INVALID_ROUTE_QUERY"
 		return r
 	}
+	limit, limitOK := routePageParam(params, "limit", 200, 1000)
+	offset, offsetOK := routePageParam(params, "offset", 0, 1_000_000)
+	if !limitOK || limit < 1 || !offsetOK {
+		r.Stderr, r.Code = "invalid route paging parameters", "INVALID_ROUTE_PAGING"
+		return r
+	}
 	out := runBirdc(parent, params["socketPath"].(string), command)
-	r.Stdout, r.Stderr, r.OK, r.Code = out.stdout, out.stderr, out.ok, out.code
+	r.Stdout, r.Stderr, r.OK, r.Code = pageBirdRoutes(out.stdout, offset, limit), out.stderr, out.ok, out.code
 	return r
 }
 

@@ -530,6 +530,8 @@ export interface RouteDetailsResponse {
   routes: RouteDetail[];
   truncated: boolean;
   limit: number;
+  page: number;
+  pageSize: number;
 }
 
 export interface ProtocolDetailsResponse {

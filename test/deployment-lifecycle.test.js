@@ -63,6 +63,7 @@ test("serializes remote validation and deploys global resources through node lif
   const validationEntered = path.join(root, "validation-entered");
   const releaseValidation = path.join(root, "release-validation");
   const shellFailure = path.join(root, "shell-failure");
+  const socketFailure = path.join(root, "socket-failure");
   await fs.mkdir(dataDir, { recursive: true });
   await fs.mkdir(fakeBin, { recursive: true });
 
@@ -75,6 +76,10 @@ if [ -f "$BIRDBOX_SHELL_FAILURE" ]; then
   exit 126
 fi
 if printf '%s' "$command" | grep -q -- '---BIRDBOX---'; then
+  if [ -f "$BIRDBOX_SOCKET_FAILURE" ]; then
+    printf 'birdc: Unable to connect to server control socket (/run/bird/bird.ctl): Connection refused\n' >&2
+    exit 1
+  fi
   printf 'BIRD version 2.19.1\n---BIRDBOX---\n'
   exit 0
 fi
@@ -131,6 +136,7 @@ exit 0
       BIRDBOX_VALIDATION_ENTERED: validationEntered,
       BIRDBOX_RELEASE_VALIDATION: releaseValidation,
       BIRDBOX_SHELL_FAILURE: shellFailure,
+      BIRDBOX_SOCKET_FAILURE: socketFailure,
       PATH: `${fakeBin}:${process.env.PATH}`,
     },
     stdio: "ignore",
@@ -209,6 +215,17 @@ exit 0
   assert.equal(updatedNode.body.node.sshPort, 2200);
   assert.equal(updatedNode.body.node.igpAddress, "10.0.0.1");
   assert.match(await fs.readFile(fakeLog, "utf8"), /-p 2200 .*birdbox@replacement\.example/);
+
+  await fs.writeFile(socketFailure, "1\n");
+  const blockedNodeUpdate = await authenticatedRequest(`/api/nodes/${nodeId}`, {
+    method: "PUT",
+    body: JSON.stringify({ name: "Unavailable BIRD node" }),
+  });
+  assert.equal(blockedNodeUpdate.status, 422);
+  assert.match(blockedNodeUpdate.body.error, /Connection refused/);
+  const unchangedNode = await authenticatedRequest("/api/dashboard?nodeId=" + encodeURIComponent(nodeId));
+  assert.equal(unchangedNode.body.node.name, "Managed SSH node");
+  await fs.rm(socketFailure, { force: true });
 
   const peer = await authenticatedRequest(`/api/nodes/${nodeId}/peers`, {
     method: "POST",

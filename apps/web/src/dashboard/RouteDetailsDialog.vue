@@ -18,6 +18,9 @@ const result = ref<RouteDetailsResponse | null>(null);
 const pending = ref(false);
 const errorMessage = ref("");
 const cache = new Map<string, RouteDetailsResponse>();
+const page = ref(1);
+const pageSize = 200;
+const searchTerm = ref("");
 let requestId = 0;
 let controller: AbortController | null = null;
 
@@ -45,9 +48,14 @@ const countLabel = computed(() => {
     ? `${runtimeCount.value} 条路由 · 当前显示 ${result.value.routes.length} 条`
     : `${runtimeCount.value} 条路由`;
 });
+const filteredRoutes = computed(() => {
+  const term = searchTerm.value.trim().toLowerCase();
+  if (!term) return result.value?.routes ?? [];
+  return (result.value?.routes ?? []).filter((route) => `${route.prefix}\n${route.summary}\n${route.details}`.toLowerCase().includes(term));
+});
 
 function cacheKey(): string {
-  return `${family.value}:${direction.value}`;
+  return `${family.value}:${direction.value}:${page.value}`;
 }
 
 async function load(force = false): Promise<void> {
@@ -67,7 +75,7 @@ async function load(force = false): Promise<void> {
   result.value = null;
   try {
     const response = await api<RouteDetailsResponse>(
-      `/api/sessions/${encodeURIComponent(selectedPeer.session.id)}/routes?family=${family.value}&direction=${direction.value}`,
+      `/api/sessions/${encodeURIComponent(selectedPeer.session.id)}/routes?family=${family.value}&direction=${direction.value}&page=${page.value}&pageSize=${pageSize}`,
       { signal: controller.signal, timeoutMs: 30_000 },
     );
     if (currentRequest !== requestId) return;
@@ -87,12 +95,22 @@ async function load(force = false): Promise<void> {
 function selectFamily(next: AddressFamily): void {
   if (!enabledFamilies.value.includes(next) || family.value === next) return;
   family.value = next;
+  page.value = 1;
+  searchTerm.value = "";
   void load();
 }
 
 function selectDirection(next: Direction): void {
   if (direction.value === next) return;
   direction.value = next;
+  page.value = 1;
+  searchTerm.value = "";
+  void load();
+}
+
+function selectPage(next: number): void {
+  if (next < 1 || pending.value || (next > page.value && !result.value?.truncated)) return;
+  page.value = next;
   void load();
 }
 
@@ -106,6 +124,8 @@ function open(event: CustomEvent<{ peerId: string }>): void {
   peerId.value = selectedPeer.id;
   family.value = families[0] ?? "ipv4";
   direction.value = "import";
+  page.value = 1;
+  searchTerm.value = "";
   result.value = null;
   errorMessage.value = "";
   dialog.value?.showModal();
@@ -136,13 +156,16 @@ onBeforeUnmount(() => {
         <div class="route-segmented" role="group" aria-label="路由方向"><button type="button" :class="{ active: direction === 'import' }" :aria-pressed="direction === 'import'" @click="selectDirection('import')">导入</button><button type="button" :class="{ active: direction === 'export' }" :aria-pressed="direction === 'export'" @click="selectDirection('export')">导出</button></div>
       </div>
       <div class="route-dialog-meta"><span>{{ countLabel }}</span><span>{{ result?.table ? `Table ${result.table}` : "-" }}</span></div>
+      <nav v-if="result || pending" class="route-dialog-pagination" aria-label="路由分页"><button class="secondary-button" type="button" :disabled="pending || page <= 1" @click="selectPage(page - 1)">上一页</button><span>第 {{ page }} 页</span><button class="secondary-button" type="button" :disabled="pending || !result?.truncated" @click="selectPage(page + 1)">下一页</button></nav>
+      <div v-if="result && result.routes.length" class="route-dialog-search"><label>搜索当前页路由<input v-model="searchTerm" type="search" placeholder="前缀、下一跳或属性" aria-label="搜索当前页路由"></label><span>{{ filteredRoutes.length }} / {{ result.routes.length }} 条匹配</span></div>
       <div class="route-dialog-body" aria-live="polite">
         <div v-if="pending" class="route-dialog-state"><div class="route-loading-copy"><i aria-hidden="true"></i><span>正在读取 BIRD 路由</span></div></div>
         <div v-else-if="errorMessage" class="route-dialog-state error"><div><p>{{ errorMessage }}</p><button class="secondary-button" type="button" @click="load(true)">重试</button></div></div>
         <div v-else-if="result && result.routes.length === 0" class="route-dialog-state">{{ direction === "import" ? "没有已接受的导入路由" : "没有当前导出路由" }}</div>
         <template v-else-if="result">
-          <div v-if="result.truncated" class="route-list-notice">路由数量较多，仅显示前 {{ result.limit }} 个前缀</div>
-          <ol class="route-list"><li v-for="route in result.routes" :key="route.prefix" class="route-entry"><details><summary><code class="route-entry-prefix">{{ route.prefix }}</code><span class="route-entry-summary">{{ route.summary }}</span></summary><pre>{{ route.details || route.summary }}</pre></details></li></ol>
+          <div v-if="result.truncated" class="route-list-notice">路由数量较多，当前页显示 {{ result.limit }} 个前缀，可用“下一页”继续查看</div>
+          <div v-if="searchTerm.trim() && !filteredRoutes.length" class="route-dialog-state">当前页没有匹配的路由</div>
+          <ol v-else class="route-list"><li v-for="route in filteredRoutes" :key="route.prefix" class="route-entry"><details><summary><code class="route-entry-prefix">{{ route.prefix }}</code><span class="route-entry-summary">{{ route.summary }}</span></summary><pre>{{ route.details || route.summary }}</pre></details></li></ol>
         </template>
       </div>
     </div>

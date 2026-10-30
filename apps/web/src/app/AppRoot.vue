@@ -431,8 +431,8 @@ onBeforeUnmount(() => {
     </nav>
 
     <div id="sessionWorkspace" class="workspace-panel" role="tabpanel" aria-labelledby="sessionWorkspaceTab" :hidden="activeWorkspace !== 'sessionWorkspace'">
-      <div id="dashboardOverviewApp"><DashboardOverview /></div>
-      <div class="workspace-grid">
+      <div id="dashboardOverviewApp" class="dashboard-overview-host"><DashboardOverview /></div>
+      <div class="workspace-grid session-workspace-grid">
         <div id="sessionEditorApp"><SessionEditor /></div>
         <section class="inspect-section" aria-labelledby="inspectTitle">
           <div class="section-heading compact"><div><p class="eyebrow">运行详情</p><h2 id="inspectTitle">节点会话</h2></div><div id="sessionControlApp"><SessionControlButton /></div></div>

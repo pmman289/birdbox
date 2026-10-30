@@ -24,9 +24,19 @@ const props = withDefaults(defineProps<{
   disabled: boolean;
   showPolicyAction?: boolean;
   allowExportCidr?: boolean;
+  editorKey?: string;
+  resourceFilterLabel?: string;
+  inlineFilterLabel?: string;
+  inlineFilterSourceLabel?: string;
+  inlineFilterHelp?: string;
 }>(), {
   showPolicyAction: true,
   allowExportCidr: true,
+  editorKey: "",
+  resourceFilterLabel: "引用已有 Filter",
+  inlineFilterLabel: "当前项编写",
+  inlineFilterSourceLabel: "当前项 Filter 规则",
+  inlineFilterHelp: "源码仅绑定当前项，不会创建共享 Filter。",
 });
 
 const emit = defineEmits<{
@@ -249,20 +259,21 @@ function openResource(target: ResourceWorkspaceTarget): void {
 
     <div v-else class="policy-mode-fields">
       <div class="segmented-control" role="radiogroup" aria-label="Filter 来源">
-        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource === null" :disabled="disabled" @change="useResourceFilter"><span>引用已有 Filter</span></label>
-        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource !== null" :disabled="disabled" @change="useInlineFilter"><span>当前项编写</span></label>
+        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource === null" :disabled="disabled" @change="useResourceFilter"><span>{{ resourceFilterLabel }}</span></label>
+        <label><input type="radio" :name="`${family}-${direction}-filter-source`" :checked="policy.inlineFilterSource !== null" :disabled="disabled" @change="useInlineFilter"><span>{{ inlineFilterLabel }}</span></label>
       </div>
       <div v-if="policy.inlineFilterSource === null" class="field-label-row"><label>完整 Filter</label><button class="compact-icon manage-hint" type="button" title="前往资源管理 Tab 管理 Filter" aria-label="前往资源管理 Tab 管理 Filter" @click="openResource('filters')">?</button></div>
       <select v-if="policy.inlineFilterSource === null" :value="policy.filterId ?? ''" :disabled="disabled" required @change="setFilter(($event.currentTarget as HTMLSelectElement).value)">
         <option value="">选择 Filter</option>
         <option v-for="resource in filters" :key="resource.id" :value="resource.id">{{ resource.label ?? resource.name }} · {{ resource.name }} · {{ resourceScopeShortLabel(resource) }}</option>
       </select>
-      <div v-else class="field"><label>当前项 Filter 规则</label>
+      <div v-else class="field"><label>{{ inlineFilterSourceLabel }}</label>
         <div class="code-input inline-filter-code-input">
           <pre class="code-input-lines" aria-hidden="true">{{ inlineFilterLineNumbers }}</pre>
-          <textarea ref="inlineFilterEditor" :value="policy.inlineFilterSource" class="policy-source-editor" :disabled="disabled" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" placeholder="if net ~ [ 192.0.2.0/24 ] then accept;" @input="setInlineFilterSource(($event.currentTarget as HTMLTextAreaElement).value); updateInlineFilterCursor()" @keydown="handleInlineFilterKeydown" @click="updateInlineFilterCursor" @keyup="updateInlineFilterCursor"></textarea>
+          <textarea ref="inlineFilterEditor" :data-policy-editor="editorKey || undefined" :value="policy.inlineFilterSource" class="policy-source-editor" :disabled="disabled" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" placeholder="if net ~ [ 192.0.2.0/24 ] then accept;" @input="setInlineFilterSource(($event.currentTarget as HTMLTextAreaElement).value); updateInlineFilterCursor()" @keydown="handleInlineFilterKeydown" @click="updateInlineFilterCursor" @keyup="updateInlineFilterCursor"></textarea>
           <div class="code-input-status"><span>BIRD</span><span>Ln {{ inlineFilterLine }}, Col {{ inlineFilterColumn }}</span></div>
         </div>
+        <small class="field-help">{{ inlineFilterHelp }}</small>
       </div>
     </div>
   </section>

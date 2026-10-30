@@ -36,6 +36,29 @@ test('eBGP deployment failure retains content, conflict compares and rebases bef
  h.remoteChange();await preflightConflict(page);await page.getByRole('button',{name:'加载最新版本并对比',exact:true}).click();await expect(page.getByRole('region',{name:'eBGP 冲突对比'})).toContainText('64599');await expect(local(page)).toHaveValue('192.0.2.19');await page.getByRole('button',{name:'保留草稿，重新预检',exact:true}).click();await preflight(page);expect(h.previews.at(-1).inventoryRevision).toBe(2);await apply(page);expect(h.errors).toEqual([]);
 });
 async function preflightConflict(page:Page){await ready(page);await page.getByRole('button',{name:'预检配置',exact:true}).click();await expect(page.getByRole('button',{name:'加载最新版本并对比',exact:true})).toBeVisible();}
+test('eBGP peer workspace searches, filters and switches to mobile detail',async({page})=>{
+ await fixture(page);
+ const rows=page.locator('#dashboardOverviewApp .ebgp-peer-row');
+ await expect(rows).not.toHaveCount(0);
+ await page.locator('#ebgpPeerSearch').fill('Documentation Peer');
+ await expect(rows).toHaveCount(1);
+ await expect(rows.first()).toContainText('Documentation Peer With An Intentionally Long Remote Name');
+ await page.locator('#ebgpConfigFilter').selectOption('configured');
+ await expect(rows).toHaveCount(1);
+ await page.locator('#ebgpConfigFilter').selectOption('unconfigured');
+ await expect(page.locator('#dashboardOverviewApp .ebgp-list-empty')).toContainText('没有匹配');
+ await page.locator('#ebgpPeerSearch').fill('');
+ await page.locator('#ebgpConfigFilter').selectOption('all');
+ await page.locator('#ebgpStatusFilter').selectOption('established');
+ await expect(page.locator('#dashboardOverviewApp .ebgp-peer-list, #dashboardOverviewApp .ebgp-list-empty')).toHaveCount(1);
+ await page.locator('#ebgpStatusFilter').selectOption('all');
+ await page.setViewportSize({width:390,height:844});
+ await rows.first().click();
+ await expect(page.locator('#dashboardOverviewApp .ebgp-workbench')).toHaveClass(/mobile-detail-open/);
+ await expect(page.locator('#dashboardOverviewApp .ebgp-peer-detail-panel')).toBeVisible();
+ await page.getByRole('button',{name:/返回 Peer 列表/}).click();
+ await expect(page.locator('#dashboardOverviewApp .ebgp-workbench')).not.toHaveClass(/mobile-detail-open/);
+});
 test('eBGP discards stale preview, rejects invalid configuration, and remains within 375/390/430px',async({page})=>{
  const h=await fixture(page);await ready(page);h.hold();await local(page).fill('192.0.2.31');await expect.poll(()=>h.previews.some(p=>p.localAddress==='192.0.2.31')).toBe(true);await local(page).fill('192.0.2.32');h.release();await expect(page.locator('#localConfig')).toContainText('192.0.2.32');await expect(page.getByTestId('session-draft-state')).toHaveText('有未应用修改');
  for(const width of[375,390,430]){await page.setViewportSize({width,height:844});const geometry=await page.locator('#sessionEditorApp').evaluate(el=>({doc:document.documentElement.scrollWidth,view:document.documentElement.clientWidth,width:el.getBoundingClientRect().width}));expect(geometry.doc).toBeLessThanOrEqual(geometry.view);expect(geometry.width).toBeLessThanOrEqual(width);await expect(page.getByRole('button',{name:'应用会话变更',exact:true})).toBeVisible();}

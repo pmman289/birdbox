@@ -349,13 +349,19 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
 
   app.get<{
     Params: { sessionId: string };
-    Querystring: { family?: string; direction?: string };
+    Querystring: { family?: string; direction?: string; page?: string; pageSize?: string };
   }>("/api/sessions/:sessionId/routes", async (request, reply) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(request.params.sessionId)) throw routeError(404, "接口不存在");
     const family = String(request.query.family ?? "").toLowerCase();
     const direction = String(request.query.direction ?? "").toLowerCase();
     if (family !== "ipv4" && family !== "ipv6") throw routeError(400, "路由地址族必须是 ipv4 或 ipv6");
     if (direction !== "import" && direction !== "export") throw routeError(400, "路由方向必须是 import 或 export");
+    const page = request.query.page === undefined ? 1 : Number(request.query.page);
+    const pageSize = request.query.pageSize === undefined ? 200 : Number(request.query.pageSize);
+    if (!Number.isSafeInteger(page) || page < 1 || page > 5_000) throw routeError(400, "路由页码必须是 1 到 5000 之间的整数");
+    if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 200) throw routeError(400, "每页路由数量必须是 1 到 200 之间的整数");
+    const offset = (page - 1) * pageSize;
+    if (!Number.isSafeInteger(offset) || offset > 1_000_000) throw routeError(400, "路由页码超出可查询范围");
     const state = await options.store.read();
     const session = state.sessions.find((item) => item.id === request.params.sessionId);
     if (!session) throw routeError(404, "会话不存在");
@@ -363,7 +369,7 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
     const channel = session.channels[family];
     if (!channel.enabled) throw routeError(409, `会话未启用 ${family === "ipv4" ? "IPv4" : "IPv6"} Channel`);
     const node = findNode(state, session.nodeId);
-    const result = await inspectProtocolRoutes(node, session.protocolName, family, direction, { table: channel.table });
+    const result = await inspectProtocolRoutes(node, session.protocolName, family, direction, { table: channel.table, limit: pageSize, offset });
     if (!result.ok) throw routeError(502, result.error || "无法读取 BIRD 路由明细");
     const payload: RouteDetailsResponse = {
       session: { id: session.id, protocolName: session.protocolName },
@@ -373,6 +379,8 @@ export const sessionRuntimeRoutes: FastifyPluginAsync<SessionRuntimeRoutesOption
       routes: result.routes,
       truncated: result.truncated,
       limit: result.limit,
+      page,
+      pageSize,
     };
     return jsonReply(reply, 200, payload);
   });

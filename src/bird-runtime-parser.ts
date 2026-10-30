@@ -114,14 +114,17 @@ export function extractProtocolDetails(raw: unknown, protocolName: string): stri
   return lines.slice(header.index, next?.index ?? lines.length).join("\n").trim();
 }
 
-export function parseRouteDetails(raw: unknown, family: AddressFamily, limit = 200): ParsedRouteDetails {
+export function parseRouteDetails(raw: unknown, family: AddressFamily, limit = 200, offset = 0): ParsedRouteDetails {
   if (family !== "ipv4" && family !== "ipv6") validationError("路由地址族不合法");
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) validationError("路由明细数量限制不合法");
+  if (!Number.isSafeInteger(offset) || offset < 0) validationError("路由明细偏移量不合法");
   const expectedFamily = family === "ipv4" ? 4 : 6;
   const routes: RouteDetail[] = [];
   let current: PendingRoute | null = null;
   let table: string | null = null;
   let truncated = false;
+  let routeCount = 0;
+  let effectiveOffset = offset;
   const pushCurrent = (): void => {
     if (!current) return;
     routes.push({ ...current, details: current.details.join("\n").trim() });
@@ -129,6 +132,13 @@ export function parseRouteDetails(raw: unknown, family: AddressFamily, limit = 2
   };
 
   for (const inputLine of String(raw ?? "").split(/\r?\n/)) {
+    if (inputLine.trim() === "---BIRDBOX-ROUTE-PAGED---") {
+      // New Agents trim skipped routes before sending the response. Older
+      // Agents send the complete output, so only the explicit marker changes
+      // the parser's offset behavior.
+      effectiveOffset = 0;
+      continue;
+    }
     if (inputLine.trim() === "---BIRDBOX-ROUTE-TRUNCATED---") {
       truncated = true;
       continue;
@@ -144,6 +154,10 @@ export function parseRouteDetails(raw: unknown, family: AddressFamily, limit = 2
     const prefix = routeMatch?.[1];
     if (prefix && net.isIP(prefix.slice(0, prefix.lastIndexOf("/"))) === expectedFamily) {
       pushCurrent();
+      routeCount += 1;
+      if (routeCount <= effectiveOffset) {
+        continue;
+      }
       if (routes.length >= limit) {
         truncated = true;
         continue;

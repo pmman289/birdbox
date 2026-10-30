@@ -2,12 +2,13 @@ import { test, expect, type Page } from '@playwright/test';
 test.afterEach(async ({ page }) => { await page.unrouteAll({ behavior: 'ignoreErrors' }); await page.request.post('/api/auth/logout'); });
 async function fixture(page: Page, kind: 'directs' | 'kernels') {
  const title = kind === 'directs' ? 'Direct' : 'Kernel', collection = kind === 'directs' ? 'directProtocols' : 'kernelProtocols';
- const policy = (action: string) => ({ mode: 'form', formAction: action, steps: [], filterId: null });
+ const policy = (action: string) => ({ mode: 'form', formAction: action, steps: [], filterId: null, inlineFilterSource: null });
  let resources: any[] = [{ id: 'system_demo', name: `demo_${kind}`, label: '业务路由', enabled: true, ipv4: true, ipv6: true, ...(kind === 'directs' ? { nodeId: 'local', interfaces: ['eth0'], checkLink: false } : { nodeIds: ['local'], importPolicy: policy('none'), exportPolicy: policy('all'), exportPolicies: { ipv4: { mode: 'visual', policy: policy('all'), prefSrc: null }, ipv6: { mode: 'visual', policy: policy('none'), prefSrc: null } }, table: null, scanTime: 60, persist: false }) }];
  let revision = 1, fail = '', hold = false, valid = true;
  let release: () => void = () => {}; let barrier = Promise.resolve();
- const writes: any[] = [], errors: string[] = [], previews: any[] = [];
+ const writes: any[] = [], errors: string[] = [], previews: any[] = [], filterWrites: string[] = [];
  page.on('pageerror', e => errors.push(e.message));
+ page.on('request', request => { const pathname = new URL(request.url()).pathname; if (pathname === '/api/filters' || pathname.startsWith('/api/filters/')) filterWrites.push(request.method()); });
  await page.route('**/api/dashboard**', async route => { const response = await route.fetch(); const data = await response.json(); data.inventory[collection] = resources; await route.fulfill({ response, json: data }); });
  await page.route(`**/api/${kind}/editor-context*`, route => { const id = new URL(route.request().url()).searchParams.get('id'); return route.fulfill({ json: { inventoryRevision: revision, resource: resources.find(r => r.id === id) ?? null } }); });
  await page.route('**/api/nodes/*/interfaces', route => route.fulfill({ status: 503, json: { error: '节点接口目录离线' } }));
@@ -27,7 +28,7 @@ async function fixture(page: Page, kind: 'directs' | 'kernels') {
  await page.route(`**/api/${kind}/*/routes*`, route => route.fulfill({ json: { resourceId: 'system_demo', nodeId: 'local', table: new URL(route.request().url()).searchParams.get('family') === 'ipv6' ? 'master6' : 'master4', routes: [{ prefix: '198.51.100.0/24', summary: 'via 192.0.2.2', details: 'BGP.local_pref: 150' }], truncated: true } }));
  await page.goto('/'); await expect(page.locator('#authTitle')).toHaveText(/^(设置管理密码|登录 Birdbox)$/); await page.locator('#authPassword').fill('playwright-admin-password'); if (await page.locator('#authTitle').textContent() === '设置管理密码') await page.locator('#authConfirmation').fill('playwright-admin-password'); await page.locator('#authSubmitButton').click(); await expect(page.locator('#appMain')).toBeVisible();
  await page.locator('#resourceWorkspaceTab').click(); await page.locator(`#resource${title}sTab`).click();
- return { writes, errors, previews, title, fail(code = 'STATE_CONFLICT') { fail = code; }, invalid() { valid = false; }, hold() { hold = true; barrier = new Promise(resolve => { release = resolve; }); }, release() { hold = false; release(); } };
+ return { writes, errors, previews, filterWrites, title, fail(code = 'STATE_CONFLICT') { fail = code; }, invalid() { valid = false; }, hold() { hold = true; barrier = new Promise(resolve => { release = resolve; }); }, release() { hold = false; release(); } };
 }
 async function edit(page: Page, title: string, kind: string) { await page.getByRole('button', { name: `编辑 ${title} demo_${kind}`, exact: true }).click(); await expect(page.locator('#systemProtocolDialog')).toBeVisible(); await expect(page.locator('#systemProtocolDialog .primary-button')).toBeEnabled(); }
 async function inspect(page: Page) { await page.getByRole('button', { name: '预检并查看变更', exact: true }).click(); await expect(page.locator('#systemProtocolPreview')).toBeVisible(); }
@@ -75,4 +76,36 @@ test('Kernel independent export families and 375/390/430px stable header/footer 
   await page.locator('#kernelPrefSrc-ipv4').fill(`192.0.2.${width === 375 ? 2 : width === 390 ? 3 : 4}`);
  }
  expect(h.previews[0].exportPolicies).toMatchObject({ ipv4: { prefSrc: '192.0.2.1' }, ipv6: { prefSrc: '2001:db8::1' } }); expect(h.errors).toEqual([]);
+});
+
+test('Kernel exposes independent inline Filter quick editors for all families and directions', async ({ page }) => {
+ const h = await fixture(page, 'kernels'); await edit(page, h.title, 'kernels');
+ const cases = [
+  ['ipv4-import', 'ipv4 Import 直接编写 Filter', 'if net ~ [ 203.0.113.0/24 ] then accept;\nreject;'],
+  ['ipv6-import', 'ipv6 Import 直接编写 Filter', 'if net ~ [ 2001:db8:1::/48 ] then accept;\nreject;'],
+  ['ipv4-export', 'ipv4 Export 直接编写 Filter', 'if net ~ [ 198.51.100.0/24 ] then accept;\nreject;'],
+  ['ipv6-export', 'ipv6 Export 直接编写 Filter', 'if net ~ [ 2001:db8:2::/48 ] then accept;\nreject;'],
+ ] as const;
+ for (const [key, action, source] of cases) {
+  if (key === 'ipv4-export') { await page.locator('[data-kernel-policy="ipv4-export"] > summary').click(); await page.getByLabel('ipv4 Kernel 导出策略模式').selectOption('krt_prefsrc'); }
+  const button = page.getByRole('button', { name: action, exact: true });
+  await expect(button).toBeVisible(); await button.click();
+  const editor = page.locator(`[data-policy-editor="kernel-${key}"]`);
+  await expect(editor).toBeVisible(); await expect(editor).toBeFocused(); await editor.fill(source);
+  await expect(page.locator(`[data-kernel-policy="${key}"]`)).toHaveAttribute('open', '');
+ }
+ await page.setViewportSize({ width: 390, height: 844 });
+ await expect(page.locator('[data-policy-editor="kernel-ipv6-export"]')).toBeVisible();
+ await inspect(page);
+ expect(h.previews.at(-1)).toMatchObject({
+  importPolicies: {
+   ipv4: { mode: 'custom', filterId: null, inlineFilterSource: cases[0][2] },
+   ipv6: { mode: 'custom', filterId: null, inlineFilterSource: cases[1][2] },
+  },
+  exportPolicies: {
+   ipv4: { mode: 'visual', policy: { mode: 'custom', filterId: null, inlineFilterSource: cases[2][2] } },
+   ipv6: { mode: 'visual', policy: { mode: 'custom', filterId: null, inlineFilterSource: cases[3][2] } },
+  },
+ });
+ expect(h.filterWrites).toEqual([]); expect(h.errors).toEqual([]);
 });

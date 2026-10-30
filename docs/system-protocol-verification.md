@@ -4,6 +4,8 @@ Direct 与 Kernel 采用服务端完整配置预检，再明确确认应用。�
 
 Direct 提供接口发现和手动回退、双栈、check link。Kernel 区分 BIRD 路由表与 Linux table ID，支持双栈独立 Import/Export、管理表、learn、metric、merge paths、graceful restart 和 persist。高级配置及策略默认折叠，新建默认当前节点。管理表与其它资源按节点去重。
 
+Kernel 每个地址族的 Import 和 Export 策略标题旁都提供“直接编写 Filter”入口。点击后会展开对应策略并聚焦代码输入框；源码分别保存到当前 Kernel 的内嵌策略中，不创建共享 Filter，也不会出现在 Filter 资源列表。切换回“引用已有 Filter”时，服务端只保留共享 Filter 引用。
+
 运行态独立显示协议状态、节点错误及路由查询，不覆盖配置草稿。编辑器标题和操作栏固定，375/390/430px 下内容独立滚动。
 
 ## 已执行验证（2026-10-19）

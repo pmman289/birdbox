@@ -229,10 +229,16 @@ for (const transport of ["agent", "ssh"]) {
     const snapshot = structuredClone(inventory);
     const oldToken = await broker.issueToken(nodeId);
     let lockEntries = 0;
+    const lockOptions = [];
     const service = new NodeOnboardingService({
       store: { read: async () => inventory },
       deploymentService: {},
-      withDeploymentLock: async (operation) => { lockEntries += 1; return operation(); },
+      withDeploymentLock: async (operation, options) => {
+        lockEntries += 1;
+        lockOptions.push(options);
+        if (!options?.allowPendingJournal) throw new Error("未完成部署恢复，暂不接受新的部署");
+        return operation();
+      },
       controllerPublicKey: () => "ssh-ed25519 test-controller-key birdbox",
       makeId: () => { throw new Error("must reuse existing identity"); },
       addEvent: () => ({ timestamp: "", level: "warning", message: "", nodeId }), getEvents: () => [],
@@ -252,6 +258,7 @@ for (const transport of ["agent", "ssh"]) {
     assert.doesNotMatch(response.payload.script, /wrong_node|wrong.conf/);
     assert.deepEqual(inventory, snapshot);
     assert.ok(lockEntries > 0);
+    assert.equal(lockOptions.at(-1)?.allowPendingJournal, true);
     assert.equal((await shellSyntax(response.payload.script)).code, 0);
     const deliveryToken = response.payload.setupScriptUrl.split("/").pop();
     assert.equal(await service.getSetupScript(deliveryToken), response.payload.script);
